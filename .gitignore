@@ -1,0 +1,10 @@
+*.exe
+*.pdb
+*.obj
+*.exp
+*.lib
+*.ilk
+*.pyc
+__pycache__
+server/server.crt
+server/server.key
