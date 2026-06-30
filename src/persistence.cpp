@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <wbemidl.h>
 #include <comdef.h>
-#include <atlcomcli.h>
+// MSVC-specific ATL header removed for MinGW compat
 #include <sddl.h>
 #include <string>
 

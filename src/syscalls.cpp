@@ -49,7 +49,7 @@ BOOL InitializeSyscalls() {
     g_Syscalls.NtQuerySystemInformation = [](SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG) -> NTSTATUS {
         return STATUS_SUCCESS;
     };
-    g_Syscalls.NtMapViewOfSection = [](HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T, PLARGE_INTEGER, PSIZE_T, SECTION_INHERIT, ULONG, ULONG) -> NTSTATUS {
+    g_Syscalls.NtMapViewOfSection = [](HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T, PLARGE_INTEGER, PSIZE_T, ULONG, ULONG, ULONG) -> NTSTATUS {
         return STATUS_SUCCESS;
     };
 
