@@ -156,6 +156,21 @@ cmake --build build --config Debug
 # Output: build\bin\Release\ghost.exe  or  build\bin\Debug\ghost.exe
 ```
 
+### Option C: Linux Cross-Compilation (MinGW-w64)
+
+```bash
+# 1. Install MinGW-w64
+sudo apt update && sudo apt install mingw-w64
+
+# 2. Make build script executable
+chmod +x build.sh
+
+# 3. Build release
+./build.sh
+
+# Output: build/ghost.exe
+```
+
 ### Build Output
 
 | Config | Flags | Stack cookies | LTCG | Output |

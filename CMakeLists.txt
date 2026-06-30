@@ -15,12 +15,19 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Compiler flags
-set(CMAKE_CXX_FLAGS "/W4 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /EHsc")
-set(CMAKE_CXX_FLAGS_RELEASE "/O2 /GL /GS-")
-set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /DDEBUG")
-
-# Linker flags — release uses LTCG and strips relocs
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "/W4 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /EHsc")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /GL /GS-")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /DDEBUG")
+    # Linker flags — release uses LTCG and strips relocs
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+elseif(MINGW)
+    set(CMAKE_CXX_FLAGS "-Wall -Wextra -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -s")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -DDEBUG")
+    # Static link runtime, GUI subsystem (no console)
+    set(CMAKE_EXE_LINKER_FLAGS "-static -static-libgcc -static-libstdc++ -mwindows")
+endif()
 
 # ---------------------------------------------------------------------------
 # Executable
