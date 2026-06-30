@@ -77,30 +77,6 @@
 | T1106 | Native API | Direct syscalls via ntdll SSN extraction |
 | T1055.001 | Process Injection: DLL Injection | `InjectRemoteProcess` — NtAllocate/Write/Protect/CreateThread |
 | T1055.001 | Process Injection: Module Stomping | `StompModule` — overwrite .text of signed DLL |
-| T1134.004 | Access Token Manipulation: PPID Spoofing | `SpawnWithPPID` — `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` |
-| T1547.003 | Boot Persistence: WMI Event Subscription | `InstallWmiPersistence` — filter + consumer + binding |
-| T1562.001 | Impair Defenses: Disable AMSI | `PatchAMSI` — patch `AmsiScanBuffer` |
-| T1562.001 | Impair Defenses: Disable ETW | `PatchETW` — patch `EtwEventWrite` |
-| T1071.001 | Application Layer Protocol: HTTPS | WinHTTP beacon over port 443 with JSON |
-| T1573.001 | Encrypted Channel: Symmetric Crypto | XOR-encrypted C2 domain with hostname-derived key |
-| T1036.005 | Masquerading: Match Legitimate Name | PE version info mimics Windows Security Health Service |
-
----
-
-## Prerequisites
-
-### Implant (C++)
-
-| Requirement | Version | Notes |
-|---|---|---|
-| Visual Studio Build Tools | 2022 (v17+) | Need `cl.exe`, `rc.exe`, `link.exe` |
-| Windows SDK | 10.0.19041+ | For `winhttp.h`, `wbemidl.h`, `winternl.h` |
-| CMake *(optional)* | 3.20+ | Alternative to `build.ps1` |
-
-### Server (Python — local/lab use)
-
-| Requirement | Version |
-|---|---|
 | Python | 3.10+ |
 | OpenSSL | Any (for cert generation) |
 
