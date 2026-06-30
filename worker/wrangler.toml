@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────
+# GHOST C2 — Cloudflare Worker Configuration
+# ─────────────────────────────────────────────────────────
+# Deployment:
+#   1. Create KV namespace:  wrangler kv:namespace create GHOST_KV
+#   2. Copy the ID into kv_namespaces below
+#   3. Set secrets:
+#        wrangler secret put BEACON_TOKEN
+#        wrangler secret put OPERATOR_TOKEN
+#   4. Deploy:  wrangler deploy
+# ─────────────────────────────────────────────────────────
+
+name = "ghost-c2"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Workers Paid plan required for KV + higher limits
+# Free plan: 100k requests/day, 10ms CPU per request
+# Paid plan: 10M requests/month, 50ms CPU per request
+# usage_model = "bundled"
+
+# ── KV Namespace Binding ──────────────────────────────────
+# After creating the namespace, paste the ID here:
+#   wrangler kv:namespace create GHOST_KV
+#   wrangler kv:namespace create GHOST_KV --preview  (for dev)
+
+[[kv_namespaces]]
+binding = "GHOST_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+# preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+
+# ── Environment Variables ─────────────────────────────────
+# Non-secret config (secrets are set via `wrangler secret put`)
+[vars]
+SESSION_TIMEOUT_SECONDS = "600"
+CORS_ORIGIN = "*"
+
+# ── Dev settings ──────────────────────────────────────────
+[dev]
+port = 8787
+local_protocol = "https"

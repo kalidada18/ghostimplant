@@ -1,10 +1,35 @@
+# Build artifacts
 *.exe
 *.pdb
 *.obj
 *.exp
 *.lib
 *.ilk
+*.res
+build/
+dist/
+
+# Python
 *.pyc
-__pycache__
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+
+# Server secrets
 server/server.crt
 server/server.key
+server/ghost_c2.log
+server/ghost.db
+
+# Worker
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+.idea/
