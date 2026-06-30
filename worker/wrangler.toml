@@ -26,7 +26,7 @@ compatibility_date = "2024-01-01"
 
 [[kv_namespaces]]
 binding = "GHOST_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "1d45ef2515b7457a868344ed0cd6c260"
 # preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
 
 # ── Environment Variables ─────────────────────────────────
