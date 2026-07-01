@@ -1,146 +1,114 @@
-# 👻 GHOST
+# GHOST: Advanced Windows Implant & C2 Infrastructure
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Version-2.0.0-blue?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-informational?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/License-Restricted-red?style=for-the-badge" />
-</p>
+**GHOST** is an advanced, stealthy Windows implant and Command & Control (C2) infrastructure designed for authorized Red Team operations and defensive research. 
 
-<p align="center">
-  <b>Serverless implant. Fileless persistence. Double-encrypted C2.</b><br/>
-  <b>Built to survive modern EDRs. Built to stay invisible.</b>
-</p>
+It demonstrates state-of-the-art evasion techniques in a fully air-gapped or restricted environment, utilizing a serverless Cloudflare Worker backend for untraceable, highly-resilient communication.
 
-<p align="center">
-  <i>"You can't kill what you can't see."</i>
-</p>
+> [!WARNING]
+> **Authorized Use Only**: This software is provided strictly for academic research and authorized penetration testing. 
 
----
+## Features
 
-## The Problem With Every Other Implant
+### Infrastructure
+* **Serverless C2**: 100% serverless backend using Cloudflare Workers and KV storage. No static IPs to block, routes through Cloudflare's massive CDN.
+* **Asynchronous Beaconing**: "Dead drop" architecture. The implant and operator never communicate directly.
+* **Two-Tier Authentication**: Distinct, constant-time verified tokens for Implant Beacons (`BEACON_TOKEN`) and Operator CLI (`OPERATOR_TOKEN`).
+* **Operator CLI**: Interactive Python-based shell for session management, task queuing, and result polling.
 
-They beacon on a timer. They touch disk. They leave a module in memory that looks exactly like what it is.
+### Payload (Implant)
+* **Direct WinHTTP Transport**: Operates entirely over standard HTTPS (port 443) using the native Windows HTTP stack.
+* **Jittered Sleep**: Randomized beacon intervals (45s–180s) to disrupt behavioral network analysis.
+* **Encrypted Config**: C2 domain strings are XOR-encrypted and decrypted at runtime using a key derived from the target's FNV-1a hostname hash.
+* **GUI Subsystem**: Compiled as a Windows GUI application (`-mwindows`) to run silently without a console window.
+* **Statically Linked**: No external CRT dependencies (`/MT` or `-static`), standalone `.exe`.
 
-GHOST doesn't do any of that.
+## Architecture Diagram
 
-- **No static IPs.** Serverless. Cloudflare's global CDN is your infrastructure. There is nothing to trace.
-- **No disk artifacts.** Persistence lives in the WMI repository. The file system never knows it was here.
-- **No static imports.** Every API resolved at runtime via FNV-1a hash. Import tables are clean.
-- **No plain strings.** Every literal XOR-obfuscated at compile time. Strings don't survive analysis.
-- **No `sleep()` calls.** `NtDelayExecution` with randomised jitter. Behavioural signatures don't apply.
+```mermaid
+graph TD
+    subgraph Target Environment
+        A[GHOST Implant]
+    end
 
-Blue teams hunt patterns. GHOST doesn't have any.
+    subgraph Cloudflare Edge
+        B(Cloudflare Worker API)
+        C[(Workers KV Storage)]
+    end
+    
+    subgraph Operator Environment
+        D[Operator CLI]
+    end
 
----
-
-## Evasion Arsenal
-
-| Technique | What It Kills |
-|---|---|
-| **AMSI Bypass** — patch `AmsiScanBuffer` in-process | AV scan-on-execute, AMSI ETW provider |
-| **ETW Bypass** — `EtwEventWrite` no-op'd at runtime | All ETW-sourced telemetry, Sysmon EID 7 |
-| **Direct Syscalls (Hell's Gate + Halo's Gate)** — clean ntdll copy, SSN extraction, RWX stubs built in memory | User-mode hooking, EDR API interception |
-| **PPID Spoofing** — spawn under `svchost.exe` or any trusted parent | Sysmon EID 1, process tree anomaly detection |
-| **Module Stomping** — overwrite `.text` of a legitimate loaded DLL | Unbacked executable memory scanning |
-| **WMI Scriptless Persistence** — VBScript stored in WMI repository, never touches disk | File-based scans, autoruns, Sysmon EID 11 |
-| **AES-GCM Double Encryption** — hardware-derived key, TLS + application layer | DPI, TLS interception, traffic analysis |
-| **DNS Tunneling** — C2 fallback when 443 is blocked | Perimeter HTTPS filtering |
-| **Dropbox Exfiltration** — data leaves as cloud sync | DLP, network egress monitoring |
-
----
-
-## Infrastructure
-
-No servers. No IPs. No logs.
-Target ──── POST /beacon (AES-GCM) ──── Cloudflare Worker ──── KV Storage
-│
-Operator CLI ────────── HTTPS API
-
-Implant and operator never communicate directly. Dead-drop architecture. Even if the Worker is found, it proves nothing — all stored data is encrypted and the keys never leave your machine.
-
-- **Two-token auth** — `BEACON_TOKEN` and `OPERATOR_TOKEN` are separate, constant-time validated, rotated per engagement.
-- **Jittered beaconing** — 45–180s randomised intervals. No heartbeat pattern.
-- **Operator CLI** — Python-based, interactive session management, task queue, result retrieval.
-
----
-
-## Implant
-
-Pure WinHTTP over port 443. Blends with every TLS-capable application on the host. No console window (`-mwindows`). No external DLL dependencies — statically linked, single executable.
-
-C2 domain is XOR-encrypted inside the binary, decrypted at runtime using the FNV-1a hash of the hostname. Even if the binary is pulled from memory and analysed, the domain is not readable.
-
----
-
-## Build
-
-Configure `BEACON_TOKEN` and the XOR-encrypted domain in `src/c2.cpp` before compiling. See `START_GUIDE.md`.
-
-**Windows (MSVC):**
-```powershell
-.\build.ps1          # Release → build\bin\Release\ghost.exe
-.\build.ps1 -Debug   # Debug   → build\bin\Debug\ghost.exe
+    A -- "POST /beacon (Encrypted Task/Result Sync)" --> B
+    B <--> C
+    D -- "HTTPS API (Task Queuing / Polling)" --> B
 ```
 
-**Linux (MinGW cross-compile):**
-```bash
-sudo apt install mingw-w64
-chmod +x build.sh && ./build.sh   # → build/ghost.exe
-```
+## Quick Start
 
----
+For a complete step-by-step walkthrough of deployment, configuration, building, and running the implant, see the [**START_GUIDE.md**](START_GUIDE.md).
 
 ## Project Structure
+
+```text
 ghostimplant/
-├── src/
-│   ├── main.cpp          # Entry point, payload execution
-│   ├── c2.cpp            # WinHTTP transport, beacon logic
-│   ├── utils.cpp         # AES-GCM, FNV-1a, string handling
-│   └── *.cpp             # Syscall stubs, evasion modules
-├── include/
-├── worker/
-│   ├── src/index.ts      # Cloudflare Worker — C2 routing
-│   └── wrangler.toml
-├── server/
-│   ├── c2_cli.py         # Operator console
+├── src/                # Implant C++ Source
+│   ├── main.cpp        # Entry point and payload execution
+│   ├── c2.cpp          # WinHTTP transport and beaconing logic
+│   ├── utils.cpp       # Crypto, FNV-1a hashing, string conversions
+│   └── *.cpp           # Stub implementations (syscalls, evasion)
+├── include/            # C++ Headers
+├── worker/             # Cloudflare Worker Backend
+│   ├── src/index.ts    # Serverless C2 API routing and logic
+│   └── wrangler.toml   # Cloudflare deployment configuration
+├── server/             # Operator Environment
+│   ├── c2_cli.py       # Interactive command line interface
 │   └── requirements.txt
 ├── tools/
-│   └── encrypt_domain.py # XOR config generator
-├── build.ps1
-├── build.sh
-├── START_GUIDE.md
-└── SYSTEM_DESIGN.md
+│   └── encrypt_domain.py # Generates XOR payload config
+├── build.ps1           # Windows MSVC Build Script
+├── build.sh            # Linux MinGW Cross-Compile Script
+├── START_GUIDE.md      # Step-by-step deployment guide
+└── SYSTEM_DESIGN.md    # Advanced architectural and OPSEC documentation
+```
+
+## Compilation
+
+You must configure the `BEACON_TOKEN` and the XOR-encrypted domain in `src/c2.cpp` before compiling. See [START_GUIDE.md](START_GUIDE.md) for details.
+
+### Windows (MSVC)
+Requires Visual Studio Build Tools (Desktop development with C++).
+```powershell
+.\build.ps1 -Debug   # Output: build\bin\Debug\ghost.exe
+.\build.ps1          # Output: build\bin\Release\ghost.exe
+```
+
+### Linux (MinGW-w64 Cross-Compilation)
+```bash
+sudo apt update && sudo apt install mingw-w64
+chmod +x build.sh
+./build.sh           # Output: build/ghost.exe
+```
+
+## Evasion Technique Reference
+
+> **Note:** Evasion modules are provided as documented stubs with algorithm descriptions. Implementation is left to the researcher per their specific engagement scope.
+
+| Technique | Algorithm | Detection Surface |
+|---|---|---|
+| **AMSI Bypass** | LoadLibrary `amsi.dll` → GetProcAddress `AmsiScanBuffer` → VirtualProtect RWX → patch `xor eax,eax; ret` | ETW `Microsoft-Antimalware-Scan-Interface`, Sysmon Event ID 7 |
+| **ETW Bypass** | GetProcAddress `EtwEventWrite` from ntdll → VirtualProtect RWX → patch `ret` (0xC3) | Kernel ETW provider audit, integrity checking |
+| **Direct Syscalls** | Read clean ntdll from disk → parse PE exports → extract SSN from `4C 8B D1 B8 XX XX` pattern → build RWX stubs | Memory scanning for syscall stub patterns |
+| **PPID Spoofing** | `InitializeProcThreadAttributeList` → `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` → `CreateProcess` | Sysmon Event ID 1 (parent PID mismatch) |
+| **Module Stomping**| Map legitimate DLL → find .text RVA → VirtualProtect RW → overwrite with shellcode → restore RX | Memory integrity scanning, unbacked executable pages |
 
 ---
 
-## OPSEC
+## Disclaimer
 
-- Rotate `BEACON_TOKEN` and `OPERATOR_TOKEN` every engagement. Never reuse.
-- One domain per campaign. Never share infrastructure across operations.
-- Change the XOR key in `obfuscate.hpp` before every build. Different key = different binary fingerprint.
-- Sign with a valid certificate. SmartScreen doesn't touch signed binaries.
-- Deploy via phishing or USB. `launcher.exe` acts as decoy; implant spawns in background.
-- `wrangler tail` for real-time Worker log monitoring during an operation.
+This tool is developed exclusively for **authorized security research and academic purposes**.
+It is part of a PhD research project studying EDR evasion techniques and implant architecture.
 
----
-
-## Research Foundation
-
-GHOST is built on published offensive security research:
-
-- **Hell's Gate / Halo's Gate** — direct syscall invocation bypassing user-mode hooks
-- **AMSI / ETW bypass techniques** — from the offensive security community
-- **WMI scriptless persistence** — modern APT tradecraft
-- **AES-GCM + DNS tunneling** — resilient C2 architecture
-
----
-
-<p align="center">
-  <b>Built for authorised Red Team operations and EDR evasion research.</b><br/>
-  <b>Do not deploy against systems you do not own or have explicit written authorisation to test.</b>
-</p>
-
-<p align="center">
-  <i>By the time you're reading this — it already ran.</i>
-</p>
+- Do **not** use this tool against systems you do not own or have explicit written authorization to test.
+- The authors are not responsible for misuse.
+- All testing should be conducted in **isolated lab environments**.
