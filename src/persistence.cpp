@@ -21,7 +21,7 @@
 static const wchar_t* WMI_CMD_CONSUMER()    { static auto s = XSW(L"BrokerServicePerf_v2");    return s.str(); }
 static const wchar_t* WMI_SCRIPT_CONSUMER() { static auto s = XSW(L"WinStoreSvcHelper_v3");    return s.str(); }
 static const wchar_t* WMI_FILTER_NAME()     { static auto s = XSW(L"SystemPerfMonitor_v2");    return s.str(); }
-static const wchar_t* WMI_BIND_SUFFIX()     { static auto s = XSW(L"_bind");                   return s.str(); }
+
 static const wchar_t* REG_RUN_NAME()        { static auto s = XSW(L"WindowsStorageService");   return s.str(); }
 static const wchar_t* WMI_NS_SUB()          { static auto s = XSW(L"ROOT\\subscription");      return s.str(); }
 static const wchar_t* WMI_NS_CIMV2()        { static auto s = XSW(L"ROOT\\CIMV2");             return s.str(); }

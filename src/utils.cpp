@@ -12,7 +12,9 @@
 #include <lmcons.h>
 #include <intrin.h>    // __cpuid
 
+#ifdef _MSC_VER
 #pragma comment(lib, "bcrypt.lib")
+#endif
 
 // ---------------------------------------------------------------------------
 // String conversion — WideChar <-> UTF-8
@@ -111,7 +113,7 @@ std::vector<BYTE> DeriveHardwareKey() {
     // Collect entropy sources
     std::vector<BYTE> material;
 
-    // 1. Volume serial of C:\
+    // 1. Volume serial of C:
     DWORD serial = 0;
     GetVolumeInformationW(L"C:\\", nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
     material.insert(material.end(),

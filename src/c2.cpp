@@ -66,8 +66,6 @@ static void DebugLog(const wchar_t* msg) {
     OutputDebugStringW(msg);
     OutputDebugStringW(L"\n");
 }
-static void DebugLog(const std::wstring& msg) { DebugLog(msg.c_str()); }
-static void DebugLog(const char* msg)         { OutputDebugStringA(msg); }
 
 // =====================================================================
 //  MINIMAL JSON HELPERS
@@ -174,7 +172,6 @@ static HttpResponse WinHttpRequest(
     auto _QueryHeaders  = HASHPROC(hW, WinHttpQueryHeaders);
     auto _QueryAvail    = HASHPROC(hW, WinHttpQueryDataAvailable);
     auto _ReadData      = HASHPROC(hW, WinHttpReadData);
-    auto _Close         = HASHPROC(hW, WinHttpCloseHandle);
 
     if (!_Open || !_Connect || !_OpenRequest) return resp;
 
