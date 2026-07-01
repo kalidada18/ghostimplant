@@ -1,114 +1,148 @@
-# GHOST: Advanced Windows Implant & C2 Infrastructure
+# GHOST — Windows Implant & C2 Infrastructure
 
-**GHOST** is an advanced, stealthy Windows implant and Command & Control (C2) infrastructure designed for authorized Red Team operations and defensive research. 
+**GHOST** is a stealthy Windows x64 implant with a serverless Cloudflare Worker C2 backend.  
+Built for authorized red team operations. Cross-compiled from **Kali Linux** using MinGW-w64.
 
-It demonstrates state-of-the-art evasion techniques in a fully air-gapped or restricted environment, utilizing a serverless Cloudflare Worker backend for untraceable, highly-resilient communication.
+---
 
-> [!WARNING]
-> **Authorized Use Only**: This software is provided strictly for academic research and authorized penetration testing. 
+## Build on Kali (One Command)
 
-## Features
+```bash
+# 1. Install toolchain (once)
+./build.sh --setup
 
-### Infrastructure
-* **Serverless C2**: 100% serverless backend using Cloudflare Workers and KV storage. No static IPs to block, routes through Cloudflare's massive CDN.
-* **Asynchronous Beaconing**: "Dead drop" architecture. The implant and operator never communicate directly.
-* **Two-Tier Authentication**: Distinct, constant-time verified tokens for Implant Beacons (`BEACON_TOKEN`) and Operator CLI (`OPERATOR_TOKEN`).
-* **Operator CLI**: Interactive Python-based shell for session management, task queuing, and result polling.
+# 2. Build ghost.exe
+./build.sh
 
-### Payload (Implant)
-* **Direct WinHTTP Transport**: Operates entirely over standard HTTPS (port 443) using the native Windows HTTP stack.
-* **Jittered Sleep**: Randomized beacon intervals (45s–180s) to disrupt behavioral network analysis.
-* **Encrypted Config**: C2 domain strings are XOR-encrypted and decrypted at runtime using a key derived from the target's FNV-1a hostname hash.
-* **GUI Subsystem**: Compiled as a Windows GUI application (`-mwindows`) to run silently without a console window.
-* **Statically Linked**: No external CRT dependencies (`/MT` or `-static`), standalone `.exe`.
-
-## Architecture Diagram
-
-```mermaid
-graph TD
-    subgraph Target Environment
-        A[GHOST Implant]
-    end
-
-    subgraph Cloudflare Edge
-        B(Cloudflare Worker API)
-        C[(Workers KV Storage)]
-    end
-    
-    subgraph Operator Environment
-        D[Operator CLI]
-    end
-
-    A -- "POST /beacon (Encrypted Task/Result Sync)" --> B
-    B <--> C
-    D -- "HTTPS API (Task Queuing / Polling)" --> B
+# Output: build/ghost.exe
 ```
 
-## Quick Start
+That's it. No Visual Studio, no Windows SDK, no WSL.
 
-For a complete step-by-step walkthrough of deployment, configuration, building, and running the implant, see the [**START_GUIDE.md**](START_GUIDE.md).
+---
 
 ## Project Structure
 
-```text
+```
 ghostimplant/
-├── src/                # Implant C++ Source
-│   ├── main.cpp        # Entry point and payload execution
-│   ├── c2.cpp          # WinHTTP transport and beaconing logic
-│   ├── utils.cpp       # Crypto, FNV-1a hashing, string conversions
-│   └── *.cpp           # Stub implementations (syscalls, evasion)
-├── include/            # C++ Headers
-├── worker/             # Cloudflare Worker Backend
-│   ├── src/index.ts    # Serverless C2 API routing and logic
-│   └── wrangler.toml   # Cloudflare deployment configuration
-├── server/             # Operator Environment
-│   ├── c2_cli.py       # Interactive command line interface
+├── src/
+│   ├── main.cpp          # Entry point — sandbox check, init, beacon loop
+│   ├── c2.cpp            # WinHTTP beacon, AES-256-GCM transport, command dispatch
+│   ├── syscalls.cpp      # Direct NT syscall table — parses ntdll, builds stubs
+│   ├── evasion.cpp       # AMSI/ETW patch, HW breakpoint clear, sandbox detection
+│   ├── injection.cpp     # Remote injection, PPID spoof, APC queue, module stomp
+│   ├── persistence.cpp   # WMI CommandLine/Script consumer, registry Run, schtasks
+│   ├── utils.cpp         # AES-256-GCM (BCrypt), Base64, hardware key derivation
+│   └── launcher.cpp      # Tray launcher — spawns ghost.exe on demand
+├── include/
+│   ├── obfuscate.hpp     # Compile-time XOR strings (XS/XSW), FNV-1a hash, HashProc
+│   ├── config.hpp        # C2 domain (XOR-encrypted), beacon timing, PSK
+│   ├── syscalls.hpp      # SyscallTable struct, InitializeSyscalls()
+│   ├── evasion.hpp       # PatchAMSI, PatchETW, ClearHardwareBreakpoints
+│   ├── injection.hpp     # SpawnWithPPID, InjectRemoteProcess, StompModule
+│   ├── persistence.hpp   # WMI/registry/schtasks install and remove
+│   ├── c2.hpp            # BeaconLoop()
+│   └── utils.hpp         # Crypto, encoding, system info, JitterSleep
+├── worker/               # Cloudflare Worker C2 backend (TypeScript)
+│   └── src/index.ts      # API routing, KV task queue, session management
+├── server/
+│   ├── c2_cli.py         # Operator CLI — sessions, shell, task dispatch
 │   └── requirements.txt
 ├── tools/
-│   └── encrypt_domain.py # Generates XOR payload config
-├── build.ps1           # Windows MSVC Build Script
-├── build.sh            # Linux MinGW Cross-Compile Script
-├── START_GUIDE.md      # Step-by-step deployment guide
-└── SYSTEM_DESIGN.md    # Advanced architectural and OPSEC documentation
+│   └── encrypt_domain.py # XOR-encrypt C2 domain for config.hpp
+├── resources/
+│   ├── ghost.rc          # PE version info and manifest
+│   └── ghost.manifest    # UAC/DPI manifest
+├── build.sh              # Kali/Linux cross-compile script (MinGW-w64)
+└── build.ps1             # Windows MSVC build script (optional)
 ```
 
-## Compilation
+---
 
-You must configure the `BEACON_TOKEN` and the XOR-encrypted domain in `src/c2.cpp` before compiling. See [START_GUIDE.md](START_GUIDE.md) for details.
+## Configuration Before Building
 
-### Windows (MSVC)
-Requires Visual Studio Build Tools (Desktop development with C++).
-```powershell
-.\build.ps1 -Debug   # Output: build\bin\Debug\ghost.exe
-.\build.ps1          # Output: build\bin\Release\ghost.exe
-```
+### 1. Encrypt your C2 domain
 
-### Linux (MinGW-w64 Cross-Compilation)
 ```bash
-sudo apt update && sudo apt install mingw-w64
-chmod +x build.sh
-./build.sh           # Output: build/ghost.exe
+python3 tools/encrypt_domain.py ghost-c2.yourdomain.workers.dev HOSTNAME
 ```
 
-## Evasion Technique Reference
+Paste the output byte array into `include/config.hpp` under `C2_DOMAIN_ENCRYPTED[]`.
 
-> **Note:** Evasion modules are provided as documented stubs with algorithm descriptions. Implementation is left to the researcher per their specific engagement scope.
+### 2. Set the XOR key
 
-| Technique | Algorithm | Detection Surface |
-|---|---|---|
-| **AMSI Bypass** | LoadLibrary `amsi.dll` → GetProcAddress `AmsiScanBuffer` → VirtualProtect RWX → patch `xor eax,eax; ret` | ETW `Microsoft-Antimalware-Scan-Interface`, Sysmon Event ID 7 |
-| **ETW Bypass** | GetProcAddress `EtwEventWrite` from ntdll → VirtualProtect RWX → patch `ret` (0xC3) | Kernel ETW provider audit, integrity checking |
-| **Direct Syscalls** | Read clean ntdll from disk → parse PE exports → extract SSN from `4C 8B D1 B8 XX XX` pattern → build RWX stubs | Memory scanning for syscall stub patterns |
-| **PPID Spoofing** | `InitializeProcThreadAttributeList` → `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` → `CreateProcess` | Sysmon Event ID 1 (parent PID mismatch) |
-| **Module Stomping**| Map legitimate DLL → find .text RVA → VirtualProtect RW → overwrite with shellcode → restore RX | Memory integrity scanning, unbacked executable pages |
+In `include/obfuscate.hpp`, change `GHOST_XOR_KEY` before each build:
+
+```cpp
+#define GHOST_XOR_KEY 0x5Au   // change this — one byte, arbitrary
+```
+
+### 3. Set beacon timing (optional)
+
+In `include/config.hpp`:
+
+```cpp
+constexpr uint32_t BEACON_MIN = 5;   // seconds
+constexpr uint32_t BEACON_MAX = 10;
+```
+
+---
+
+## Build Options
+
+```bash
+./build.sh            # release — optimized, stripped
+./build.sh --debug    # debug symbols, no strip, -DDEBUG
+./build.sh --setup    # apt install mingw-w64 (Debian/Ubuntu/Kali)
+```
+
+Output is always `build/ghost.exe` and `build/launcher.exe`.
+
+---
+
+## Module Summary
+
+| Module | What it does |
+|---|---|
+| `syscalls.cpp` | Parses ntdll.dll PE export table at runtime, extracts syscall numbers, builds RWX stubs. No `GetProcAddress` or IAT entries for NT functions. |
+| `evasion.cpp` | Patches `AmsiScanBuffer`, `AmsiScanString`, `EtwEventWrite` family with `xor eax,eax; ret` / `ret`. Uses `NtProtectVirtualMemory` to flip permissions. Clears DR0-DR3 on all threads via VEH. CPUID + uptime sandbox check. |
+| `injection.cpp` | Full syscall-chain injection: `NtOpenProcess → NtAllocateVirtualMemory → NtWriteVirtualMemory → NtProtectVirtualMemory → NtCreateThreadEx`. PPID spoofing via `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. APC queue injection. Module stomping of signed DLLs. |
+| `persistence.cpp` | WMI `CommandLineEventConsumer` and `ActiveScriptEventConsumer` (VBScript in WMI repository — no file on disk). HKCU/HKLM Run key. Scheduled task via `schtasks.exe`. |
+| `c2.cpp` | WinHTTP HTTPS beacon. AES-256-GCM double-encrypted payload. Hardware-derived session key (volume serial + CPUID + hostname → SHA-256). DNS TXT fallback. Command dispatch: `!ps`, `!inject`, `!migrate`, `!exfil`, `!wipe`, `!lateral`, `!creds`, `download`, `upload`, `sleep`. |
+| `obfuscate.hpp` | Compile-time XOR of all string literals via `constexpr XorStr<N>`. FNV-1a hash at compile time. `HashProc()` walks PE export table by hash — zero function name strings in binary. |
+
+---
+
+## C2 Backend (Cloudflare Worker)
+
+```bash
+cd worker
+npm install
+npx wrangler deploy
+```
+
+Set secrets via Wrangler:
+```bash
+wrangler secret put BEACON_TOKEN
+wrangler secret put OPERATOR_TOKEN
+```
+
+## Operator CLI
+
+```bash
+cd server
+pip install -r requirements.txt
+
+export GHOST_C2_URL="https://ghost-c2.yourdomain.workers.dev"
+export GHOST_OPERATOR_TOKEN="your-operator-token"
+
+python3 c2_cli.py sessions
+python3 c2_cli.py shell <session-id>
+```
 
 ---
 
 ## Disclaimer
 
-This tool is developed exclusively for **authorized security research and academic purposes**.
-It is part of a PhD research project studying EDR evasion techniques and implant architecture.
-
-- Do **not** use this tool against systems you do not own or have explicit written authorization to test.
-- The authors are not responsible for misuse.
-- All testing should be conducted in **isolated lab environments**.
+For **authorized security research and red team engagements only**.  
+Do not use against systems you do not own or have explicit written authorization to test.

