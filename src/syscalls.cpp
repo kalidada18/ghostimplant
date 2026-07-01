@@ -221,12 +221,11 @@ static DWORD ResolveSSN(const NtdllMap& m,
 }
 
 // ============================================================
-// Build an RX trampoline for one syscall:
-//   4C 8B D1        mov r10, rcx
-//   B8 xx xx xx xx  mov eax, <ssn>
-//   0F 05           syscall
-//   C3              ret
+// Build RX trampoline pool for all required syscalls:
 // ============================================================
+static PVOID g_TrampolinePool = nullptr;
+static size_t g_TrampolineCount = 0;
+
 static PVOID BuildTrampoline(DWORD ssn) {
     constexpr size_t STUB_LEN = 11;
     static const BYTE TEMPLATE[STUB_LEN] = {
@@ -236,20 +235,31 @@ static PVOID BuildTrampoline(DWORD ssn) {
         0xC3                           // ret
     };
 
+    // First call: allocate pool for all 11 syscalls
+    if (!g_TrampolinePool) {
+        g_TrampolinePool = VirtualAlloc(nullptr, STUB_LEN * 11,
+                                        MEM_COMMIT | MEM_RESERVE,
+                                        PAGE_READWRITE);
+        if (!g_TrampolinePool) return nullptr;
+    }
+
+    PVOID stubAddr = reinterpret_cast<BYTE*>(g_TrampolinePool) + (g_TrampolineCount * STUB_LEN);
+    
     BYTE stub[STUB_LEN];
     memcpy(stub, TEMPLATE, STUB_LEN);
     *reinterpret_cast<DWORD*>(&stub[4]) = ssn;
 
-    PVOID mem = VirtualAlloc(nullptr, STUB_LEN,
-                             MEM_COMMIT | MEM_RESERVE,
-                             PAGE_EXECUTE_READWRITE);
-    if (!mem) return nullptr;
-    memcpy(mem, stub, STUB_LEN);
+    memcpy(stubAddr, stub, STUB_LEN);
+    g_TrampolineCount++;
 
+    return stubAddr;
+}
+
+static VOID FinalizeTrampolinePool() {
+    if (!g_TrampolinePool || g_TrampolineCount == 0) return;
     DWORD oldProt = 0;
-    VirtualProtect(mem, STUB_LEN, PAGE_EXECUTE_READ, &oldProt);
-    FlushInstructionCache(GetCurrentProcess(), mem, STUB_LEN);
-    return mem;
+    VirtualProtect(g_TrampolinePool, 11 * g_TrampolineCount, PAGE_EXECUTE_READ, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_TrampolinePool, 11 * g_TrampolineCount);
 }
 
 // ============================================================
@@ -283,6 +293,11 @@ BOOL InitializeSyscalls() {
     RESOLVE("NtClose",                  NtClose);
     RESOLVE("NtQuerySystemInformation", NtQuerySystemInformation);
     RESOLVE("NtMapViewOfSection",       NtMapViewOfSection);
+    RESOLVE("NtQueueApcThread",         NtQueueApcThread);
+    RESOLVE("NtSuspendThread",          NtSuspendThread);
+    RESOLVE("NtResumeThread",           NtResumeThread);
+
+    FinalizeTrampolinePool();
 
 #undef RESOLVE
     return TRUE;

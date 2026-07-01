@@ -36,6 +36,7 @@ std::string AesGcmDecrypt(const std::vector<BYTE>& key32,
 //   Unique per host, reproducible — server derives same key from session ID.
 // ---------------------------------------------------------------------------
 std::vector<BYTE> DeriveHardwareKey();
+std::vector<BYTE> GenerateSessionKey();
 
 // ---------------------------------------------------------------------------
 // System info

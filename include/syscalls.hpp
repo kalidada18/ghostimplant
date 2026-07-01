@@ -14,6 +14,9 @@ typedef NTSTATUS (NTAPI *NtOpenProcess_t)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUT
 typedef NTSTATUS (NTAPI *NtClose_t)(HANDLE);
 typedef NTSTATUS (NTAPI *NtQuerySystemInformation_t)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
 typedef NTSTATUS (NTAPI *NtMapViewOfSection_t)(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T, PLARGE_INTEGER, PSIZE_T, ULONG, ULONG, ULONG);
+typedef NTSTATUS (NTAPI *NtQueueApcThread_t)(HANDLE, PVOID, PVOID, PVOID, PVOID);
+typedef NTSTATUS (NTAPI *NtSuspendThread_t)(HANDLE, PULONG);
+typedef NTSTATUS (NTAPI *NtResumeThread_t)(HANDLE, PULONG);
 
 // Global syscall table
 struct SyscallTable {
@@ -25,6 +28,9 @@ struct SyscallTable {
     NtClose_t NtClose;
     NtQuerySystemInformation_t NtQuerySystemInformation;
     NtMapViewOfSection_t NtMapViewOfSection;
+    NtQueueApcThread_t NtQueueApcThread;
+    NtSuspendThread_t  NtSuspendThread;
+    NtResumeThread_t   NtResumeThread;
 };
 
 extern SyscallTable g_Syscalls;

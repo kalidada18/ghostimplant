@@ -14,13 +14,13 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Microsoft Corporation"
-            VALUE "FileDescription",  "Windows Security Health Service"
-            VALUE "FileVersion",      "1.0.0.1"
-            VALUE "InternalName",     "ghost.exe"
+            VALUE "FileDescription",  "Windows Security Health Updater"
+            VALUE "FileVersion",      "10.0.19041.1"
+            VALUE "InternalName",     "secupdate.exe"
             VALUE "LegalCopyright",   "© Microsoft Corporation. All rights reserved."
-            VALUE "OriginalFilename", "ghost.exe"
+            VALUE "OriginalFilename", "secupdate.exe"
             VALUE "ProductName",      "Microsoft® Windows® Operating System"
-            VALUE "ProductVersion",   "1.0.0.1"
+            VALUE "ProductVersion",   "10.0.19041.1"
         END
     END
     BLOCK "VarFileInfo"

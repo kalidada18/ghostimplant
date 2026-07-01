@@ -25,15 +25,9 @@ $src = @(
     "src\utils.cpp"
 )
 
-# Libraries
+# Libraries (only core system APIs, rest resolved dynamically)
 $libs = @(
-    "winhttp.lib",
-    "wbemuuid.lib",
-    "ole32.lib",
-    "oleaut32.lib",
     "ntdll.lib",
-    "advapi32.lib",
-    "shell32.lib",
     "user32.lib"
 )
 

