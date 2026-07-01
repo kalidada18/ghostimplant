@@ -25,8 +25,8 @@ namespace config {
     // -----------------------------------------------------------------------
 
     // Jitter range in seconds — sleep between beacons is uniform [MIN, MAX]
-    constexpr uint32_t BEACON_MIN = 45;
-    constexpr uint32_t BEACON_MAX = 180;
+    constexpr uint32_t BEACON_MIN = 5;
+    constexpr uint32_t BEACON_MAX = 10;
 
     // Max consecutive beacon failures before backing off
     constexpr uint32_t MAX_FAILURES = 5;
