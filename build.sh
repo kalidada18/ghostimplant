@@ -67,7 +67,7 @@ echo "[+] ghost.exe: $(ls -lh "$OUT_DIR/ghost.exe" | awk '{print $5}')"
 echo "[*] Compiling launcher.exe..."
 $CXX $COMMON_FLAGS $OPT_FLAGS $STRIP_FLAG \
     src/launcher.cpp \
-    -luser32 -lshell32 \
+    -luser32 -lshell32 -lwinhttp \
     -o "$OUT_DIR/launcher.exe"
 
 echo "[+] launcher.exe: $(ls -lh "$OUT_DIR/launcher.exe" | awk '{print $5}')"
