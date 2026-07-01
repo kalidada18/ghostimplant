@@ -26,7 +26,7 @@ mkdir -p "$OUT_DIR"
 CXX="x86_64-w64-mingw32-g++"
 WINDRES="x86_64-w64-mingw32-windres"
 
-COMMON_FLAGS="-std=c++17 -mwindows -static -static-libgcc -static-libstdc++ -I include"
+COMMON_FLAGS="-std=c++17 -DUNICODE -D_UNICODE -mwindows -static -static-libgcc -static-libstdc++ -I include"
 
 if [ "$DEBUG" -eq 1 ]; then
     OPT_FLAGS="-O0 -g -DDEBUG"
