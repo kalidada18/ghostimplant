@@ -178,7 +178,7 @@ async function appendResult(kv: KVNamespace, sid: string, entry: ResultEntry): P
   // Also enforce a byte-size guard: 500 * 64KB = 32 MB would exceed the limit,
   // so evict oldest when total payload exceeds 20 MB.
   const RESULT_CAP = 500;
-  const BYTE_CAP   = 20 * 1024 * 1024; // 20 MB
+  const BYTE_CAP = 20 * 1024 * 1024; // 20 MB
   if (results.length >= RESULT_CAP) results.shift();
   results.push(entry);
 
@@ -263,7 +263,7 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     recon: body.recon ?? existing?.recon ?? {},
     // Preserve existing counts on update; initialize to 0 on first check-in
     pending_tasks: existing?.pending_tasks ?? 0,
-    result_count:  existing?.result_count  ?? 0,
+    result_count: existing?.result_count ?? 0,
   };
   await putSession(env.GHOST_KV, sid, session, ttl);
 
@@ -304,13 +304,13 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
   if (!existing) {
     const now = new Date().toISOString();
     await putSession(env.GHOST_KV, sid, {
-      session:       sid,
-      remote_ip:     getClientIP(request),
-      first_seen:    now,
-      last_beacon:   now,
-      recon:         {},
+      session: sid,
+      remote_ip: getClientIP(request),
+      first_seen: now,
+      last_beacon: now,
+      recon: {},
       pending_tasks: 0,
-      result_count:  1,
+      result_count: 1,
     }, getSessionTimeout(env));
   }
 
@@ -336,14 +336,14 @@ async function handleListSessions(request: Request, env: Env): Promise<Response>
     // pending_tasks and result_count are denormalized into SessionData,
     // so this loop is now O(n) KV reads instead of O(3n).
     sessions.push({
-      session:       data.session,
-      remote_ip:     data.remote_ip,
-      first_seen:    data.first_seen,
-      last_beacon:   data.last_beacon,
-      idle_seconds:  Math.round((now - lastBeaconMs) / 1000),
-      recon:         data.recon,
+      session: data.session,
+      remote_ip: data.remote_ip,
+      first_seen: data.first_seen,
+      last_beacon: data.last_beacon,
+      idle_seconds: Math.round((now - lastBeaconMs) / 1000),
+      recon: data.recon,
       pending_tasks: data.pending_tasks ?? 0,
-      result_count:  data.result_count  ?? 0,
+      result_count: data.result_count ?? 0,
     });
   }
 
