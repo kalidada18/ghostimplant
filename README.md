@@ -83,3 +83,33 @@ graph TD
     A -- "POST /beacon (encrypted)" --> B
     B <--> C
     D -- "HTTPS API (task/result)" --> B
+
+
+⚡ Quick Start
+A complete step‑by‑step guide for deployment, configuration, building, and running the implant is available in START_GUIDE.md.
+
+📁 Project Structure
+ghostimplant/
+├── src/                # Implant C++ Source
+│   ├── main.cpp        # Entry point and payload execution
+│   ├── c2.cpp          # WinHTTP transport and beaconing logic
+│   ├── utils.cpp       # Crypto, FNV‑1a hashing, string conversions
+│   └── *.cpp           # Stub implementations (syscalls, evasion)
+├── include/            # C++ Headers
+├── worker/             # Cloudflare Worker Backend
+│   ├── src/index.ts    # Serverless C2 API routing and logic
+│   └── wrangler.toml   # Cloudflare deployment configuration
+├── server/             # Operator Environment
+│   ├── c2_cli.py       # Interactive command line interface
+│   └── requirements.txt
+├── tools/
+│   └── encrypt_domain.py # Generates XOR payload config
+├── build.ps1           # Windows MSVC Build Script
+├── build.sh            # Linux MinGW Cross-Compile Script
+├── START_GUIDE.md      # Step‑by‑step deployment guide
+└── SYSTEM_DESIGN.md    # Advanced architectural and OPSEC documentation
+
+## ⚠️ Disclaimer ##
+This tool is developed exclusively for authorised security research and academic purposes.
+
+<p align="center"> <b>Built for the Red Team. Survived the Blue Team.</b><br/> <i>You are already compromised.</i> </p> ```
