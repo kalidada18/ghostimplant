@@ -32,7 +32,7 @@ preview_id = "6225e6ef1f4e485d830292ce2a340567"
 # ── Environment Variables ─────────────────────────────────
 # Non-secret config (secrets are set via `wrangler secret put`)
 [vars]
-SESSION_TIMEOUT_SECONDS = "600"
+SESSION_TIMEOUT_SECONDS = "3600"   # 1 hour (was 600)
 CORS_ORIGIN = "*"
 
 # ── Dev settings ──────────────────────────────────────────
