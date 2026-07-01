@@ -54,7 +54,7 @@ $CXX $COMMON_FLAGS $OPT_FLAGS $STRIP_FLAG \
     src/persistence.cpp \
     src/c2.cpp \
     src/utils.cpp \
-    src/shell.cpp \              # <--- ADDED
+    src/shell.cpp \
     "$OUT_DIR/ghost.res" \
     -lwinhttp -lwbemuuid -lole32 -loleaut32 -lntdll -ladvapi32 -lshell32 -luser32 -lws2_32 \
     -o "$OUT_DIR/ghost.exe"
