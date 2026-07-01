@@ -2,7 +2,7 @@
 # GHOST C2 — Cloudflare Worker Configuration
 # ─────────────────────────────────────────────────────────
 # Deployment:
-#   1. Create KV namespace:  wrangler kv:namespace create GHOST_KV
+#   1. Create KV namespace:  npx wrangler kv namespace create GHOST_KV
 #   2. Copy the ID into kv_namespaces below
 #   3. Set secrets:
 #        wrangler secret put BEACON_TOKEN
@@ -21,13 +21,13 @@ compatibility_date = "2024-01-01"
 
 # ── KV Namespace Binding ──────────────────────────────────
 # After creating the namespace, paste the ID here:
-#   wrangler kv:namespace create GHOST_KV
-#   wrangler kv:namespace create GHOST_KV --preview  (for dev)
+#   npx wrangler kv namespace create GHOST_KV
+#   npx wrangler kv namespace create GHOST_KV --preview  (for dev)
 
 [[kv_namespaces]]
 binding = "GHOST_KV"
-id = "1d45ef2515b7457a868344ed0cd6c260"
-# preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+id = "94300d2c32d448768c4a84d9db1445f4"
+preview_id = "6225e6ef1f4e485d830292ce2a340567"
 
 # ── Environment Variables ─────────────────────────────────
 # Non-secret config (secrets are set via `wrangler secret put`)

