@@ -83,12 +83,11 @@ graph TD
     A -- "POST /beacon (encrypted)" --> B
     B <--> C
     D -- "HTTPS API (task/result)" --> B
-
-
 ⚡ Quick Start
 A complete step‑by‑step guide for deployment, configuration, building, and running the implant is available in START_GUIDE.md.
 
 📁 Project Structure
+text
 ghostimplant/
 ├── src/                # Implant C++ Source
 │   ├── main.cpp        # Entry point and payload execution
@@ -108,8 +107,52 @@ ghostimplant/
 ├── build.sh            # Linux MinGW Cross-Compile Script
 ├── START_GUIDE.md      # Step‑by‑step deployment guide
 └── SYSTEM_DESIGN.md    # Advanced architectural and OPSEC documentation
+🔧 Compilation
+Note: You must configure the BEACON_TOKEN and the XOR‑encrypted domain in src/c2.cpp before compiling. See START_GUIDE.md for details.
 
-## ⚠️ Disclaimer ##
+Windows (MSVC)
+Requires Visual Studio Build Tools (Desktop development with C++).
+
+powershell
+.\build.ps1 -Debug   # Output: build\bin\Debug\ghost.exe
+.\build.ps1          # Output: build\bin\Release\ghost.exe
+Linux (MinGW-w64 Cross-Compilation)
+bash
+sudo apt update && sudo apt install mingw-w64
+chmod +x build.sh
+./build.sh           # Output: build/ghost.exe
+🧠 Operational Security (OPSEC) Considerations
+Rotate all tokens per engagement – never reuse the same BEACON_TOKEN or OPERATOR_TOKEN.
+
+Use unique C2 domains for each campaign – avoid hosting multiple implants on the same Worker.
+
+Sign the binary with a valid certificate (stolen or self‑signed) to bypass SmartScreen.
+
+Change the XOR key in obfuscate.hpp before each build – this alters the binary fingerprint.
+
+Monitor Worker logs for anomalies – wrangler tail gives real‑time insight.
+
+Deploy via phishing or USB – the launcher (launcher.exe) acts as a decoy and spawns the implant.
+
+⚠️ Disclaimer
 This tool is developed exclusively for authorised security research and academic purposes.
+It is part of a PhD research project studying EDR evasion techniques and implant architecture.
+
+Do not use this tool against systems you do not own or have explicit written authorisation to test.
+
+The authors are not responsible for misuse.
+
+All testing should be conducted in isolated lab environments.
+
+🏆 Credits & Research
+GHOST incorporates techniques from public research, including:
+
+Hell’s Gate / Halo’s Gate – direct syscall invocation.
+
+AMSI / ETW bypasses – from various offensive security communities.
+
+WMI Scriptless Persistence – inspired by modern APT tradecraft.
+
+AES‑GCM + DNS Tunneling – for resilient C2 communication.
 
 <p align="center"> <b>Built for the Red Team. Survived the Blue Team.</b><br/> <i>You are already compromised.</i> </p> ```
