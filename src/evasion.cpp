@@ -3,8 +3,6 @@
 #include "utils.hpp"
 #include <windows.h>
 #include <tlhelp32.h>
-#include <wbemidl.h>
-#include <comdef.h>
 
 // AMSI
 BOOL PatchAMSI() {

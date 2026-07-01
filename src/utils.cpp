@@ -141,6 +141,8 @@ std::wstring GetHostname() {
     wchar_t hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
     DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
     if (GetComputerNameW(hostname, &size))
+        // GetComputerNameW sets size to the number of characters written
+        // excluding the null terminator on success, same contract as GetUserNameW.
         return std::wstring(hostname, size);
     return L"unknown";
 }
@@ -186,13 +188,27 @@ BOOL IsElevated() {
 VOID JitterSleep(DWORD minSec, DWORD maxSec) {
     if (minSec > maxSec) minSec = maxSec;
 
-    // Seed from high-resolution clock + thread ID for uniqueness
-    auto seed = static_cast<unsigned>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count()
-        ^ GetCurrentThreadId()
-    );
-    std::mt19937 gen(seed);
-    std::uniform_int_distribution<DWORD> dist(minSec, maxSec);
-    DWORD seconds = dist(gen);
+    // Static generator seeded once from random_device.
+    // Re-seeding per call from high_resolution_clock produces near-identical
+    // seeds when called within the same scheduler tick (rapid failure bursts).
+    static std::mt19937 gen = [] {
+        std::random_device rd;
+        // XOR with thread ID for additional entropy on platforms where
+        // random_device is deterministic (some embedded/VM environments).
+        return std::mt19937(
+            rd() ^ static_cast<unsigned>(GetCurrentThreadId())
+        );
+    }();
+    static CRITICAL_SECTION cs = [] {
+        CRITICAL_SECTION c;
+        InitializeCriticalSection(&c);
+        return c;
+    }();
+
+    DWORD seconds;
+    EnterCriticalSection(&cs);
+    seconds = std::uniform_int_distribution<DWORD>(minSec, maxSec)(gen);
+    LeaveCriticalSection(&cs);
+
     Sleep(seconds * 1000);
 }

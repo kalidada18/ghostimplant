@@ -33,6 +33,10 @@ interface SessionData {
   first_seen: string;   // ISO 8601
   last_beacon: string;  // ISO 8601
   recon: Record<string, unknown>;
+  // Denormalized counters — updated by putTasks/appendResult so that
+  // GET /sessions needs only one KV read per session, not three.
+  pending_tasks: number;
+  result_count: number;
 }
 
 interface ResultEntry {
@@ -135,13 +139,21 @@ async function getTasks(kv: KVNamespace, sid: string): Promise<string[]> {
   return raw ? JSON.parse(raw) as string[] : [];
 }
 
-async function putTasks(kv: KVNamespace, sid: string, tasks: string[]): Promise<void> {
+async function putTasks(kv: KVNamespace, sid: string, tasks: string[], sessionTtl = 86400): Promise<void> {
   if (tasks.length === 0) {
     await kv.delete(`tasks:${sid}`);
   } else {
     await kv.put(`tasks:${sid}`, JSON.stringify(tasks), {
       expirationTtl: 86400, // 24h TTL on task queues
     });
+  }
+  // Keep the denormalized count on the session record in sync.
+  // Best-effort: if the session was already purged, skip silently.
+  const raw = await kv.get(`session:${sid}`);
+  if (raw) {
+    const data = JSON.parse(raw) as SessionData;
+    data.pending_tasks = tasks.length;
+    await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: sessionTtl });
   }
 }
 
@@ -162,12 +174,30 @@ async function putResults(kv: KVNamespace, sid: string, results: ResultEntry[]):
 
 async function appendResult(kv: KVNamespace, sid: string, entry: ResultEntry): Promise<void> {
   const results = await getResults(kv, sid);
-  // Cap at 500 results per session to avoid KV value size limits (25 MB)
-  if (results.length >= 500) {
-    results.shift();
-  }
+  // Cap at 500 results per session to avoid KV value size limits (25 MB).
+  // Also enforce a byte-size guard: 500 * 64KB = 32 MB would exceed the limit,
+  // so evict oldest when total payload exceeds 20 MB.
+  const RESULT_CAP = 500;
+  const BYTE_CAP   = 20 * 1024 * 1024; // 20 MB
+  if (results.length >= RESULT_CAP) results.shift();
   results.push(entry);
+
+  const payload = JSON.stringify(results);
+  if (payload.length > BYTE_CAP) {
+    // Evict oldest until under the byte cap
+    while (results.length > 1 && JSON.stringify(results).length > BYTE_CAP) {
+      results.shift();
+    }
+  }
   await putResults(kv, sid, results);
+
+  // Update denormalized count on session record
+  const raw = await kv.get(`session:${sid}`);
+  if (raw) {
+    const data = JSON.parse(raw) as SessionData;
+    data.result_count = results.length;
+    await kv.put(`session:${sid}`, JSON.stringify(data), { expirationTtl: 86400 });
+  }
 }
 
 /** List all session keys using KV list with prefix. */
@@ -231,6 +261,9 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     first_seen: existing?.first_seen ?? now,
     last_beacon: now,
     recon: body.recon ?? existing?.recon ?? {},
+    // Preserve existing counts on update; initialize to 0 on first check-in
+    pending_tasks: existing?.pending_tasks ?? 0,
+    result_count:  existing?.result_count  ?? 0,
   };
   await putSession(env.GHOST_KV, sid, session, ttl);
 
@@ -271,11 +304,13 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
   if (!existing) {
     const now = new Date().toISOString();
     await putSession(env.GHOST_KV, sid, {
-      session: sid,
-      remote_ip: getClientIP(request),
-      first_seen: now,
-      last_beacon: now,
-      recon: {},
+      session:       sid,
+      remote_ip:     getClientIP(request),
+      first_seen:    now,
+      last_beacon:   now,
+      recon:         {},
+      pending_tasks: 0,
+      result_count:  1,
     }, getSessionTimeout(env));
   }
 
@@ -298,18 +333,17 @@ async function handleListSessions(request: Request, env: Env): Promise<Response>
     if (!data) continue;
 
     const lastBeaconMs = new Date(data.last_beacon).getTime();
-    const tasks = await getTasks(env.GHOST_KV, sid);
-    const results = await getResults(env.GHOST_KV, sid);
-
+    // pending_tasks and result_count are denormalized into SessionData,
+    // so this loop is now O(n) KV reads instead of O(3n).
     sessions.push({
-      session: data.session,
-      remote_ip: data.remote_ip,
-      first_seen: data.first_seen,
-      last_beacon: data.last_beacon,
-      idle_seconds: Math.round((now - lastBeaconMs) / 1000),
-      recon: data.recon,
-      pending_tasks: tasks.length,
-      result_count: results.length,
+      session:       data.session,
+      remote_ip:     data.remote_ip,
+      first_seen:    data.first_seen,
+      last_beacon:   data.last_beacon,
+      idle_seconds:  Math.round((now - lastBeaconMs) / 1000),
+      recon:         data.recon,
+      pending_tasks: data.pending_tasks ?? 0,
+      result_count:  data.result_count  ?? 0,
     });
   }
 

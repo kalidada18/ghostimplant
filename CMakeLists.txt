@@ -11,8 +11,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static CRT — no runtime DLL dependencies
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Output directory
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Per-config output dirs — Debug and Release builds don't overwrite each other
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}/bin/Debug)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin/Release)
+
+# Export compile_commands.json for clangd / clang-tidy indexing
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Compiler flags
 if(MSVC)
@@ -20,7 +24,7 @@ if(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /GL /GS-")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /DDEBUG")
     # Linker flags — release uses LTCG and strips relocs
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO /OPT:REF /OPT:ICF")
 elseif(MINGW)
     set(CMAKE_CXX_FLAGS "-Wall -Wextra -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601")
     set(CMAKE_CXX_FLAGS_RELEASE "-O2 -s")

