@@ -66,6 +66,7 @@ static void DebugLog(const wchar_t* msg) {
     OutputDebugStringW(msg);
     OutputDebugStringW(L"\n");
 }
+static void DebugLog(const std::wstring& msg) { DebugLog(msg.c_str()); }
 
 // =====================================================================
 //  MINIMAL JSON HELPERS
