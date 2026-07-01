@@ -6,7 +6,7 @@
 # repo root (Cloudflare Pages CI default) resolves correctly.
 # ─────────────────────────────────────────────────────────
 
-name = "ghost-c2"
+name = "ghostimplant"
 main = "worker/src/index.ts"
 compatibility_date = "2024-01-01"
 
