@@ -367,7 +367,7 @@ static BOOL LaunchStage2() {
 
         LARGE_INTEGER fileSize = {};
         GetFileSizeEx(hf, &fileSize);
-        std::vector<BYTE> header(min(fileSize.QuadPart, (LONGLONG)4096));
+        std::vector<BYTE> header(std::min(fileSize.QuadPart, (LONGLONG)4096));
         DWORD rd = 0;
         ReadFile(hf, header.data(), static_cast<DWORD>(header.size()), &rd, nullptr);
         CloseHandle(hf);
