@@ -338,7 +338,7 @@ def _print_sessions(sessions: list, numbered: bool = False) -> None:
     print()
 
 
-def _print_results(data: dict, header: bool = True) -> None:
+def _print_results(data: dict, header: bool = True, latest_only: bool = False) -> None:
     entries = data.get("results", [])
     sid     = data.get("session", "?")
     if not entries:
@@ -346,7 +346,9 @@ def _print_results(data: dict, header: bool = True) -> None:
         return
     if header:
         print()
-    for e in entries:
+    # latest_only: show only the last entry — suppresses stale cached outputs
+    display = entries[-1:] if latest_only else entries
+    for e in display:
         if isinstance(e, dict):
             ts  = e.get("ts", "")
             out = e.get("output", "").rstrip()
@@ -758,7 +760,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # results
     r = sub.add_parser("results", help="Retrieve results for a session")
     r.add_argument("sid")
-    r.add_argument("--clear", action="store_true")
+    r.add_argument("--clear", action="store_true",
+                   help="Delete results from KV after fetching")
+    r.add_argument("--all", dest="show_all", action="store_true",
+                   help="Show all results (default: latest only)")
 
     # export
     ex = sub.add_parser("export", help="Dump all results to a file")
@@ -846,8 +851,11 @@ def main() -> None:
                 cmd_batch(client, args.sid, args.commands)
 
             case "results":
-                data = client.results(args.sid, clear=args.clear)
-                _print_results(data)
+                # Default: fetch with clear=True, show latest only — avoids stale cache dumps
+                do_clear   = args.clear or not getattr(args, "show_all", False)
+                latest_only = not getattr(args, "show_all", False)
+                data = client.results(args.sid, clear=do_clear)
+                _print_results(data, latest_only=latest_only)
 
             case "export":
                 cmd_export(client, args.sid, getattr(args, "outfile", None))

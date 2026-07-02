@@ -36,6 +36,9 @@
 // ---------------------------------------------------------------------------
 
 static const wchar_t* LAUNCHER_C2_HOST      = L"ghost-c2.sujallamichhane.workers.dev";
+// *** THIS VALUE MUST MATCH the Worker's BEACON_TOKEN secret exactly ***
+// Set it with: wrangler secret put BEACON_TOKEN  (in the worker/ directory)
+// Then paste this same value when prompted, or the launcher will get HTTP 401.
 static const wchar_t* LAUNCHER_BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
 
 // ---------------------------------------------------------------------------
