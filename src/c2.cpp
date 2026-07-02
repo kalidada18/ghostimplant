@@ -418,7 +418,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
         if (!PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr)) break;
 
         if (avail > 0) {
-            DWORD toRead = min(avail, (DWORD)4096);
+            DWORD toRead = std::min(avail, (DWORD)4096);
             std::vector<char> buf(toRead);
             DWORD rd = 0;
             if (!ReadFile(hReadPipe, buf.data(), toRead, &rd, nullptr) || rd == 0) break;
