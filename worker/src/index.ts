@@ -629,6 +629,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(handleHealth(), env);
   }
 
+  // Lightweight TCP keepalive — no auth, no KV, no overhead.
+  // Implant heartbeat thread hits this every 120 s to keep the
+  // Cloudflare connection warm without touching session state.
+  if (path === "/ping" && method === "GET") {
+    return withCORS(new Response("OK", { status: 200 }), env);
+  }
+
   // ── Beacon routes (X-Beacon-Token) ──────────────────────
   if (path === "/beacon" && method === "POST") {
     const authErr = requireBeaconToken(request, env);

