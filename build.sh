@@ -112,7 +112,6 @@ COMMON_FLAGS=(
     -fno-exceptions
     -fno-rtti
     -ffunction-sections
-    -fdata-sections
     -fstack-protector-strong
     -I include
     -Wall -Wextra
