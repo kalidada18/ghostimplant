@@ -106,7 +106,6 @@ COMMON_FLAGS=(
     -DUNICODE -D_UNICODE
     -D_WIN32_WINNT=0x0A00
     -DNTDDI_VERSION=0x0A000008
-    -mwindows
     -static -static-libgcc -static-libstdc++
     -fno-rtti
     -ffunction-sections
