@@ -92,7 +92,6 @@ mkdir -p "$OUT_DIR"
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shared compiler flags
 #
-#  -fno-exceptions            smaller binary, no DWARF EH tables in .text
 #  -fno-rtti                  no type_info symbols visible to strings(1)
 #  -ffunction-sections        dead-code elimination per function
 #  -fdata-sections            dead-code elimination per data object
@@ -109,9 +108,9 @@ COMMON_FLAGS=(
     -DNTDDI_VERSION=0x0A000008
     -mwindows
     -static -static-libgcc -static-libstdc++
-    -fno-exceptions
     -fno-rtti
     -ffunction-sections
+    -fdata-sections
     -fstack-protector-strong
     -I include
     -Wall -Wextra
