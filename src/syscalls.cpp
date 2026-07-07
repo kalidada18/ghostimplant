@@ -268,6 +268,14 @@ static VOID FinalizeTrampolinePool() {
 // Public entry point
 // ============================================================
 BOOL InitializeSyscalls() {
+    // Free previous pool if retrying — prevents writing past the allocation
+    if (g_TrampolinePool) {
+        VirtualFree(g_TrampolinePool, 0, MEM_RELEASE);
+        g_TrampolinePool  = nullptr;
+        g_TrampolineCount = 0;
+        g_Syscalls        = {};
+    }
+
     std::vector<BYTE> ntdllBuf;
     if (!ReadNtdllFromDisk(ntdllBuf)) return FALSE;
 

