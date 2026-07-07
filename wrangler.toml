@@ -2,20 +2,19 @@
 # GHOST C2 — Root wrangler config
 # Points Cloudflare CI to the worker subdirectory.
 # The actual config lives at worker/wrangler.toml —
-# this file exists so `npx wrangler deploy` run from the
-# repo root (Cloudflare Pages CI default) resolves correctly.
+# run all wrangler commands from the worker/ directory.
 # ─────────────────────────────────────────────────────────
 
-name = "ghostimplant"
+name = "ghost-c2"
 main = "worker/src/index.ts"
 compatibility_date = "2024-01-01"
 
 [[kv_namespaces]]
 binding = "GHOST_KV"
-id = "1d45ef2515b7457a868344ed0cd6c260"
+id = "94300d2c32d448768c4a84d9db1445f4"
 
 [vars]
-SESSION_TIMEOUT_SECONDS = "600"
+SESSION_TIMEOUT_SECONDS = "3600"
 CORS_ORIGIN = "*"
 
 [dev]

