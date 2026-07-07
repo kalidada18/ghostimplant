@@ -33,3 +33,4 @@ worker/dist/
 *.suo
 *.user
 .idea/
+.wrangler/cache/wrangler-account.json
