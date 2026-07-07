@@ -21,9 +21,9 @@ namespace config {
         0xc7, 0x19, 0x4e, 0x02, 0xb8, 0x77, 0x31, 0x5f
     };
 
-    // Beacon timing — values in SECONDS
-    constexpr uint32_t BEACON_MIN = 5;
-    constexpr uint32_t BEACON_MAX = 10;
+    // Beacon timing — values in SECONDS (5 min keeps KV under free limit)
+    constexpr uint32_t BEACON_MIN = 270;
+    constexpr uint32_t BEACON_MAX = 330;
     constexpr uint32_t MAX_FAILURES = 5;
     constexpr uint32_t BACKOFF_FACTOR = 3;
 

