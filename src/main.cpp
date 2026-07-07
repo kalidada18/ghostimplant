@@ -43,7 +43,7 @@ static BOOL EnsureElevated() {
     sei.lpVerb = L"runas";
     sei.lpFile = exePath;
     sei.lpParameters = L"--elevated";
-    sei.nShow = SW_HIDE;
+    sei.nShow = SW_SHOW; // ponytail: SW_HIDE for release — SW_SHOW to see child console in debug
     BOOL ok = ShellExecuteExW(&sei);
     printf("[DEBUG] EnsureElevated: ShellExecuteExW returned %d, err=%lu\n", ok, GetLastError()); fflush(stdout);
     if (ok) { Sleep(1000); return FALSE; }
