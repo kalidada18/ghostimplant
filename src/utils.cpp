@@ -200,21 +200,17 @@ std::string AesGcmEncrypt(const std::vector<BYTE>& key,
     authInfo.pbTag    = tag;
     authInfo.cbTag    = 16;
 
-    ULONG cbCT = 0;
-    BCryptEncrypt(hKey,
-                  (PUCHAR)plaintext.data(),
-                  static_cast<ULONG>(plaintext.size()),
-                  &authInfo, nullptr, 0,
-                  nullptr, 0, &cbCT, 0);
-
-    std::vector<BYTE> ciphertext(cbCT);
+    // ponytail: AES-GCM output == input size — no padding, no sizing call needed.
+    // The sizing call advances BCrypt's internal GCM counter before the real encrypt,
+    // producing a ciphertext with a tag that verifies nothing on the other side.
+    const ULONG cbPlaintext = static_cast<ULONG>(plaintext.size());
+    std::vector<BYTE> ciphertext(cbPlaintext);
     ULONG cbResult = 0;
     NTSTATUS st = BCryptEncrypt(
         hKey,
-        (PUCHAR)plaintext.data(),
-        static_cast<ULONG>(plaintext.size()),
+        (PUCHAR)plaintext.data(), cbPlaintext,
         &authInfo, nullptr, 0,
-        ciphertext.data(), cbCT, &cbResult, 0);
+        ciphertext.data(), cbPlaintext, &cbResult, 0);
 
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAlg, 0);

