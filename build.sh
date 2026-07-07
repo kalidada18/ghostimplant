@@ -167,6 +167,7 @@ echo "[*] Compiling $IMPLANT_OUT …"
     -loleaut32           \
     -lwbemuuid           \
     -lbcrypt             \
+    -lcrypt32            \
     -lwinhttp            \
     -ldnsapi             \
     -lshlwapi            \
