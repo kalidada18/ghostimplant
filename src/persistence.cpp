@@ -47,8 +47,10 @@ struct CoGuard {
 static HRESULT ConnectWMI(const wchar_t* ns, IWbemServices** ppSvc) {
     auto hOle = GetModuleHandleA(XS("ole32.dll"));
     if (!hOle) hOle = LoadLibraryA(XS("ole32.dll"));
+    if (!hOle) return E_FAIL;
     auto _CoCreateInstance = HASHPROC(hOle, CoCreateInstance);
     auto _CoSetProxyBlanket = HASHPROC(hOle, CoSetProxyBlanket);
+    if (!_CoCreateInstance || !_CoSetProxyBlanket) return E_FAIL;
     IWbemLocator* pLoc = nullptr;
     HRESULT hr = _CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
                                    IID_IWbemLocator, (void**)&pLoc);
