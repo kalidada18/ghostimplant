@@ -89,7 +89,6 @@ COMMON_FLAGS=(
     -ffunction-sections
     -fdata-sections
     -fstack-protector-strong
-    -fseh-exceptions
     -I include
     -Wall -Wextra
     -Wno-unused-parameter
