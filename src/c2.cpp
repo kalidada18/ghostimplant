@@ -733,7 +733,6 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
         if (!ReadFile(hRead, buf, sizeof(buf), &rd, nullptr) || rd == 0) break;
         output.append(buf, rd);
     }
-    DWORD exitCode = 0;
     if (WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS) == WAIT_TIMEOUT) {
         TerminateProcess(pi.hProcess, 1);
     }
