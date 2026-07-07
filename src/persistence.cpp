@@ -35,8 +35,10 @@ struct CoGuard {
             auto _CoInitializeEx = HASHPROC(hOle, CoInitializeEx);
             _CoUninitialize = HASHPROC(hOle, CoUninitialize);
             if (_CoInitializeEx) hr = _CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            else hr = E_FAIL;
+        } else {
+            hr = E_FAIL;
         }
-        hr = E_FAIL;
     }
     ~CoGuard() { if (ok() && _CoUninitialize) _CoUninitialize(); }
     bool ok() const { return SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE; }

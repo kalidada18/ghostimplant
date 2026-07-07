@@ -257,9 +257,11 @@ static PVOID BuildTrampoline(DWORD ssn) {
 
 static VOID FinalizeTrampolinePool() {
     if (!g_TrampolinePool || g_TrampolineCount == 0) return;
+    constexpr size_t STUB_LEN = 11;
+    size_t totalBytes = STUB_LEN * g_TrampolineCount;
     DWORD oldProt = 0;
-    VirtualProtect(g_TrampolinePool, 11 * g_TrampolineCount, PAGE_EXECUTE_READ, &oldProt);
-    FlushInstructionCache(GetCurrentProcess(), g_TrampolinePool, 11 * g_TrampolineCount);
+    VirtualProtect(g_TrampolinePool, totalBytes, PAGE_EXECUTE_READ, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_TrampolinePool, totalBytes);
 }
 
 // ============================================================

