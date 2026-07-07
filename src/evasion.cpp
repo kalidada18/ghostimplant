@@ -40,8 +40,11 @@ VOID DeepSleep() {
 
 // ─── Sandbox detection ────────────────────────────────────────────────────────
 static BOOL IsLikelySandbox() {
-    // ponytail: set to 0 for VM testing; raise to 60000 for deployment
-    return GetTickCount64() < 0ULL;
+#ifdef DEBUG
+    return FALSE; // ponytail: disabled in debug; set threshold to 60000ULL for release
+#else
+    return GetTickCount64() < 60000ULL;
+#endif
 }
 
 // ─── MemPatch (protect → patch → restore) ────────────────────────────────────
