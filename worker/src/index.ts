@@ -80,6 +80,37 @@ const PAYLOAD_TTL = 86_400 * 30;
 const KV_MAX_RETRIES = 3;
 const KV_RETRY_BASE_MS = 200;
 
+// ─── Rate Limiter (in-memory, per-IP, per-Worker-instance) ──
+// Cloudflare Workers are stateless across instances but this protects
+// against burst attacks within a single instance lifetime.
+const RL_WINDOW_MS = 60_000;   // 1 minute window
+const RL_AUTH_MAX  = 5;        // max 5 login attempts per minute per IP
+const RL_API_MAX   = 120;      // max 120 API calls per minute per IP
+
+const _rlBuckets = new Map<string, { count: number; reset: number }>();
+
+function rateLimitHit(key: string, max: number): boolean {
+  const now = Date.now();
+  let bucket = _rlBuckets.get(key);
+  if (!bucket || now > bucket.reset) {
+    bucket = { count: 0, reset: now + RL_WINDOW_MS };
+    _rlBuckets.set(key, bucket);
+  }
+  bucket.count++;
+  // Prune old keys occasionally to avoid memory leak
+  if (_rlBuckets.size > 10_000) {
+    for (const [k, v] of _rlBuckets) { if (now > v.reset) _rlBuckets.delete(k); }
+  }
+  return bucket.count > max;
+}
+
+function rateLimitResponse(): Response {
+  return new Response(JSON.stringify({ error: "Too many requests" }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", "Retry-After": "60" },
+  });
+}
+
 // ─── Crypto Helpers ───────────────────────────────────────
 
 /**
@@ -980,7 +1011,11 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     } catch(e) { toast('NETWORK ERROR', 'err'); return null; }
   }
 
-  function logout() { sessionStorage.removeItem('ghost_token'); location.href = '/'; }
+  function logout() {
+    sessionStorage.removeItem('ghost_token');
+    // POST to /logout to clear any server-side state, then go to login
+    fetch('/logout', { method: 'POST' }).finally(() => { location.href = '/logout'; });
+  }
   window.logout = logout;
 
   // ── Sessions ──
@@ -1269,6 +1304,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const { pathname: path } = url;
   const method = request.method;
+  const ip = getClientIP(request);
 
   // CORS preflight
   if (method === "OPTIONS") {
@@ -1290,7 +1326,20 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
   }
+  // Logout — clears session client-side, serves a redirect page
+  if (path === "/logout") {
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta http-equiv="refresh" content="0;url=/">
+<style>*{margin:0;padding:0}body{background:#060810;display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#484f58;font-size:12px}</style>
+</head><body>LOGGING OUT...</body></html>`;
+    return new Response(html, {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
   if (path === "/auth" && method === "POST") {
+    // Rate limit auth: 5 attempts per minute per IP
+    if (rateLimitHit(`auth:${ip}`, RL_AUTH_MAX)) return rateLimitResponse();
     return withCORS(await handleAuth(request, env), env);
   }
 
@@ -1300,11 +1349,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
   // ── Beacon routes (X-Beacon-Token) ────────────────────
   if (path === "/beacon" && method === "POST") {
+    if (rateLimitHit(`beacon:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireBeaconToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleBeacon(request, env), env);
   }
   if (path === "/result" && method === "POST") {
+    if (rateLimitHit(`result:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireBeaconToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleResult(request, env), env);
@@ -1316,14 +1367,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   // ── Operator routes (X-Operator-Token, Nepal only) ────────
+  // Rate limit all operator API calls: 120/min per IP
   if (path === "/sessions" && method === "GET") {
     if (!isNepal(request)) return geoBlock();
+    if (rateLimitHit(`op:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleListSessions(request, env), env);
   }
   if (path === "/task" && method === "POST") {
     if (!isNepal(request)) return geoBlock();
+    if (rateLimitHit(`op:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAddTask(request, env), env);

