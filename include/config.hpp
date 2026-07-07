@@ -21,10 +21,9 @@ namespace config {
         0xc7, 0x19, 0x4e, 0x02, 0xb8, 0x77, 0x31, 0x5f
     };
 
-    // Beacon timing — values in SECONDS, passed to JitterSleep()
-    // Keep low during testing; raise to 30–120 for production
-    constexpr uint32_t BEACON_MIN = 30;
-    constexpr uint32_t BEACON_MAX = 60;
+    // Beacon timing — values in SECONDS
+    constexpr uint32_t BEACON_MIN = 5;
+    constexpr uint32_t BEACON_MAX = 10;
     constexpr uint32_t MAX_FAILURES = 5;
     constexpr uint32_t BACKOFF_FACTOR = 3;
 
