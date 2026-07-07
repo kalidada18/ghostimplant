@@ -128,12 +128,18 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     fflush(stdout);
 
     // Elevate if not already admin
-    if (strstr(lpCmdLine, "--elevated") == nullptr) {
+    printf("[DEBUG] Checking elevation flag...\n"); fflush(stdout);
+    bool hasElevatedFlag = lpCmdLine && strstr(lpCmdLine, "--elevated") != nullptr;
+    printf("[DEBUG] hasElevatedFlag=%d\n", (int)hasElevatedFlag); fflush(stdout);
+    if (!hasElevatedFlag) {
+        printf("[DEBUG] Calling EnsureElevated...\n"); fflush(stdout);
         if (!EnsureElevated()) {
-            printf("[DEBUG] Elevation requested – exiting.\n");
+            printf("[DEBUG] Elevation requested – exiting. Press Enter...\n");
             fflush(stdout);
+            getchar();
             return 0;
         }
+        printf("[DEBUG] EnsureElevated returned TRUE\n"); fflush(stdout);
     }
     printf("[DEBUG] Running as admin: %s\n", IsElevated() ? "YES" : "NO");
     fflush(stdout);
