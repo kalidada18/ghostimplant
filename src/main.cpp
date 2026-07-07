@@ -135,6 +135,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             return 0;
         }
     }
+    printf("[DEBUG] Running as admin: %s\n", IsElevated() ? "YES" : "NO");
+    fflush(stdout);
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
