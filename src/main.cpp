@@ -122,6 +122,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     FILE* f = nullptr;
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
+    atexit([]{ printf("\n[DEBUG] Press Enter to exit...\n"); fflush(stdout); getchar(); });
 #endif
     printf("[DEBUG] WinMain entered\n");
     fflush(stdout);
