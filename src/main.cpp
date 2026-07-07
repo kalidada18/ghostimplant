@@ -116,6 +116,13 @@ DWORD WINAPI ImplantThread(LPVOID) {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
+    // ponytail: attach console in debug so printf is visible; remove for release
+#ifdef DEBUG
+    AllocConsole();
+    FILE* f = nullptr;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+    freopen_s(&f, "CONOUT$", "w", stderr);
+#endif
     printf("[DEBUG] WinMain entered\n");
     fflush(stdout);
 

