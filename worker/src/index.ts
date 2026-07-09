@@ -494,6 +494,7 @@ async function handleResult(request: Request, env: Env): Promise<Response> {
       recon: {},
       pending_tasks: 0,
       result_count: 1,
+      status: "pending",
     }, ttl);
   }
 
@@ -1243,12 +1244,16 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
             list_sessions:'var(--muted2)',get_results2:'var(--blue)'};
 
   async function acceptSession(sid) {
-    await api('/sessions/'+encodeURIComponent(sid)+'/accept',{method:'POST'});
-    toast('SESSION ACCEPTED'); fetchAudit(); refreshSessions();
+    const r=await api('/sessions/'+encodeURIComponent(sid)+'/accept',{method:'POST'});
+    if (!r) return;
+    if (r.ok) { toast('SESSION ACCEPTED'); } else { toast('ACCEPT FAILED: '+r.status,'err'); }
+    fetchAudit(); refreshSessions();
   }
   async function rejectSession(sid) {
-    await api('/sessions/'+encodeURIComponent(sid)+'/reject',{method:'POST'});
-    toast('SESSION REJECTED','warn'); fetchAudit(); refreshSessions();
+    const r=await api('/sessions/'+encodeURIComponent(sid)+'/reject',{method:'POST'});
+    if (!r) return;
+    if (r.ok) { toast('SESSION REJECTED','warn'); } else { toast('REJECT FAILED: '+r.status,'err'); }
+    fetchAudit(); refreshSessions();
   }
   window.acceptSession = acceptSession;
   window.rejectSession = rejectSession;
