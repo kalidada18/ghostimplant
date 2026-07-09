@@ -1274,7 +1274,7 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
         <div class="a-action" style="color:\${color}">\${esc(label)}</div>
         \${sid?'<div class="a-sid">'+esc(sid)+'</div>':''}
         <div class="a-ip">\${esc(e.ip)}</div>
-        \${isPending?'<div class="a-btns"><button class="a-accept" onclick="acceptSession('+JSON.stringify(sid)+')">ACCEPT</button><button class="a-reject" onclick="rejectSession('+JSON.stringify(sid)+')">REJECT</button></div>':''}
+        \${isPending?'<div class="a-btns"><button class="a-accept" onclick="acceptSession(\''+esc(sid)+'\')">ACCEPT</button><button class="a-reject" onclick="rejectSession(\''+esc(sid)+'\')">REJECT</button></div>':''}
       </div>\`;
     }).join('');
   }
