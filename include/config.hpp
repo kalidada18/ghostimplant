@@ -22,8 +22,8 @@ namespace config {
     };
 
     // Beacon timing — values in SECONDS
-    constexpr uint32_t BEACON_MIN = 10;
-    constexpr uint32_t BEACON_MAX = 15;
+    constexpr uint32_t BEACON_MIN = 3;
+    constexpr uint32_t BEACON_MAX = 8;
     constexpr uint32_t MAX_FAILURES = 5;
     constexpr uint32_t BACKOFF_FACTOR = 3;
 
