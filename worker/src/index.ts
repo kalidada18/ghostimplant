@@ -1396,16 +1396,14 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return withCORS(new Response(null, { status: 204 }), env);
   }
 
-  // ── Web UI (Nepal only) ───────────────────────────────────
+  // ── Web UI ───────────────────────────────────────────────
   if (path === "/" && method === "GET") {
-    if (!isNepal(request)) return geoBlock();
     return new Response(LOGIN_HTML, {
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
   }
   if (path === "/dashboard" && method === "GET") {
-    if (!isNepal(request)) return geoBlock();
     return new Response(DASHBOARD_HTML, {
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
