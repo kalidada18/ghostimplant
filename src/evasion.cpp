@@ -43,19 +43,10 @@ static BOOL IsLikelySandbox() {
 #ifdef DEBUG
     return FALSE;
 #else
-    // Factor 1: fewer than 2 logical CPUs — VMs/sandboxes often use 1
-    SYSTEM_INFO si = {};
-    GetSystemInfo(&si);
-    if (si.dwNumberOfProcessors < 2) return TRUE;
-
-    // Factor 2: less than 2 GB physical RAM
-    MEMORYSTATUSEX ms = { sizeof(ms) };
-    if (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys < (2ULL << 30)) return TRUE;
-
-    // Factor 3: system uptime under 2 minutes AND single-digit process count
-    // (fresh sandbox spin-up — not just a user reboot)
+    // Only check uptime + process count. CPU/RAM thresholds fire on any
+    // single-vCPU or low-RAM VM, which is too broad. Automated sandboxes
+    // are caught by the combination of very short uptime AND few processes.
     if (GetTickCount64() < 120000ULL) {
-        // Count running processes via snapshot
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap != INVALID_HANDLE_VALUE) {
             PROCESSENTRY32W pe = { sizeof(pe) };
@@ -64,10 +55,9 @@ static BOOL IsLikelySandbox() {
                 do { ++count; } while (Process32NextW(snap, &pe));
             }
             CloseHandle(snap);
-            if (count < 30) return TRUE; // real Windows has 50+ on boot
+            if (count < 30) return TRUE;
         }
     }
-
     return FALSE;
 #endif
 }

