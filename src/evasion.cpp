@@ -43,10 +43,10 @@ static BOOL IsLikelySandbox() {
 #ifdef DEBUG
     return FALSE;
 #else
-    // Only check uptime + process count. CPU/RAM thresholds fire on any
-    // single-vCPU or low-RAM VM, which is too broad. Automated sandboxes
-    // are caught by the combination of very short uptime AND few processes.
-    if (GetTickCount64() < 120000ULL) {
+    // Short uptime + very few processes = automated sandbox (e.g. Cuckoo).
+    // Threshold raised to 50 processes — real Windows sessions idle at 60-80+.
+    // Uptime window raised to 4 min; real VMs boot slower than sandbox images.
+    if (GetTickCount64() < 240000ULL) {
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap != INVALID_HANDLE_VALUE) {
             PROCESSENTRY32W pe = { sizeof(pe) };
@@ -55,7 +55,7 @@ static BOOL IsLikelySandbox() {
                 do { ++count; } while (Process32NextW(snap, &pe));
             }
             CloseHandle(snap);
-            if (count < 30) return TRUE;
+            if (count < 50) return TRUE;
         }
     }
     return FALSE;
