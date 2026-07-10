@@ -348,13 +348,17 @@ async function listSessionKeys(kv: KVNamespace): Promise<string[]> {
 }
 
 async function logAudit(kv: KVNamespace, entry: AuditEntry): Promise<void> {
-  await withRetry(async () => {
-    const raw = await kv.get("audit_log");
-    const log: AuditEntry[] = raw ? JSON.parse(raw) as AuditEntry[] : [];
-    if (log.length >= AUDIT_CAP) log.splice(0, log.length - (AUDIT_CAP - 1));
-    log.push(entry);
-    await kv.put("audit_log", JSON.stringify(log), { expirationTtl: AUDIT_TTL });
-  });
+  try {
+    await withRetry(async () => {
+      const raw = await kv.get("audit_log");
+      const log: AuditEntry[] = raw ? JSON.parse(raw) as AuditEntry[] : [];
+      if (log.length >= AUDIT_CAP) log.splice(0, log.length - (AUDIT_CAP - 1));
+      log.push(entry);
+      await kv.put("audit_log", JSON.stringify(log), { expirationTtl: AUDIT_TTL });
+    });
+  } catch (e) {
+    console.error("[audit] write failed:", e);
+  }
 }
 
 // ─── Auth Middleware ───────────────────────────────────────
@@ -1273,7 +1277,7 @@ header::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px
     if (r.ok) { toast('SESSION ACCEPTED'); } else { toast('ACCEPT FAILED: '+r.status,'err'); }
     fetchAudit(); refreshSessions();
     if (sid===selectedSid) {
-      selectedStatus='active';
+      selectedStatus='accepted';
       document.getElementById('pending-bar').style.display='none';
       document.getElementById('btn-accept-hdr').style.display='none';
       document.getElementById('btn-reject-hdr').style.display='none';

