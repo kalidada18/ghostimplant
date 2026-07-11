@@ -281,6 +281,7 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     THREADENTRY32 te = {};
     te.dwSize = sizeof(te);
     BOOL queued = FALSE;
+    NTSTATUS st = 0;
 
     if (_Thread32First(snap, &te)) {
         do {

