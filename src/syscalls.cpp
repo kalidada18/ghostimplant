@@ -341,10 +341,10 @@ BOOL InitializeSyscalls() {
         }                                                        \
     } while (0)
 
-    // ── Critical (must resolve) ──────────────────────────────
-    RESOLVE("NtAllocateVirtualMemory",  NtAllocateVirtualMemory);
-    RESOLVE("NtWriteVirtualMemory",     NtWriteVirtualMemory);
-    RESOLVE("NtProtectVirtualMemory",   NtProtectVirtualMemory);
+    // ── Injection ops: optional, fall back to Win32 if SSN unavailable ──
+    RESOLVE_OPT("NtAllocateVirtualMemory",  NtAllocateVirtualMemory);
+    RESOLVE_OPT("NtWriteVirtualMemory",     NtWriteVirtualMemory);
+    RESOLVE_OPT("NtProtectVirtualMemory",   NtProtectVirtualMemory);
 
     // ── Optional (injection / query; null = Win32 fallback) ──
     RESOLVE_OPT("NtCreateThreadEx",         NtCreateThreadEx);

