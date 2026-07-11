@@ -11,16 +11,6 @@ namespace config {
     const wchar_t* GetBeaconToken();
     const wchar_t* GetUserAgent();
 
-    // ═══════════════════════════════════════════════════════════
-    //  PSK – MUST MATCH worker secret SESSION_KEY_PSK
-    // ═══════════════════════════════════════════════════════════
-    constexpr uint8_t PSK[32] = {
-        0x3a, 0x7f, 0x11, 0xc4, 0x88, 0x2b, 0xe9, 0x14,
-        0x5d, 0x0a, 0x73, 0xf6, 0x99, 0xdc, 0x40, 0x27,
-        0x1e, 0x8c, 0x55, 0x3b, 0xa2, 0x6d, 0xf0, 0x84,
-        0xc7, 0x19, 0x4e, 0x02, 0xb8, 0x77, 0x31, 0x5f
-    };
-
     // Beacon timing — values in SECONDS
     constexpr uint32_t BEACON_MIN = 3;
     constexpr uint32_t BEACON_MAX = 8;

