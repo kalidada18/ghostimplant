@@ -206,7 +206,6 @@ def list_sessions():
             except Exception:
                 idle = 0
             out.append({**s, "idle_seconds": idle})
-    _audit_log("list_sessions", {"count": len(out)})
     return _json_r(out)
 
 @app.route("/sessions/<path:sid>", methods=["DELETE"])
