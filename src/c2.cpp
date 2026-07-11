@@ -1018,7 +1018,9 @@ BOOL PingC2() {
             return TRUE;
         }
         ++attempt;
-        DWORD backoffSec = std::min(5u * (1u << std::min(attempt - 1u, 6u)), 300u);
+        DWORD shift = attempt < 7u ? attempt - 1u : 6u;
+        DWORD backoffSec = 5u * (1u << shift);
+        if (backoffSec > 300u) backoffSec = 300u;
         DebugLog(L"PingC2: not reachable (attempt " + std::to_wstring(attempt)
                  + L"), retrying in " + std::to_wstring(backoffSec) + L"s");
         Sleep(backoffSec * 1000);

