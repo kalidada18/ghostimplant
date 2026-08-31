@@ -35,3 +35,6 @@ BEGIN
 END
 
 1 24 "resources/ghost.manifest"
+
+// Embedded prank wallpaper — extracted to %PUBLIC% by the !prank command
+100 RCDATA "resources/wall.jpg"

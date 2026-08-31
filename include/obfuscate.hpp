@@ -96,8 +96,14 @@ struct XorStrW {
 // ─── PEB-based API hash resolution ──────────────────────────────────────────
 // Walks the loaded module's export table and compares FNV-1a(name) against
 // targetHash. Zero string comparison in the binary — only hashes.
-inline FARPROC HashProc(HMODULE hMod, uint32_t targetHash) {
-    if (!hMod) return nullptr;
+//
+// Forwarder exports (e.g. ole32!CoCreateInstance → "combase.CoCreateInstance"
+// on Win10/11) are pointers to an ASCII string, NOT to code. Calling one
+// executes a data page → instant ACCESS_VIOLATION. When the matched RVA falls
+// inside the export directory, resolve the forwarder target module and
+// recurse. Depth-capped against forwarder cycles.
+inline FARPROC HashProc(HMODULE hMod, uint32_t targetHash, int depth = 0) {
+    if (!hMod || depth > 4) return nullptr;
     auto base = reinterpret_cast<const uint8_t*>(hMod);
 
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
@@ -120,6 +126,25 @@ inline FARPROC HashProc(HMODULE hMod, uint32_t targetHash) {
         const char* name = reinterpret_cast<const char*>(base + names[i]);
         if (fnv1a(name) == targetHash) {
             DWORD fnRva = funcs[ordinals[i]];
+
+            // Forwarder: RVA points into the export directory itself.
+            if (fnRva >= expDataDir.VirtualAddress &&
+                fnRva <  expDataDir.VirtualAddress + expDataDir.Size) {
+                const char* fwd = reinterpret_cast<const char*>(base + fnRva);
+                char modName[64];
+                size_t j = 0;
+                while (fwd[j] && fwd[j] != '.' && j < sizeof(modName) - 1) {
+                    modName[j] = fwd[j];
+                    ++j;
+                }
+                if (fwd[j] != '.' || j == 0) return nullptr; // malformed / #ordinal form
+                modName[j] = '\0';
+                HMODULE hTarget = GetModuleHandleA(modName);
+                if (!hTarget) hTarget = LoadLibraryA(modName);
+                if (!hTarget) return nullptr;
+                return HashProc(hTarget, fnv1a(fwd + j + 1), depth + 1);
+            }
+
             return reinterpret_cast<FARPROC>(
                 const_cast<uint8_t*>(base + fnRva));
         }

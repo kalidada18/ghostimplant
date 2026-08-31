@@ -1,5 +1,6 @@
 # GHOST C2 server + operator CLI
 # Python 3.10+ required
 flask>=3.0
+cryptography>=42.0
 requests>=2.31
 urllib3>=2.0
