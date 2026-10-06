@@ -240,6 +240,39 @@ def main():
     blob = srv._enc_blob(imp.key, {"x": 'a"b\\c\nü'})
     check("enc/dec round trip", srv._dec_blob(imp.key, blob) == {"x": 'a"b\\c\nü'})
 
+    print("── wire base64 is canonical (implant decoder is strict) ──")
+    # src/utils.cpp Base64Decode now rejects '=' in the first two positions of a
+    # quartet, padding in any non-final quartet, and any alphabet char after a
+    # pad. Mirror those rules and push every string the server actually emits
+    # through them, so the tightened implant decoder can never start refusing a
+    # legitimate frame.
+    ALPHA = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+    def strict_b64_ok(s):
+        if len(s) % 4:
+            return False
+        for i in range(0, len(s), 4):
+            last = (i + 4 == len(s))
+            saw_pad = False
+            for j, c in enumerate(s[i:i + 4]):
+                if c == '=':
+                    if j < 2 or not last:
+                        return False
+                    saw_pad = True
+                elif saw_pad or c not in ALPHA:
+                    return False
+        return True
+
+    check("server spk passes strict decoder", strict_b64_ok(srv._SRV_PUB_B64))
+    check("adopted server pub passes strict decoder", strict_b64_ok(imp.srv_pub_b64))
+    check("wire blob passes strict decoder",
+          strict_b64_ok(srv._enc_blob(imp.key, {"output": ""})))
+    # The mirror needs teeth or the three checks above prove nothing.
+    check("mirror rejects mid-quartet pad", not strict_b64_ok("AB=C"))
+    check("mirror rejects leading pad", not strict_b64_ok("A==="))
+    check("mirror rejects pad in non-final quartet", not strict_b64_ok("AB==CD=="))
+    check("mirror accepts canonical form", strict_b64_ok("QQ=="))
+
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

