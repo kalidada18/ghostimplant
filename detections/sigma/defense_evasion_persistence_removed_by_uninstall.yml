@@ -1,0 +1,49 @@
+title: GHOST Lab - Persistence Removed By Implant Uninstall
+id: 1d64a9c3-82f5-40be-9371-5c8a2d107f6b
+status: experimental
+description: >
+  Detects the teardown the !uninstall handler in src/c2.cpp drives through
+  src/persistence.cpp: schtasks /Delete for the task, RegDeleteTree-equivalent
+  removal of the Run value, and DeleteInstance against the WMI filter,
+  consumers and binding. Written because indicator removal is the half of this
+  project an EDR most often misses. Removal is only worth detecting when it is
+  asymmetric, and here it is: a scheduled task and a WMI subscription can be
+  installed by an ordinary user but their deletion by that same user, with no
+  administrative session in between, is unusual.
+references:
+  - https://attack.mitre.org/techniques/T1070/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.defense_evasion
+  - attack.t1070.004
+  - attack.t1070.008
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_task_delete:
+    EventID: 1
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains|all:
+      - '/Delete'
+      - '/TN'
+  selection_run_key_delete:
+    EventID: 12
+    TargetObject|contains: '\CurrentVersion\Run'
+    TargetObject|endswith: '\WindowsStorageService'
+  selection_wmi_delete:
+    EventID: 21
+    Operation: 'Delete'
+  condition: selection_task_delete or selection_run_key_delete or selection_wmi_delete
+falsepositives:
+  - Routine administrative cleanup, uninstallers, and any scheduled-task
+    management. The task-delete arm is deliberately generic because scoping it
+    to the one task name makes the rule a GHOST signature rather than a
+    behaviour rule.
+  - Note on the T1070.008 tag. README section 16 assigns persistence removal to
+    that sub-technique, and the tag follows the matrix as written in this repo,
+    but the README itself carries a standing caveat that ATT&CK renumbers and
+    renames. Re-verify the sub-technique id against the live matrix before
+    citing this rule; the parent T1070 is the safe citation.
+level: medium

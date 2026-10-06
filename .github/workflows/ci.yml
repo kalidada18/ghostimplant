@@ -30,3 +30,20 @@ jobs:
         run: C2_HOST=ci-build.example.invalid C2_PORT=443 GHOST_BEACON_TOKEN=ci-build-token-not-for-operational-use ./build.sh
       - name: Verify artifact
         run: test -f build/WindowsSecurityUpdate.exe && file build/WindowsSecurityUpdate.exe
+
+  detection-artifacts:
+    name: Detection artifacts (Sigma + Sysmon)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install detector tooling
+        run: pip install -r detections/requirements.txt
+      # Fails on malformed rules, duplicate or non-canonical UUIDs, a condition
+      # naming an undefined selector, a selector nothing references, a rule whose
+      # Sysmon event id the collector config does not enable, and any README
+      # technique with neither a rule nor a stated reason for the gap.
+      - name: Validate rules and coverage accounting
+        run: python detections/check_coverage.py --report

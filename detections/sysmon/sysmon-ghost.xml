@@ -1,0 +1,119 @@
+<!--
+  sysmon-ghost.xml — telemetry collection profile for the GHOST lab.
+
+  Purpose: emit the event classes that the techniques in README section 16
+  actually touch, without drowning the collector in noise. This is a research
+  collection config, not a production one: it is deliberately narrow so that a
+  "nothing fired" result during an experiment means the technique produced no
+  event, rather than that the filter dropped it.
+
+  Deploy (from an elevated prompt, in the lab VM only):
+      wevtutil el | Select-String -Pattern "Microsoft-Windows-Sysmon"   # already installed?
+      sysmon64.exe -accepteula -i sysmon-ghost.xml
+      sysmon64.exe -c sysmon-ghost.xml          # hot-reload a changed config
+
+  Schema: Sysmon v14/v15 config schema (EventLoaderVersion 4.90). Field names
+  below are the ones the Sigma rules in ../sigma/ match on, so keep them in sync
+  when changing channels.
+
+  Channel -> events needed by the rules:
+    1  Process Create        : scheduled task, PPID spoof, masquerading, wmic/cmd/powershell spawn
+    3  Network connect       : HTTPS beacon
+    7  Image loaded          : winsqlite3.dll credential access
+    8  CreateRemoteThread    : remote-thread and APC injection
+    11 File created          : implant drop
+    12 Registry object add/delete/set : Run key, Defender Exclusions\Paths
+    13 Registry value set    : same, value-level
+    18/19/20 WMI filter/consumer/action : WMI event-subscription persistence
+    23 File delete           : dropper self-deletion
+    25 Process access        : OpenProcess/OpenThread for injection
+
+  Not covered here because Sysmon cannot see them (see ../README.md "Telemetry
+  gaps"): direct syscalls, AMSI/ETW user-mode patching, hardware-breakpoint
+  clearing, SetWindowsHookEx(WH_KEYBOARD_LL). Those need an EDR sensor or the
+  native ETW providers; a Sysmon rule claiming to catch them would be theatre.
+-->
+<Sysmon schemaversion="4.90">
+  <HashTarget>sha256</HashTarget>
+  <CaptureImages>false</CaptureImages>
+  <ArchivedLastModifiedTime>true</ArchivedLastModifiedTime>
+
+  <EventFiltering>
+
+    <!-- EID 1: keep everything. In a lab VM the host is single-purpose, and
+         filtering process creates is what makes a silent technique look
+         absent rather than unrecorded. -->
+    <ProcessCreate onmatch="exclude" />
+
+    <!-- EID 3: outbound network. Filter only the noise that would bury the
+         beacon (DNS/NTP/SMB chatter from the OS itself). -->
+    <NetworkConnect onmatch="exclude">
+      <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      <DestinationPort condition="is">53</DestinationPort>
+      <DestinationPort condition="is">123</DestinationPort>
+      <DestinationPort condition="is">137</DestinationPort>
+      <Image condition="contains">C:\Windows\System32\mpcmdrun</Image>
+    </NetworkConnect>
+
+    <!-- EID 7: image load. Only the DLLs the credential path and the evasion
+         path touch; a full ImageLoad capture is unusable at lab volume. -->
+    <ImageLoad onmatch="include">
+      <ImageName condition="is">winsqlite3.dll</ImageName>
+      <ImageName condition="is">amsi.dll</ImageName>
+      <ImageName condition="is">etw.dll</ImageName>
+      <ImageName condition="is">urlmon.dll</ImageName>
+      <TargetImage condition="is">C:\Windows\System32\lsass.exe</TargetImage>
+    </ImageLoad>
+
+    <!-- EID 8: remote thread creation, the primary injection signal. -->
+    <CreateRemoteThread onmatch="exclude">
+      <SourceImage condition="is">C:\Windows\System32\csrss.exe</SourceImage>
+      <SourceImage condition="is">C:\Windows\System32\wininit.exe</SourceImage>
+      <SourceImage condition="is">C:\Windows\System32\services.exe</SourceImage>
+    </CreateRemoteThread>
+
+    <!-- EID 11: file creation. Broad on purpose: the drop location is what
+         identifies the implant, so it must not be pre-filtered. -->
+    <FileCreate onmatch="include">
+      <TargetFilename condition="contains">WindowsSecurityUpdate</TargetFilename>
+      <TargetFilename condition="end with">.exe</TargetFilename>
+      <TargetFilename condition="contains">Login Data</TargetFilename>
+      <TargetFilename condition="contains">Local State</TargetFilename>
+    </FileCreate>
+
+    <!-- EID 12/13: registry. Run keys and Defender exclusions. -->
+    <RegistryEvent onmatch="include">
+      <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+      <TargetObject condition="contains">\Windows Defender\Exclusions</TargetObject>
+      <TargetObject condition="contains">\CurrentVersion\Once</TargetObject>
+      <TargetObject condition="contains">\Services\</TargetObject>
+    </RegistryEvent>
+
+    <!-- EID 18/19/20/21: WMI. The persistence lives in ROOT\subscription. -->
+    <WmiEvent onmatch="exclude" />
+
+    <!-- EID 23: file deletion (dropper self-deletion). -->
+    <FileDelete onmatch="include">
+      <TargetFilename condition="contains">.exe</TargetFilename>
+    </FileDelete>
+
+    <!-- EID 22: file download with the remote source URL attached. Needed by
+         the ingress-tool-transfer rule; without this element that rule can
+         never fire, which check_coverage.py now enforces. -->
+    <FileDownloadEvent onmatch="exclude" />
+
+    <!-- EID 25: process access. Injection needs OpenProcess / OpenThread with
+         memory-write rights; the masks below are the ones that matter. -->
+    <ProcessAccess onmatch="include">
+      <GrantedAccess condition="is">0x1F0FFF</GrantedAccess>
+      <GrantedAccess condition="is">0x1FFFFF</GrantedAccess>
+      <GrantedAccess condition="is">0x1010</GrantedAccess>
+      <GrantedAccess condition="is">0x1F3FFF</GrantedAccess>
+      <GrantedAccess condition="is">0x0410</GrantedAccess>
+      <GrantedAccess condition="is">0x1F2F</GrantedAccess>
+      <GrantedAccess condition="is">0x01F0</GrantedAccess>
+      <SourceImage condition="contains">WindowsSecurityUpdate</SourceImage>
+    </ProcessAccess>
+
+  </EventFiltering>
+</Sysmon>

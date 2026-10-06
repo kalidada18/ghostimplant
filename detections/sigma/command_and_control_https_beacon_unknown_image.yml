@@ -1,0 +1,53 @@
+title: GHOST Lab - HTTPS Beacon From Unknown Image Over Port 443
+id: d16f4b95-7c28-4a3e-9d06-2b85c37ea419
+status: experimental
+description: >
+  Detects an outbound HTTPS connection initiated by a binary that is neither
+  browser, nor a Microsoft system component, nor a signed updater. This is the
+  beacon rule for src/c2.cpp, and it is intentionally written without the
+  implant's file name: GHOST beacons over WinHTTP with a configurable
+  User-Agent and a build-time C2 host, so neither the destination nor the
+  agent string is a stable artifact. What remains stable is *who* is speaking:
+  a non-browser process making a long-lived 443 connection.
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+  - https://attack.mitre.org/techniques/T1029/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.command_and_control
+  - attack.t1071.001
+  - attack.t1029
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_https:
+    EventID: 3
+    DestinationPort:
+      - 443
+      - 8443
+    Initiated: 'true'
+  filter_browsers:
+    Image|endswith:
+      - '\chrome.exe'
+      - '\msedge.exe'
+      - '\firefox.exe'
+      - '\brave.exe'
+      - '\opera.exe'
+  filter_microsoft:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: selection_https and not filter_browsers and not filter_microsoft and not filter_programfiles_signed
+falsepositives:
+  - Desktop apps that embed HTTP clients (Slack, Discord, Teams, updaters,
+    curl/python invocations, package managers). This rule is deliberately
+    broad and is a pivot, not a verdict. Score GHOST against it by checking the
+    periodicity, because config.hpp BEACON_MIN..BEACON_MAX with jitter produces
+    a regular-but-not-identical interval that is far more distinctive than the
+    destination. The beacon interval histogram is the measurement the thesis
+    actually wants.
+level: medium

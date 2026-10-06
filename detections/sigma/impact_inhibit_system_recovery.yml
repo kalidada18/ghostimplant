@@ -1,0 +1,70 @@
+title: Ransomware Behaviour - Inhibit System Recovery (VSS BCD And WMI)
+id: 7c2e9b41-5d83-4a06-b7f2-1a8d3e65c904
+status: experimental
+description: >
+  Detects the command-line artefacts of volume shadow copy and recovery
+  suppression that ransomware invokes before or after encryption. These are
+  process-creation events on built-in binaries, which makes them one of the
+  highest-confidence ransomware signals available from ordinary Windows
+  telemetry: nothing administrative does "vssadmin delete shadows /all /quiet"
+  as a routine operation. This rule is independent of what the payload does to
+  files, so it works against any family that adopts the behaviour, including a
+  simulated one.
+references:
+  - https://attack.mitre.org/techniques/T1490/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.impact
+  - attack.defense_evasion
+  - attack.t1490
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_vssadmin:
+    Image|endswith: '\vssadmin.exe'
+    CommandLine|contains|all:
+      - 'delete'
+      - 'shadows'
+  selection_vssadmin_quiet:
+    Image|endswith: '\vssadmin.exe'
+    CommandLine|contains:
+      - '/For=All'
+      - '/Quiet'
+  selection_wmic_shadowcopy:
+    Image|endswith: '\wmic.exe'
+    CommandLine|contains|all:
+      - 'shadowcopy'
+      - 'delete'
+  selection_wmic_shadow_storage:
+    Image|endswith: '\wmic.exe'
+    CommandLine|contains|all:
+      - 'ShadowStorage'
+      - 'delete'
+  selection_bcdedit:
+    Image|endswith: '\bcdedit.exe'
+    CommandLine|contains:
+      - 'recoveryenabled No'
+      - 'recoveryenabled off'
+      - 'bootstatuspolicy ignoreallfailures'
+  selection_bcdedit_safe:
+    Image|endswith: '\bcdedit.exe'
+    CommandLine|contains|all:
+      - 'set'
+      - '{default}'
+  selection_diskshadow:
+    Image|endswith: '\diskshadow.exe'
+    CommandLine|contains:
+      - 'delete shadows'
+      - 'List Shadows'
+  condition: (selection_vssadmin or selection_vssadmin_quiet or selection_wmic_shadowcopy or selection_wmic_shadow_storage or selection_bcdedit or selection_bcdedit_safe or selection_diskshadow)
+falsepositives:
+  - Backup and disk-management tooling legitimately enumerates shadows; the
+    List Shadows arm of diskshadow is the noisiest and can be dropped.
+    Admins doing deliberate shadow cleanup will hit it - which is why the rule
+    keeps /quiet and /For=All as separate corroborating arms rather than
+    alerting on any vssadmin execution.
+  - Windows' own servicing can invoke bcdedit. Scope on the parent process for
+    production use; in a lab VM any hit here is the test.
+level: high

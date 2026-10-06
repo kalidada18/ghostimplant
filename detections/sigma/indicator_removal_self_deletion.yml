@@ -1,0 +1,45 @@
+title: GHOST Lab - Original Dropper Deleted After Install
+id: 5a94c7e2-1d08-4b65-9c3a-8f27d40be613
+status: experimental
+description: >
+  Detects src/main.cpp / src/c2.cpp deleting the originally executed file after
+  copying itself to System32, alongside the ransom-note and wallpaper cleanup
+  DeleteFileW calls. Self-deletion of the executed binary is rare enough that
+  "a process deletes the file it was launched from" is a strong generic
+  indicator, and it is worth writing generically because the specific paths are
+  operator-controlled.
+references:
+  - https://attack.mitre.org/techniques/T1070/004/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.defense_evasion
+  - attack.t1070.004
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_delete_exe:
+    EventID: 23
+    TargetFilename|endswith: '.exe'
+  # The implant deletes the file it ran from, then keeps running. That is the
+  # invariant this rule actually wants; the name-based arm is only a shortcut
+  # for it.
+  selection_self_delete:
+    EventID: 23
+    TargetFilename|endswith: '\WindowsSecurityUpdate.exe'
+  filter_updaters:
+    Image|endswith:
+      - '\TiWorker.exe'
+      - '\TrustedInstaller.exe'
+      - '\wuauclt.exe'
+      - '\UsbCeip.exe'
+      - '\explorer.exe'
+  condition: (selection_delete_exe or selection_self_delete) and not filter_updaters
+falsepositives:
+  - Self-updating tools that delete their old binary after swap (package
+    managers, some game launchers, Go/Rust single-binary updaters). The broad
+    arm will produce hits in a normal desktop VM; run it only against the
+    experiment window, or keep just the selection_self_delete arm for a
+    low-noise version.
+level: medium

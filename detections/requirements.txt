@@ -1,0 +1,4 @@
+# Detection-artifact tooling for check_coverage.py.
+# Deliberately separate from server/requirements.txt: the C2 server does not
+# need YAML, and the detector gate should not drag Flask into a lint job.
+PyYAML>=6.0

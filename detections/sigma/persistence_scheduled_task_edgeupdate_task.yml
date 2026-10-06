@@ -1,0 +1,45 @@
+title: GHOST Lab - Scheduled Task Persistence MicrosoftEdgeUpdateTaskUser
+id: 2b9d4e67-8c13-4a5f-b0e7-6d4f9a2c1578
+status: experimental
+description: >
+  Detects schtasks.exe creating a task named MicrosoftEdgeUpdateTaskUser, the
+  fixed task name used by src/persistence.cpp
+  InstallScheduledTaskPersistence. Also flags the parent being an unsigned
+  binary in System32, which is how the implant re-invokes schtasks through
+  CreateProcessW rather than through the interactive console.
+references:
+  - https://attack.mitre.org/techniques/T1053/005/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.persistence
+  - attack.t1053.005
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_create:
+    EventID: 1
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains|all:
+      - '/Create'
+      - '/TN'
+      - 'MicrosoftEdgeUpdateTaskUser'
+  selection_highest:
+    EventID: 1
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains|all:
+      - '/Create'
+      - '/RL HIGHEST'
+      - '/SC ONSTART'
+  filter_known_admin:
+    ParentImage|endswith:
+      - '\explorer.exe'
+      - '\cmd.exe'
+      - '\powershell.exe'
+  condition: (selection_create or selection_highest) and not filter_known_admin
+falsepositives:
+  - An operator creating the same task by hand from an elevated shell for
+    testing. The filter_known_admin arm suppresses the interactive case; the
+    named-task arm still fires and is the higher-confidence signal.
+level: high

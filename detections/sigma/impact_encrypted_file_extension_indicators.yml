@@ -1,0 +1,74 @@
+title: Ransomware Behaviour - Files Written With Encryption Indicator Extensions
+id: e50c1b78-6a94-42f0-8d17-3b2c9e4a6d15
+status: experimental
+description: >
+  Detects files being created with extensions that ransomware families append
+  to encrypted data, and the paired deletion of the original file. This is a
+  signature-based rule and it is explicitly limited: it catches known family
+  extensions, not the act of encryption, and an unknown or random extension
+  defeats it. The generic behaviour that would catch anything is a burst of
+  renames inside a short window, which is a correlation over many events and
+  cannot be expressed as a single Sigma match - so it belongs in the SIEM
+  layer, and that limitation is stated here rather than hidden.
+references:
+  - https://attack.mitre.org/techniques/T1486/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.impact
+  - attack.t1486
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_known_extension:
+    EventID: 11
+    TargetFilename|endswith:
+      - '.encrypted'
+      - '.lock'
+      - '.crypt'
+      - '.wcry'
+      - '.wncry'
+      - '.cryptolocker'
+      - '.critroni'
+      - '.kkk'
+      - '.magic'
+      - '.promise'
+      - '.skynet'
+      - '.thetruth'
+      - '.zepto'
+      - '.toycr'
+      - '.defender'
+      - '.pushfun'
+      - '.zzz'
+      - '.vvv'
+      - '.xxx'
+  selection_double_extension:
+    EventID: 11
+    TargetFilename|re: '.*\.(locked|enc|encr|encrypt|cry|crypted|locked\.docx|enc\.pdf)$'
+  # Original deleted right after the ciphertext appears is the pattern that
+  # distinguishes in-place encryption from a user saving a new file.
+  selection_delete_after:
+    EventID: 23
+    TargetFilename|endswith:
+      - '.docx'
+      - '.xlsx'
+      - '.pptx'
+      - '.pdf'
+      - '.jpg'
+  filter_known_writers:
+    Image|endswith:
+      - '\winword.exe'
+      - '\excel.exe'
+      - '\powerpnt.exe'
+      - '\Acrobat.exe'
+      - '\dllhost.exe'
+  condition: (selection_known_extension or selection_double_extension or selection_delete_after) and not filter_known_writers
+falsepositives:
+  - The selection_delete_after arm will fire on ordinary document editing and
+    temp cleanup; it is included as a corroboration source and should not alert
+    alone. Split it into a separate low-severity rule if your pipeline scores
+    rules independently.
+  - Applications shipping files named .xxx / .lock legitimately (Java .lock
+    files, some game data). Filter on the creating image for those paths.
+level: medium

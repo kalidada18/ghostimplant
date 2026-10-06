@@ -1,0 +1,59 @@
+title: GHOST Lab - Outbound Connection To Non-Standard High Port By Unknown Image
+id: 6b1f8e43-27c9-4d5a-80e6-4c39b7a02d61
+status: experimental
+description: >
+  Detects a process initiating an outbound connection to a high,
+  service-less port, which is how the reverse-VNC and reverse-shell paths in
+  src/c2.cpp and src/vnc.cpp reach the operator. The operator listener defaults
+  to 4444 and !reverse defaults to the same port, so the pairing to look for is
+  an implant dialling out on a port no legitimate server-side application in
+  that position would use. Note the direction: this is an outbound connection
+  from the victim, not an inbound one, which is why it is missed by perimeter
+  rules.
+references:
+  - https://attack.mitre.org/techniques/T1021/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.command_and_control
+  - attack.lateral_movement
+  - attack.t1021.005
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_outbound:
+    EventID: 3
+    Initiated: 'true'
+    DestinationPort:
+      - 4444
+      - 5555
+      - 8888
+      - 9001
+      - 13377
+  selection_high_unexpected:
+    EventID: 3
+    Initiated: 'true'
+    DestinationPort:
+      - 5900
+      - 5901
+      - 3389
+    Image|notstartswith: 'C:\Windows\'
+  filter_listening_services:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: (selection_outbound or selection_high_unexpected) and not filter_listening_services
+falsepositives:
+  - Developer tooling, local proxies, VNC clients used intentionally, games and
+    P2P software all dial high ports. Port 4444 specifically is the classic
+    Metasploit default and rarely legitimate, so the selection_outbound arm is
+    the one worth alerting on; drop the VNC/RDP arm unless the estate has no
+    legitimate remote-access software.
+  - As with the beacon rule, the durable signal is the process identity and its
+    rate of connections, not the port. Cite the port as a pivot.
+  - Note on the T1021.005 tag, which mirrors README section 16 as written
+    there. Reverse VNC maps most naturally to remote-access tooling rather than
+    the interactive-session use a screen-control client implies. Re-verify the
+    sub-technique against the live matrix before citing.
+level: medium

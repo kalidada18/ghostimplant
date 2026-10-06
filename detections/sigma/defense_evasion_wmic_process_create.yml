@@ -1,0 +1,46 @@
+title: GHOST Lab - WMIC Win32_Process Create Spawns Hidden PowerShell
+id: b8f35c61-2d90-4ea7-a1c6-70d4e9b35822
+status: experimental
+description: >
+  Detects the fallback arm in src/evasion.cpp: wmic.exe invoked with
+  "/Node:localhost process call create" launching powershell with
+  -WindowStyle Hidden -ExecutionPolicy Bypass. Using WMIC to start a process
+  bypasses some parent-child attribution and, on some builds, the tamper
+  protection check, so the wmic.exe -> powershell pairing is itself the signal.
+  Microsoft retired the WMIC binary in recent Windows versions, which makes a
+  live wmic.exe process creation even more noteworthy.
+references:
+  - https://attack.mitre.org/techniques/T1047/
+  - https://attack.mitre.org/techniques/T1562/001/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.execution
+  - attack.defense_evasion
+  - attack.t1047
+  - attack.t1562.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_wmic:
+    Image|endswith: '\wmic.exe'
+  selection_process_create:
+    CommandLine|contains|all:
+      - 'process'
+      - 'call create'
+  selection_hidden_ps:
+    CommandLine|contains|all:
+      - 'powershell'
+      - '-WindowStyle Hidden'
+  selection_bypass:
+    CommandLine|contains:
+      - '-ExecutionPolicy Bypass'
+      - '-NonInteractive'
+  condition: selection_wmic and (selection_process_create or selection_hidden_ps or selection_bypass)
+falsepositives:
+  - Legacy administrative scripts that still shell out to wmic. Scope the rule
+    to servers where wmic usage is inventory-able, or require
+    selection_hidden_ps, which no normal admin script combines with wmic
+    process create.
+level: high

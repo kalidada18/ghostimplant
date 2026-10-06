@@ -1,0 +1,41 @@
+title: GHOST Lab - Suspected Parent PID Spoofing Svchost With Wrong Parent
+id: 4c71e0da-8b93-42f6-a05d-3e9b7c18f264
+status: experimental
+description: >
+  Detects svchost.exe being created by a parent other than services.exe.
+  src/injection.cpp SpawnWithPPID opens a handle to a chosen SYSTEM-owned
+  process with PROCESS_CREATE_PROCESS and attaches it through
+  PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, so the new process reports a legitimate
+  grandparent while the actual creator is the implant. The real child process
+  GHOST spawns is itself, and the WMI/Defender arms spawn powershell.exe and
+  wmic.exe - a spurious svchost parent is the observable consequence of the
+  spoof rather than of the payload.
+references:
+  - https://attack.mitre.org/techniques/T1134/004/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.privilege_escalation
+  - attack.defense_evasion
+  - attack.t1134.004
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_svchost:
+    Image|endswith: '\svchost.exe'
+  filter_legit_parents:
+    ParentImage|endswith:
+      - '\services.exe'
+      - '\svchost.exe'
+      - '\msiexec.exe'
+      - '\wininit.exe'
+  condition: selection_svchost and not filter_legit_parents
+falsepositives:
+  - Some Windows updates and supershutdown paths create svchost from
+    wininit.exe or msiexec.exe; both are whitelisted above. In a lab VM the
+    remaining parents are worth reviewing individually rather than
+    auto-suppressing, because the whitelist is what gives the rule its value.
+  - This rule detects the class, not GHOST specifically. Score it as
+    "technique visible" rather than "implant identified".
+level: medium

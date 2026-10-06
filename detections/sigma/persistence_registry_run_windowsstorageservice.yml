@@ -1,0 +1,45 @@
+title: GHOST Lab - Registry Run Key Persistence WindowsStorageService
+id: 7f1c0a52-3d6b-4e18-9c2f-5a8b1d6e9304
+status: experimental
+description: >
+  Detects creation of a Run-key value named WindowsStorageService, the value
+  name src/persistence.cpp InstallRegistryPersistence writes for both HKCU and
+  HKLM. Written for the GHOST lab so that a persistence experiment can be
+  scored as detected or missed; the same pattern catches any variant that
+  reuses the name.
+references:
+  - https://attack.mitre.org/techniques/T1547/001/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.persistence
+  - attack.defense_evasion
+  - attack.t1547.001
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  # Sysmon EID 13 TargetObject is the full value path, so the value NAME
+  # WindowsStorageService is the tail of TargetObject and the DATA (the quoted
+  # exe path) is Details. Both arms are kept because either alone is brittle:
+  # the name arm survives a renamed binary, the data arm survives a renamed
+  # value.
+  selection_value_name:
+    EventID: 13
+    TargetObject|endswith: '\CurrentVersion\Run\WindowsStorageService'
+  selection_run_data:
+    EventID: 13
+    TargetObject|contains: '\CurrentVersion\Run'
+    Details|contains|all:
+      - 'WindowsSecurityUpdate.exe'
+      - 'System32'
+  # '\CurrentVersion\Run' is a substring of '\CurrentVersion\RunOnce', so the
+  # data arm needs an explicit exclusion or RunOnce entries produce hits.
+  filter_runonce:
+    TargetObject|contains: '\CurrentVersion\RunOnce'
+  condition: (selection_value_name or selection_run_data) and not filter_runonce
+falsepositives:
+  - None expected. The value name is not used by any shipping Microsoft or
+    common third-party software; a legitimate storage-related product adopting
+    this exact name would collide.
+level: high

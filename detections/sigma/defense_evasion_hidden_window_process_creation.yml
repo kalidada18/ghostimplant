@@ -1,0 +1,52 @@
+title: GHOST Lab - Windowless Process Creation With Hidden Execution Flags
+id: 9a3d5f72-1c86-40be-a92f-6d15e8b7c304
+status: experimental
+description: >
+  Detects process creation whose command line requests no visible window,
+  matching how src/main.cpp, src/c2.cpp and src/evasion.cpp launch children
+  (STARTF_USESHOWWINDOW with SW_HIDE, CREATE_NO_WINDOW, and powershell
+  -WindowStyle Hidden). The implant also uses CREATE_SUSPENDED with PPID
+  spoofing in SpawnWithPPID, so a hidden child spawned directly by an
+  unexpected parent is the observable part; the suspend and parent attributes
+  themselves leave no command-line trace and are covered by the parent-chain
+  rule instead.
+references:
+  - https://attack.mitre.org/techniques/T1564/003/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.defense_evasion
+  - attack.t1564.003
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_hidden_flag:
+    CommandLine|contains:
+      - '-WindowStyle Hidden'
+      - '/W Hidden'
+      - '-windowhidden'
+      - '-NoProfile -NonInteractive'
+  selection_gui_hidden:
+    Image|endswith:
+      - '\conhost.exe'
+      - '\cmd.exe'
+      - '\powershell.exe'
+      - '\wscript.exe'
+      - '\cscript.exe'
+      - '\mshta.exe'
+      - '\rundll32.exe'
+  selection_script_host:
+    Image|endswith:
+      - '\wscript.exe'
+      - '\cscript.exe'
+      - '\mshta.exe'
+    ParentImage|notstartswith: 'C:\Windows\'
+  condition: (selection_hidden_flag and selection_gui_hidden) or selection_script_host
+falsepositives:
+  - Deployment and packaging tools hide windows constantly, and
+    -NoProfile -NonInteractive appears in many legitimate automation scripts.
+    Keep the first arm as informational and treat selection_script_host as the
+    alerting arm, since wscript, cscript and mshta launching from a
+    non-Windows parent is comparatively rare in benign use.
+level: low

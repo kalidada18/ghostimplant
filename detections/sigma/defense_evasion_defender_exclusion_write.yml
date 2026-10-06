@@ -1,0 +1,51 @@
+title: GHOST Lab - Defender Exclusion Path Registry Write
+id: e37b1d84-6a29-4f5c-8b0d-9c4e2f71a365
+status: experimental
+description: >
+  Detects a write under HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths,
+  the exact key src/evasion.cpp opens with RegCreateKeyExW (KEY_WOW64_64KEY)
+  and then sets a REG_DWORD value whose NAME is the implant executable path and
+  whose data is 0. Note this is the non-policies key: the code writes the
+  effective exclusions hive directly, so a rule scoped only to the Policies
+  path would miss it. Exclusion writes are the highest-fidelity
+  defense-disabling signal available through the registry because there is no
+  legitimate reason for a non-management process to add one at runtime.
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.impact
+  - attack.defense_evasion
+  - attack.t1562.001
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_exclusion_any:
+    EventID: 13
+    TargetObject|contains: '\Microsoft\Windows Defender\Exclusions\'
+  # evasion.cpp names the value after the exe path and sets DWORD 0, so the
+  # combination of an exclusion subkey + a path-shaped value name + data 0 is
+  # near-unique to this behaviour.
+  selection_path_value_zero:
+    EventID: 13
+    TargetObject|contains: '\Windows Defender\Exclusions\Paths\'
+    TargetObject|endswith: '.exe'
+    NewValue: '0'
+  selection_key_add:
+    EventID: 12
+    TargetObject|contains: '\Windows Defender\Exclusions\'
+  filter_mgmt:
+    Image|endswith:
+      - '\MpCmdRun.exe'
+      - '\MsMpEng.exe'
+      - '\GPEdit.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+  condition: (selection_exclusion_any or selection_path_value_zero or selection_key_add) and not filter_mgmt
+falsepositives:
+  - Endpoint-management tooling and GPO application writing exclusions. The
+    filter_mgmt arm covers the common ones; in a lab VM there is no MCM agent,
+    so any hit is the implant.
+level: high

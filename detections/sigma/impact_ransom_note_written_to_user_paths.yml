@@ -1,0 +1,48 @@
+title: Ransomware Behaviour - Extortion Note Written To User Writable Paths
+id: 3f8a1c67-90d2-4b5e-8a71-c6b40e9d3f28
+status: experimental
+description: >
+  Detects creation of a ransom/extortion note file in locations ransomware
+  families routinely write to. MITRE T1486 lists leaving a note and modifying
+  the desktop wallpaper as adversarial procedures for this technique, so the
+  note is a legitimate detection target on its own and does not require the
+  encryption event to have occurred. In the GHOST lab this is exactly the
+  artifact src/c2.cpp HandlePrank produces when it writes READ_ME.txt to the
+  desktop, and the restore path deletes it again.
+references:
+  - https://attack.mitre.org/techniques/T1486/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.impact
+  - attack.t1486
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_note_name:
+    EventID: 11
+    TargetFilename|contains:
+      - '\READ_ME.txt'
+      - 'DECRYPT_INSTRUCTION'
+      - 'HOW_TO_DECRYPT'
+      - 'RESTORED_FILES.txt'
+      - 'RECOVER_your_FILES'
+      - '!_RECOVERY_FILES_'
+      - '!!!'
+      - '_readme.txt'
+  # Wallpaper redirected to a file that was itself just created - the visual
+  # half of the extortion note.
+  selection_wallpaper_reg:
+    EventID: 13
+    TargetObject|endswith: '\Control Panel\Desktop\Wallpaper'
+  condition: selection_note_name or selection_wallpaper_reg
+falsepositives:
+  - Real Microsoft components place README.txt files in install directories;
+    the note-name list is scoped to the strings families actually use. Treat
+    selection_wallpaper_reg as corroboration rather than alerting on it alone.
+  - A deliberate Desktop-or-Documents "any .txt written here" arm was removed
+    because it duplicated the name list as a strict subset, so it could never
+    fire on its own, and it pages on ordinary document saves. Write-burst
+    correlation belongs in the SIEM rather than in a single-event match.
+level: high

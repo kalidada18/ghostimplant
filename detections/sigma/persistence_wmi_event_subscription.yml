@@ -1,0 +1,49 @@
+title: GHOST Lab - WMI Event Subscription Persistence Filter And Consumer
+id: c5a8e2f1-9b64-4d07-8a3e-1f7c6b45d209
+status: experimental
+description: >
+  Detects the WMI persistence triad created by src/persistence.cpp: an
+  __EventFilter named SystemPerfMonitor_v2 bound to a CommandLineEventConsumer
+  named BrokerServicePerf_v2 and/or an ActiveScriptEventConsumer named
+  WinStoreSvcHelper_v3 in ROOT\subscription. The second selection is generic
+  and catches any WMI subscription built on the well-known
+  Win32_PerfFormattedData_PerfOS_System SystemUpTime trigger, which is the
+  standard template for this technique, not a GHOST-specific artifact.
+references:
+  - https://attack.mitre.org/techniques/T1546/003/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.persistence
+  - attack.privilege_escalation
+  - attack.t1546.003
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  # Sysmon 19 = WmiEventFilter, 20 = WmiEventConsumer, 21 = binding
+  selection_named_filter:
+    EventID: 19
+    Name: 'SystemPerfMonitor_v2'
+  selection_named_consumer:
+    EventID: 20
+    Name|contains:
+      - 'BrokerServicePerf_v2'
+      - 'WinStoreSvcHelper_v3'
+  selection_generic_wql:
+    EventID: 19
+    Query|contains|all:
+      - '__InstanceModificationEvent'
+      - 'Win32_PerfFormattedData_PerfOS_System'
+      - 'SystemUpTime'
+  selection_binding:
+    EventID: 21
+    Consumer|contains:
+      - 'CommandLineEventConsumer'
+      - 'ActiveScriptEventConsumer'
+  condition: selection_named_filter or selection_named_consumer or selection_generic_wql or selection_binding
+falsepositives:
+  - Legitimate enterprise monitoring that uses WMI event subscriptions. The
+    selection_binding arm is the noisiest; drop it if the lab collector also
+    ingests SCOM or similar agents, and keep the named and WQL arms.
+level: high

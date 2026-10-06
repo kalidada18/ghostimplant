@@ -1,0 +1,45 @@
+title: GHOST Lab - Remote Thread Injection Into svchost From Unsigned Binary
+id: a94f6c22-5d18-4b70-9e63-2c8d5a1b7034
+status: experimental
+description: >
+  Detects CreateRemoteThread (and the NtCreateThreadEx path used by
+  src/injection.cpp InjectRemoteProcess) targeting svchost.exe from an image
+  that is not a Microsoft system component. svchost is GHOST's chosen host
+  because FindBestSvchost deliberately selects the lowest-PID SYSTEM-owned
+  instance; pairing the target with a non-system source is the durable signal
+  and does not depend on the implant's file name surviving a rename.
+references:
+  - https://attack.mitre.org/techniques/T1055/
+  - https://attack.mitre.org/techniques/T1055/001/
+author: kalidada18
+date: 2026-10-07
+tags:
+  - attack.defense_evasion
+  - attack.privilege_escalation
+  - attack.t1055
+  - attack.t1055.001
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_thread:
+    EventID: 8
+    TargetImage|endswith: '\svchost.exe'
+  selection_access:
+    EventID: 25
+    TargetImage|endswith: '\svchost.exe'
+    GrantedAccess:
+      - '0x1F0FFF'
+      - '0x1FFFFF'
+      - '0x1F3FFF'
+      - '0x1F2F'
+  filter_ms_source:
+    SourceImage|startswith: 'C:\Windows\'
+  filter_inbox_svchost:
+    SourceImage|endswith: '\svchost.exe'
+  condition: (selection_thread or selection_access) and not filter_ms_source and not filter_inbox_svchost
+falsepositives:
+  - Debuggers, process explorers and some AV engines opening svchost with full
+    access. Run the rule against a clean snapshot of the lab VM before scoring
+    an experiment, and record the baseline as a suppression list.
+level: high
