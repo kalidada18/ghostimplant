@@ -249,6 +249,11 @@ std::vector<BYTE> Sha256Bytes(const BYTE* data, size_t len) {
 //   so both sides hash identical big-endian bytes.
 // ---------------------------------------------------------------------------
 
+// Some MinGW-w64 releases ship bcrypt.h without the ECC blob-type constants.
+#ifndef BCRYPT_ECDH_PUBLIC_BLOB
+#define BCRYPT_ECDH_PUBLIC_BLOB L"ECDHPUBLICBLOB"
+#endif
+
 static BOOL              g_EcdhReady = FALSE;
 static BCRYPT_ALG_HANDLE g_EcdhAlg   = nullptr;
 static BCRYPT_KEY_HANDLE g_EcdhPriv  = nullptr;
@@ -336,12 +341,15 @@ BOOL EcdhDeriveSessionKey(const std::string& serverPubB64,
     if (!BCRYPT_SUCCESS(st)) return FALSE;
 
     ULONG cbSecret = 0;
-    st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0, nullptr, 0, &cbSecret);
+    // BCryptDeriveKey(hSecret, kdf, pbKdfParams, cbKdfParams,
+    //                 pbOutput, cbOutput, pcbResult, dwFlags)
+    st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0,
+                         nullptr, 0, &cbSecret, 0);
     if (BCRYPT_SUCCESS(st) && cbSecret == 32) {
         std::vector<BYTE> raw(32);
         ULONG cbOut = 0;
         st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0,
-                             raw.data(), 32, &cbOut);
+                             raw.data(), 32, &cbOut, 0);
         BCryptDestroySecret(hSecret);
         if (!BCRYPT_SUCCESS(st) || cbOut != 32) return FALSE;
         Rev32(raw.data());          // LE (BCrypt) → BE (matches server)
