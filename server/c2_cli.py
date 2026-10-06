@@ -516,9 +516,8 @@ def _setup_readline(sid: str) -> None:
     readline.set_history_length(500)
 
     _COMPLETIONS = [
-        "!ps ", "!lol ", "!inject ", "!inject-apc ", "!migrate ",
-        "!exfil ", "!wipe ", "!lateral ", "!creds",
-        "!wallpaper ", "!browser ", "!telegram ", "!reverse ",
+        "!ps ", "!inject ", "!inject-apc ", "!migrate ",
+        "!browser ", "!reverse ",
         "ps", "download ", "upload ", "exit", "bg", "sleep",
     ]
     def _complete(text: str, state: int) -> Optional[str]:

