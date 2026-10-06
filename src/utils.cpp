@@ -341,14 +341,14 @@ BOOL EcdhDeriveSessionKey(const std::string& serverPubB64,
     if (!BCRYPT_SUCCESS(st)) return FALSE;
 
     ULONG cbSecret = 0;
-    // BCryptDeriveKey(hSecret, kdf, pbKdfParams, cbKdfParams,
+    // BCryptDeriveKey(hSecret, kdf, pParameterList,
     //                 pbOutput, cbOutput, pcbResult, dwFlags)
-    st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0,
+    st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr,
                          nullptr, 0, &cbSecret, 0);
     if (BCRYPT_SUCCESS(st) && cbSecret == 32) {
         std::vector<BYTE> raw(32);
         ULONG cbOut = 0;
-        st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr, 0,
+        st = BCryptDeriveKey(hSecret, L"TRUNCATE", nullptr,
                              raw.data(), 32, &cbOut, 0);
         BCryptDestroySecret(hSecret);
         if (!BCRYPT_SUCCESS(st) || cbOut != 32) return FALSE;
