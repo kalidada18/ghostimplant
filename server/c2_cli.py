@@ -810,7 +810,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     p.add_argument("--url",        default=None,
-                   help="C2 Worker URL (env: GHOST_C2_URL)")
+                   help="C2 server URL (env: GHOST_C2_URL)")
     p.add_argument("--token",      default=None,
                    help="Operator token (env: GHOST_OPERATOR_TOKEN)")
     p.add_argument("--proxy",      default=None,
@@ -886,7 +886,7 @@ def _build_parser() -> argparse.ArgumentParser:
     co.add_argument("--json", action="store_true", help="Output as JSON (single shot)")
 
     # ping
-    sub.add_parser("ping", help="Check Worker reachability")
+    sub.add_parser("ping", help="Check server reachability")
 
     # listen (new)
     li = sub.add_parser("listen", help="Start reverse shell listener")
@@ -927,9 +927,9 @@ def main() -> None:
 
             case "ping":
                 if client.ping():
-                    ok(f"Worker reachable → {url}")
+                    ok(f"Server reachable → {url}")
                 else:
-                    err(f"Worker unreachable → {url}")
+                    err(f"Server unreachable → {url}")
                     sys.exit(1)
 
             case "sessions":

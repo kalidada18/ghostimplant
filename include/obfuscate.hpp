@@ -156,8 +156,3 @@ inline FARPROC HashProc(HMODULE hMod, uint32_t targetHash, int depth = 0) {
 // Returns a correctly typed function pointer, no cast needed at call site.
 #define HASHPROC(mod, name) \
     reinterpret_cast<decltype(&name)>(HashProc((mod), FNV(#name)))
-
-// ─── NOTE ────────────────────────────────────────────────────────────────────
-// GhostSleep is defined as a static function in evasion.cpp (owns the cached
-// pfnNtDelay pointer). GhostIsDebugged is in evasion.cpp via SandboxCheck.
-// Do NOT redeclare them here — same-TU include would cause redefinition errors.

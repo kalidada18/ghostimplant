@@ -10,7 +10,6 @@
 #include <random>
 #include <chrono>
 #include <lmcons.h>
-#include <intrin.h>    // __cpuid
 
 #ifdef _MSC_VER
 #pragma comment(lib, "bcrypt.lib")
@@ -92,72 +91,6 @@ std::vector<BYTE> Base64Decode(const std::string& b64) {
         if (b64[i + 3] != '=') out.push_back(static_cast<BYTE>(block & 0xFF));
     }
     return out;
-}
-
-// ---------------------------------------------------------------------------
-// XOR cipher — in-place
-// ---------------------------------------------------------------------------
-
-VOID XorBuffer(BYTE* data, size_t len, const BYTE* key, size_t keyLen) {
-    if (keyLen == 0) return;
-    for (size_t i = 0; i < len; ++i)
-        data[i] ^= key[i % keyLen];
-}
-
-// ---------------------------------------------------------------------------
-// DeriveHardwareKey — SHA256 of (VolumeSerial || CPUID || HostnameHash)
-// Produces a 32-byte session key unique to this host.
-// ---------------------------------------------------------------------------
-
-std::vector<BYTE> DeriveHardwareKey() {
-    // Collect entropy sources
-    std::vector<BYTE> material;
-
-    // 1. Volume serial of C:
-    DWORD serial = 0;
-    GetVolumeInformationW(L"C:\\", nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
-    material.insert(material.end(),
-                    reinterpret_cast<BYTE*>(&serial),
-                    reinterpret_cast<BYTE*>(&serial) + sizeof(serial));
-
-    // 2. CPUID processor signature (leaf 1)
-    int cpuInfo[4] = {};
-    __cpuid(cpuInfo, 1);
-    material.insert(material.end(),
-                    reinterpret_cast<BYTE*>(cpuInfo),
-                    reinterpret_cast<BYTE*>(cpuInfo) + sizeof(cpuInfo));
-
-    // 3. Computer name (wide, raw bytes)
-    wchar_t cn[MAX_COMPUTERNAME_LENGTH + 1] = {};
-    DWORD cnLen = MAX_COMPUTERNAME_LENGTH + 1;
-    GetComputerNameW(cn, &cnLen);
-    auto* cnBytes = reinterpret_cast<BYTE*>(cn);
-    material.insert(material.end(), cnBytes, cnBytes + cnLen * sizeof(wchar_t));
-
-    // SHA-256 via BCrypt
-    BCRYPT_ALG_HANDLE hAlg = nullptr;
-    std::vector<BYTE> digest(32);
-
-    if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM,
-                                                   nullptr, 0))) {
-        BCRYPT_HASH_HANDLE hHash = nullptr;
-        if (BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, nullptr, 0,
-                                            nullptr, 0, 0))) {
-            BCryptHashData(hHash, material.data(),
-                           static_cast<ULONG>(material.size()), 0);
-            BCryptFinishHash(hHash, digest.data(), 32, 0);
-            BCryptDestroyHash(hHash);
-        }
-        BCryptCloseAlgorithmProvider(hAlg, 0);
-    }
-
-    return digest;
-}
-
-std::vector<BYTE> GenerateSessionKey() {
-    std::vector<BYTE> key(32);
-    BCryptGenRandom(nullptr, key.data(), 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    return key;
 }
 
 // ---------------------------------------------------------------------------

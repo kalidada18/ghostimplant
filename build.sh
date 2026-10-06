@@ -85,9 +85,9 @@ if [[ -n "${C2_HOST:-}" ]]; then
     C2HOST="$C2_HOST"; C2PORT="${C2_PORT:-443}"
     echo "[*] C2 endpoint (env): $C2HOST:$C2PORT"
 else
-    read -rp "C2 host (domain or IP) [$DEFAULT_HOST]: " C2HOST
+    read -rp "C2 host (domain or IP) [$DEFAULT_HOST]: " C2HOST || C2HOST=""
     C2HOST=${C2HOST:-$DEFAULT_HOST}
-    read -rp "C2 port [443]: " C2PORT
+    read -rp "C2 port [443]: " C2PORT || C2PORT=""
     C2PORT=${C2PORT:-443}
 fi
 [[ "$C2HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "[!] invalid C2 host: $C2HOST"; exit 1; }

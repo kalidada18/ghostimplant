@@ -4,8 +4,6 @@
 
 namespace config {
 
-    extern const uint8_t C2_DOMAIN_ENCRYPTED[];
-    extern const size_t  C2_DOMAIN_LEN;
     extern const uint16_t C2_PORT;
 
     const wchar_t* GetBeaconToken();

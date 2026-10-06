@@ -159,6 +159,13 @@ def health():
         count = len(_sessions)
     return _json_r({"status": "ok", "ts": _now(), "sessions": count})
 
+@app.route("/ping", methods=["GET"])
+def ping():
+    """CLI liveness probe — same contract as /health."""
+    with _lock:
+        count = len(_sessions)
+    return _json_r({"status": "ok", "ts": _now(), "sessions": count})
+
 # ── Beacon ────────────────────────────────────────────────────────────────────
 @app.route("/beacon", methods=["POST"])
 @require_beacon
