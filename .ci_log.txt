@@ -1,0 +1,282 @@
+﻿2026-10-06T17:59:07.6077427Z Current runner version: '2.337.0'
+2026-10-06T17:59:07.6103225Z ##[group]Runner Image Provisioner
+2026-10-06T17:59:07.6104175Z Hosted Compute Agent
+2026-10-06T17:59:07.6104838Z Version: 20260901.588
+2026-10-06T17:59:07.6105467Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-06T17:59:07.6106174Z Build Date: 2026-09-01T19:56:44Z
+2026-10-06T17:59:07.6106964Z Worker ID: {ef85b452-b82d-4d41-8786-852ff50a8180}
+2026-10-06T17:59:07.6107708Z Azure Region: westus
+2026-10-06T17:59:07.6108312Z ##[endgroup]
+2026-10-06T17:59:07.6109952Z ##[group]Operating System
+2026-10-06T17:59:07.6110575Z Ubuntu
+2026-10-06T17:59:07.6111197Z 24.04.5
+2026-10-06T17:59:07.6112020Z LTS
+2026-10-06T17:59:07.6112584Z ##[endgroup]
+2026-10-06T17:59:07.6113151Z ##[group]Runner Image
+2026-10-06T17:59:07.6113753Z Image: ubuntu-24.04
+2026-10-06T17:59:07.6114398Z Version: 20260927.320.1
+2026-10-06T17:59:07.6115642Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260927.320/images/ubuntu/Ubuntu2404-Readme.md
+2026-10-06T17:59:07.6117273Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260927.320
+2026-10-06T17:59:07.6118236Z ##[endgroup]
+2026-10-06T17:59:07.6119500Z ##[group]GITHUB_TOKEN Permissions
+2026-10-06T17:59:07.6121985Z Contents: read
+2026-10-06T17:59:07.6122751Z Metadata: read
+2026-10-06T17:59:07.6123624Z Packages: read
+2026-10-06T17:59:07.6124346Z ##[endgroup]
+2026-10-06T17:59:07.6126571Z Secret source: Actions
+2026-10-06T17:59:07.6127984Z Cache mode: write
+2026-10-06T17:59:07.6128836Z Prepare workflow directory
+2026-10-06T17:59:07.6513226Z Prepare all required actions
+2026-10-06T17:59:07.6582869Z Getting action download info
+2026-10-06T17:59:08.0536232Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-10-06T17:59:08.2685938Z Complete job name: Cross-compile implant (MinGW-w64)
+2026-10-06T17:59:08.3572556Z ##[group]Run actions/checkout@v4
+2026-10-06T17:59:08.3573501Z with:
+2026-10-06T17:59:08.3573975Z   repository: kalidada18/ghostimplant
+2026-10-06T17:59:08.3577732Z   token: ***
+2026-10-06T17:59:08.3578169Z   ssh-strict: true
+2026-10-06T17:59:08.3578621Z   ssh-user: git
+2026-10-06T17:59:08.3579083Z   persist-credentials: true
+2026-10-06T17:59:08.3579581Z   clean: true
+2026-10-06T17:59:08.3580027Z   sparse-checkout-cone-mode: true
+2026-10-06T17:59:08.3580554Z   fetch-depth: 1
+2026-10-06T17:59:08.3580993Z   fetch-tags: false
+2026-10-06T17:59:08.3581509Z   show-progress: true
+2026-10-06T17:59:08.3582298Z   lfs: false
+2026-10-06T17:59:08.3582785Z   submodules: false
+2026-10-06T17:59:08.3583239Z   set-safe-directory: true
+2026-10-06T17:59:08.3583749Z   allow-unsafe-pr-checkout: false
+2026-10-06T17:59:08.3584575Z ##[endgroup]
+2026-10-06T17:59:08.4642755Z Syncing repository: kalidada18/ghostimplant
+2026-10-06T17:59:08.4645603Z ##[group]Getting Git version info
+2026-10-06T17:59:08.4646975Z Working directory is '/home/runner/work/ghostimplant/ghostimplant'
+2026-10-06T17:59:08.4648752Z [command]/usr/bin/git version
+2026-10-06T17:59:08.4808885Z git version 2.55.0
+2026-10-06T17:59:08.4832658Z ##[endgroup]
+2026-10-06T17:59:08.4849789Z Temporarily overriding HOME='/home/runner/work/_temp/ea94423e-047d-4e8e-8876-4309cbff8ea3' before making global git config changes
+2026-10-06T17:59:08.4852527Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-06T17:59:08.4856567Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/ghostimplant/ghostimplant
+2026-10-06T17:59:08.4923161Z Deleting the contents of '/home/runner/work/ghostimplant/ghostimplant'
+2026-10-06T17:59:08.4927642Z ##[group]Initializing the repository
+2026-10-06T17:59:08.4932635Z [command]/usr/bin/git init /home/runner/work/ghostimplant/ghostimplant
+2026-10-06T17:59:08.5108759Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-06T17:59:08.5110687Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-06T17:59:08.5112566Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-06T17:59:08.5114293Z hint: call:
+2026-10-06T17:59:08.5114925Z hint:
+2026-10-06T17:59:08.5115733Z hint: 	git config --global init.defaultBranch <name>
+2026-10-06T17:59:08.5116713Z hint:
+2026-10-06T17:59:08.5117649Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-06T17:59:08.5119194Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-06T17:59:08.5120451Z hint:
+2026-10-06T17:59:08.5121135Z hint: 	git branch -m <name>
+2026-10-06T17:59:08.5122217Z hint:
+2026-10-06T17:59:08.5123327Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-06T17:59:08.5125140Z Initialized empty Git repository in /home/runner/work/ghostimplant/ghostimplant/.git/
+2026-10-06T17:59:08.5128245Z [command]/usr/bin/git remote add origin https://github.com/kalidada18/ghostimplant
+2026-10-06T17:59:08.5186534Z ##[endgroup]
+2026-10-06T17:59:08.5187981Z ##[group]Disabling automatic garbage collection
+2026-10-06T17:59:08.5198042Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-06T17:59:08.5230935Z ##[endgroup]
+2026-10-06T17:59:08.5232678Z ##[group]Setting up auth
+2026-10-06T17:59:08.5237041Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-06T17:59:08.5279448Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-06T17:59:08.5704453Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-06T17:59:08.5752286Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-06T17:59:08.5999917Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-06T17:59:08.6040434Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-06T17:59:08.6278402Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-06T17:59:08.6323787Z ##[endgroup]
+2026-10-06T17:59:08.6324596Z ##[group]Fetching the repository
+2026-10-06T17:59:08.6333461Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +70413bd92c03f4a04540ca001610e993c526e0b7:refs/remotes/origin/main
+2026-10-06T17:59:09.1759820Z From https://github.com/kalidada18/ghostimplant
+2026-10-06T17:59:09.1762105Z  * [new ref]         70413bd92c03f4a04540ca001610e993c526e0b7 -> origin/main
+2026-10-06T17:59:09.1766012Z ##[endgroup]
+2026-10-06T17:59:09.1767517Z ##[group]Determining the checkout info
+2026-10-06T17:59:09.1769513Z ##[endgroup]
+2026-10-06T17:59:09.1776558Z [command]/usr/bin/git sparse-checkout disable
+2026-10-06T17:59:09.1838060Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-06T17:59:09.1874773Z ##[group]Checking out the ref
+2026-10-06T17:59:09.1879301Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-10-06T17:59:09.1989981Z Switched to a new branch 'main'
+2026-10-06T17:59:09.1996980Z branch 'main' set up to track 'origin/main'.
+2026-10-06T17:59:09.2001820Z ##[endgroup]
+2026-10-06T17:59:09.2046653Z [command]/usr/bin/git log -1 --format=%H
+2026-10-06T17:59:09.2073261Z 70413bd92c03f4a04540ca001610e993c526e0b7
+2026-10-06T17:59:09.2303713Z ##[group]Run sudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64
+2026-10-06T17:59:09.2304770Z [36;1msudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64[0m
+2026-10-06T17:59:09.2635706Z shell: /usr/bin/bash -e {0}
+2026-10-06T17:59:09.2636408Z ##[endgroup]
+2026-10-06T17:59:24.8100091Z Selecting previously unselected package binutils-mingw-w64-i686.
+2026-10-06T17:59:24.8484083Z (Reading database ... 
+2026-10-06T17:59:24.8484728Z (Reading database ... 5%
+2026-10-06T17:59:24.8485868Z (Reading database ... 10%
+2026-10-06T17:59:24.8486702Z (Reading database ... 15%
+2026-10-06T17:59:24.8487646Z (Reading database ... 20%
+2026-10-06T17:59:24.8488185Z (Reading database ... 25%
+2026-10-06T17:59:24.8488699Z (Reading database ... 30%
+2026-10-06T17:59:24.8489295Z (Reading database ... 35%
+2026-10-06T17:59:24.8489979Z (Reading database ... 40%
+2026-10-06T17:59:24.8490465Z (Reading database ... 45%
+2026-10-06T17:59:24.8490954Z (Reading database ... 50%
+2026-10-06T17:59:24.8577342Z (Reading database ... 55%
+2026-10-06T17:59:25.0023810Z (Reading database ... 60%
+2026-10-06T17:59:25.2077504Z (Reading database ... 65%
+2026-10-06T17:59:25.4115321Z (Reading database ... 70%
+2026-10-06T17:59:25.5966974Z (Reading database ... 75%
+2026-10-06T17:59:25.7550224Z (Reading database ... 80%
+2026-10-06T17:59:25.9637831Z (Reading database ... 85%
+2026-10-06T17:59:26.1571729Z (Reading database ... 90%
+2026-10-06T17:59:26.3639402Z (Reading database ... 95%
+2026-10-06T17:59:26.3640307Z (Reading database ... 100%
+2026-10-06T17:59:26.3641300Z (Reading database ... 202296 files and directories currently installed.)
+2026-10-06T17:59:26.3680928Z Preparing to unpack .../00-binutils-mingw-w64-i686_2.41.90.20240122-1ubuntu1+11.4_amd64.deb ...
+2026-10-06T17:59:26.3710178Z Unpacking binutils-mingw-w64-i686 (2.41.90.20240122-1ubuntu1+11.4) ...
+2026-10-06T17:59:26.4831296Z Selecting previously unselected package mingw-w64-common.
+2026-10-06T17:59:26.4955636Z Preparing to unpack .../01-mingw-w64-common_11.0.1-3build1_all.deb ...
+2026-10-06T17:59:26.4964385Z Unpacking mingw-w64-common (11.0.1-3build1) ...
+2026-10-06T17:59:26.9337759Z Selecting previously unselected package mingw-w64-i686-dev.
+2026-10-06T17:59:26.9470673Z Preparing to unpack .../02-mingw-w64-i686-dev_11.0.1-3build1_all.deb ...
+2026-10-06T17:59:26.9492754Z Unpacking mingw-w64-i686-dev (11.0.1-3build1) ...
+2026-10-06T17:59:27.3514397Z Selecting previously unselected package gcc-mingw-w64-base:amd64.
+2026-10-06T17:59:27.3649299Z Preparing to unpack .../03-gcc-mingw-w64-base_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:27.3658679Z Unpacking gcc-mingw-w64-base:amd64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:27.3869107Z Selecting previously unselected package gcc-mingw-w64-i686-posix-runtime.
+2026-10-06T17:59:27.3999057Z Preparing to unpack .../04-gcc-mingw-w64-i686-posix-runtime_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:27.4009920Z Unpacking gcc-mingw-w64-i686-posix-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:27.5969339Z Selecting previously unselected package gcc-mingw-w64-i686-posix.
+2026-10-06T17:59:27.6097619Z Preparing to unpack .../05-gcc-mingw-w64-i686-posix_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:27.6110970Z Unpacking gcc-mingw-w64-i686-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:28.1128333Z Selecting previously unselected package g++-mingw-w64-i686-posix.
+2026-10-06T17:59:28.1261108Z Preparing to unpack .../06-g++-mingw-w64-i686-posix_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:28.1269812Z Unpacking g++-mingw-w64-i686-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:28.4565915Z Selecting previously unselected package gcc-mingw-w64-i686-win32-runtime.
+2026-10-06T17:59:28.4698617Z Preparing to unpack .../07-gcc-mingw-w64-i686-win32-runtime_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:28.4708942Z Unpacking gcc-mingw-w64-i686-win32-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:28.6614565Z Selecting previously unselected package gcc-mingw-w64-i686-win32.
+2026-10-06T17:59:28.6743430Z Preparing to unpack .../08-gcc-mingw-w64-i686-win32_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:28.6752591Z Unpacking gcc-mingw-w64-i686-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:29.1793993Z Selecting previously unselected package g++-mingw-w64-i686-win32.
+2026-10-06T17:59:29.1923033Z Preparing to unpack .../09-g++-mingw-w64-i686-win32_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:29.1934743Z Unpacking g++-mingw-w64-i686-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:29.5205230Z Selecting previously unselected package binutils-mingw-w64-x86-64.
+2026-10-06T17:59:29.5337938Z Preparing to unpack .../10-binutils-mingw-w64-x86-64_2.41.90.20240122-1ubuntu1+11.4_amd64.deb ...
+2026-10-06T17:59:29.5345892Z Unpacking binutils-mingw-w64-x86-64 (2.41.90.20240122-1ubuntu1+11.4) ...
+2026-10-06T17:59:29.7106938Z Selecting previously unselected package mingw-w64-x86-64-dev.
+2026-10-06T17:59:29.7237837Z Preparing to unpack .../11-mingw-w64-x86-64-dev_11.0.1-3build1_all.deb ...
+2026-10-06T17:59:29.7247499Z Unpacking mingw-w64-x86-64-dev (11.0.1-3build1) ...
+2026-10-06T17:59:30.2479664Z Selecting previously unselected package gcc-mingw-w64-x86-64-posix-runtime.
+2026-10-06T17:59:30.2627263Z Preparing to unpack .../12-gcc-mingw-w64-x86-64-posix-runtime_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:30.2638709Z Unpacking gcc-mingw-w64-x86-64-posix-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:30.4844646Z Selecting previously unselected package gcc-mingw-w64-x86-64-posix.
+2026-10-06T17:59:30.4974439Z Preparing to unpack .../13-gcc-mingw-w64-x86-64-posix_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:30.4984184Z Unpacking gcc-mingw-w64-x86-64-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:31.0011394Z Selecting previously unselected package g++-mingw-w64-x86-64-posix.
+2026-10-06T17:59:31.0143065Z Preparing to unpack .../14-g++-mingw-w64-x86-64-posix_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:31.0152498Z Unpacking g++-mingw-w64-x86-64-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:31.3455174Z Selecting previously unselected package gcc-mingw-w64-x86-64-win32-runtime.
+2026-10-06T17:59:31.3589254Z Preparing to unpack .../15-gcc-mingw-w64-x86-64-win32-runtime_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:31.3607735Z Unpacking gcc-mingw-w64-x86-64-win32-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:31.5796571Z Selecting previously unselected package gcc-mingw-w64-x86-64-win32.
+2026-10-06T17:59:31.5941488Z Preparing to unpack .../16-gcc-mingw-w64-x86-64-win32_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:31.5950917Z Unpacking gcc-mingw-w64-x86-64-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.1118573Z Selecting previously unselected package g++-mingw-w64-x86-64-win32.
+2026-10-06T17:59:32.1255435Z Preparing to unpack .../17-g++-mingw-w64-x86-64-win32_13.2.0-6ubuntu1+26.1_amd64.deb ...
+2026-10-06T17:59:32.1264367Z Unpacking g++-mingw-w64-x86-64-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.4536579Z Selecting previously unselected package g++-mingw-w64-i686.
+2026-10-06T17:59:32.4672618Z Preparing to unpack .../18-g++-mingw-w64-i686_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.4732973Z Unpacking g++-mingw-w64-i686 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.4950663Z Selecting previously unselected package g++-mingw-w64-x86-64.
+2026-10-06T17:59:32.5082625Z Preparing to unpack .../19-g++-mingw-w64-x86-64_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.5136036Z Unpacking g++-mingw-w64-x86-64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.5355559Z Selecting previously unselected package g++-mingw-w64.
+2026-10-06T17:59:32.5489792Z Preparing to unpack .../20-g++-mingw-w64_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.5540505Z Unpacking g++-mingw-w64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.5780018Z Selecting previously unselected package gcc-mingw-w64-i686.
+2026-10-06T17:59:32.5915306Z Preparing to unpack .../21-gcc-mingw-w64-i686_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.5966923Z Unpacking gcc-mingw-w64-i686 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.6198142Z Selecting previously unselected package gcc-mingw-w64-x86-64.
+2026-10-06T17:59:32.6332746Z Preparing to unpack .../22-gcc-mingw-w64-x86-64_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.6384362Z Unpacking gcc-mingw-w64-x86-64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.6606379Z Selecting previously unselected package gcc-mingw-w64.
+2026-10-06T17:59:32.6743666Z Preparing to unpack .../23-gcc-mingw-w64_13.2.0-6ubuntu1+26.1_all.deb ...
+2026-10-06T17:59:32.6795175Z Unpacking gcc-mingw-w64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.6996613Z Selecting previously unselected package mingw-w64.
+2026-10-06T17:59:32.7132697Z Preparing to unpack .../24-mingw-w64_11.0.1-3build1_all.deb ...
+2026-10-06T17:59:32.7140247Z Unpacking mingw-w64 (11.0.1-3build1) ...
+2026-10-06T17:59:32.7617449Z Setting up binutils-mingw-w64-x86-64 (2.41.90.20240122-1ubuntu1+11.4) ...
+2026-10-06T17:59:32.7639556Z Setting up gcc-mingw-w64-base:amd64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7659247Z Setting up gcc-mingw-w64-i686-posix-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7679269Z Setting up binutils-mingw-w64-i686 (2.41.90.20240122-1ubuntu1+11.4) ...
+2026-10-06T17:59:32.7699636Z Setting up gcc-mingw-w64-x86-64-win32-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7721930Z Setting up gcc-mingw-w64-i686-win32-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7740466Z Setting up mingw-w64-common (11.0.1-3build1) ...
+2026-10-06T17:59:32.7759626Z Setting up mingw-w64-x86-64-dev (11.0.1-3build1) ...
+2026-10-06T17:59:32.7779688Z Setting up gcc-mingw-w64-x86-64-posix-runtime (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7801875Z Setting up gcc-mingw-w64-x86-64-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7887721Z update-alternatives: using /usr/bin/x86_64-w64-mingw32-gcc-posix to provide /usr/bin/x86_64-w64-mingw32-gcc (x86_64-w64-mingw32-gcc) in auto mode
+2026-10-06T17:59:32.7915766Z Setting up gcc-mingw-w64-x86-64-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.7976349Z update-alternatives: using /usr/bin/x86_64-w64-mingw32-gcc-win32 to provide /usr/bin/x86_64-w64-mingw32-gcc (x86_64-w64-mingw32-gcc) in auto mode
+2026-10-06T17:59:32.7997969Z Setting up gcc-mingw-w64-x86-64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8047356Z Setting up mingw-w64-i686-dev (11.0.1-3build1) ...
+2026-10-06T17:59:32.8069555Z Setting up gcc-mingw-w64-i686-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8128996Z update-alternatives: using /usr/bin/i686-w64-mingw32-gcc-win32 to provide /usr/bin/i686-w64-mingw32-gcc (i686-w64-mingw32-gcc) in auto mode
+2026-10-06T17:59:32.8157379Z Setting up g++-mingw-w64-i686-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8219949Z update-alternatives: using /usr/bin/i686-w64-mingw32-g++-win32 to provide /usr/bin/i686-w64-mingw32-g++ (i686-w64-mingw32-g++) in auto mode
+2026-10-06T17:59:32.8238380Z Setting up g++-mingw-w64-x86-64-win32 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8296288Z update-alternatives: using /usr/bin/x86_64-w64-mingw32-g++-win32 to provide /usr/bin/x86_64-w64-mingw32-g++ (x86_64-w64-mingw32-g++) in auto mode
+2026-10-06T17:59:32.8313472Z Setting up gcc-mingw-w64-i686-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8386650Z Setting up g++-mingw-w64-x86-64-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8459464Z Setting up gcc-mingw-w64-i686 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8508866Z Setting up g++-mingw-w64-x86-64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8558100Z Setting up gcc-mingw-w64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8608652Z Setting up g++-mingw-w64-i686-posix (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8684349Z Setting up g++-mingw-w64-i686 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8735727Z Setting up g++-mingw-w64 (13.2.0-6ubuntu1+26.1) ...
+2026-10-06T17:59:32.8789955Z Setting up mingw-w64 (11.0.1-3build1) ...
+2026-10-06T17:59:32.8818751Z Processing triggers for man-db (2.12.0-4build2) ...
+2026-10-06T17:59:32.8841197Z Not building database; man-db/auto-update is not 'true'.
+2026-10-06T17:59:33.5639000Z 
+2026-10-06T17:59:33.5639858Z Running kernel seems to be up-to-date.
+2026-10-06T17:59:33.5640239Z 
+2026-10-06T17:59:33.5640379Z No services need to be restarted.
+2026-10-06T17:59:33.5640615Z 
+2026-10-06T17:59:33.5640748Z No containers need to be restarted.
+2026-10-06T17:59:33.5640984Z 
+2026-10-06T17:59:33.5641141Z No user sessions are running outdated binaries.
+2026-10-06T17:59:33.5641425Z 
+2026-10-06T17:59:33.5641973Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+2026-10-06T17:59:34.3780412Z ##[group]Run C2_HOST=ci-build.example.invalid C2_PORT=443 GHOST_BEACON_TOKEN=ci-build-token-not-for-operational-use ./build.sh
+2026-10-06T17:59:34.3782472Z [36;1mC2_HOST=ci-build.example.invalid C2_PORT=443 GHOST_BEACON_TOKEN=ci-build-token-not-for-operational-use ./build.sh[0m
+2026-10-06T17:59:34.3853969Z shell: /usr/bin/bash -e {0}
+2026-10-06T17:59:34.3854261Z ##[endgroup]
+2026-10-06T17:59:34.3980774Z [*] Toolchain: x86_64-w64-mingw32-g++ (GCC) 13-win32
+2026-10-06T17:59:34.3995116Z [*] C2 endpoint (env): ci-build.example.invalid:443
+2026-10-06T17:59:34.4004830Z [*] Mode: RELEASE
+2026-10-06T17:59:34.4005425Z 
+2026-10-06T17:59:34.4006174Z [*] Resources: ghost.rc → build/ghost.res
+2026-10-06T17:59:34.4612760Z [*] Compiling WindowsSecurityUpdate.exe …
+2026-10-06T17:59:45.6427166Z src/c2.cpp: In function ‘std::wstring HandleBrowser(const std::string&)’:
+2026-10-06T17:59:45.6428567Z src/c2.cpp:783:50: error: invalid operands of types ‘const wchar_t*’ and ‘const wchar_t*’ to binary ‘operator+’
+2026-10-06T17:59:45.6430279Z   783 |     std::wstring wScript = std::wstring(s1.str() + s2.str() + s3.str() + s4.str() + s5.str() + s6.str() + s7.str() + s8.str() + s9.str() + s10.str() + s11.str() + s12.str() + s13.str() + s14.str() + s15.str() + s16.str() + s17.str() + s18.str() + s19.str() + s20.str() + s21.str() + s22.str() + s23.str() + s24.str() + s25.str() + s26.str());
+2026-10-06T17:59:45.6431946Z       |                                         ~~~~~~~~ ^ ~~~~~~~~
+2026-10-06T17:59:45.6432347Z       |                                               |          |
+2026-10-06T17:59:45.6432766Z       |                                               |          const wchar_t*
+2026-10-06T17:59:45.6433203Z       |                                               const wchar_t*
+2026-10-06T17:59:50.7341154Z ##[error]Process completed with exit code 1.
+2026-10-06T17:59:50.7488902Z Post job cleanup.
+2026-10-06T17:59:50.8322497Z [command]/usr/bin/git version
+2026-10-06T17:59:50.8366117Z git version 2.55.0
+2026-10-06T17:59:50.8408500Z Temporarily overriding HOME='/home/runner/work/_temp/0067b000-12c6-4a6b-b71e-25df08e621ac' before making global git config changes
+2026-10-06T17:59:50.8409990Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-06T17:59:50.8415729Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/ghostimplant/ghostimplant
+2026-10-06T17:59:50.8455949Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-06T17:59:50.8491296Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-06T17:59:50.8737714Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-06T17:59:50.8770667Z http.https://github.com/.extraheader
+2026-10-06T17:59:50.8783453Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-06T17:59:50.8824414Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-06T17:59:50.9074984Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-06T17:59:50.9116078Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-06T17:59:50.9509128Z Cleaning up orphan processes
+2026-10-06T17:59:50.9824148Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
