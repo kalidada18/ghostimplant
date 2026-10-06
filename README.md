@@ -190,6 +190,8 @@ Every implanted technique is a detection test case. Validate your EDR against ea
 | `steal_token <pid>` | Duplicate a process primary token |
 | `!reverse <host> <port>` | Reverse TCP shell |
 | `!kill <pid>` | Terminate a process |
+| `!prank <text>` / `!prank off` | **Visibility demo** — swap wallpaper + drop a desktop READ_ME note (`off` fully reverts) |
+| `!popups` / `!popups off` | **Visibility demo** — random demo popups (`off` stops them) |
 | `!env` / `!getpid` | Environment dump / implant PID |
 | `!shell` | Toggle rapid-poll shell mode (fast task turnaround) |
 | `sleep <sec>` | Override beacon interval |
@@ -264,6 +266,12 @@ It implements techniques that are illegal to use against systems you do not own 
 written authorization to test. The author does not endorse, support, or condone unauthorized
 access, malicious activity, or any misuse of this software. Use it only inside isolated,
 authorized laboratory environments.
+
+> **About the `!prank` / `!popups` visibility demos:** these exist purely as *demonstration*
+> effects for authorized lab walkthroughs — showing an audience that the operator had full
+> desktop control. They are fully reversible (`!prank off`, `!popups off`), modify no files
+> beyond a wallpaper bitmap and a text note, and carry no offensive function. They are not
+> part of the ATT&CK-mapped research scope.
 
 <div align="center">
 

