@@ -94,6 +94,20 @@ Self-healing: if the server restarts (rotating its keypair and in-memory state),
 encrypted beacon is answered with a plaintext *re-handshake* response carrying a fresh server
 public point — the implant adopts the new key within one beacon interval, no operator action.
 
+### Task delivery & integrity (protocol v2)
+
+| Property | Mechanism |
+|---|---|
+| Unique agent identity | Stable session id (`hosthash\|user`) **plus** a per-run id (8 hex) so individual implant runs are distinguishable |
+| Task IDs | Every operator task gets a server-generated `tid`; tasks move through `queued → sent → acked → done` states |
+| Acknowledgements | The implant acks the task id in its next beacon; the ack is visible in the audit trail |
+| Retry handling | At-least-once delivery — an unacknowledged task is re-served on later beacons |
+| Duplicate protection | The implant remembers the last 32 task ids and never executes one twice; the server deduplicates retransmitted results |
+| Message integrity | AES-256-GCM authentication tags on every payload |
+| Replay protection | Monotonic counters inside the authenticated payloads; receivers reject non-advancing counters and re-baseline only on a fresh handshake |
+| Timeout & error reporting | Results carry machine-readable status (`ok` / `error` / `timeout`) |
+| Audit logging | Server-side append-only audit trail: `task_queued`, `task_sent`, `task_ack`, `result`, `result_dup`, `replay_rejected`, `beacon_rehandshake` |
+
 > **Known limitation (documented for the thesis):** the handshake authenticates the *beacon
 > token*, not the server identity, and the transport ignores certificate errors by design —
 > so an active HTTPS-MITM positioned in front of the server can interpose. The channel
@@ -238,6 +252,59 @@ ghostimplant/
 ├── resources/          # PE version resource + manifest
 └── build.sh            # MinGW-w64 cross-compile (Linux)
 ```
+
+---
+
+## ⚙️ Configuration
+
+No operational value is hard-coded at the call site — everything is tunable at build time
+(implant) or via config file / environment / CLI flags (server).
+
+### Implant (build time)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `C2_HOST` / `C2_PORT` | C2 endpoint baked into the binary | prompted (port 443) |
+| `GHOST_BEACON_TOKEN` | Implant→server auth token (server must use the same value) | random, generated and printed by `build.sh` |
+| `GHOST_BEACON_MIN` / `GHOST_BEACON_MAX` | Beacon interval jitter bounds, seconds | 18 / 24 |
+
+### Server
+
+```bash
+python server/c2_server.py --config ghost.json --tls
+```
+
+```json
+{
+  "beacon_token":   "set-me",
+  "operator_token": "set-me",
+  "dashboard_user": "admin",
+  "dashboard_pass": "set-me",
+  "auto_accept":    false,
+  "result_cap":     500,
+  "audit_cap":      1000,
+  "session_ttl":    7200,
+  "task_queue_max": 64,
+  "payload_max":    33554432
+}
+```
+
+Precedence: built-in defaults < `--config` file < environment (`GHOST_*`) < CLI flags.
+Secrets can also be rotated at runtime via `--beacon-token` / `--operator-token` / `--password`.
+
+---
+
+## 🧪 Testing & CI
+
+Two suites gate every push (see [.github/workflows/ci.yml](.github/workflows/ci.yml)):
+
+- **`tests/test_protocol.py`** — 27 checks against the live server: ECDH handshake, encrypted
+  task/result round trips, task-id delivery + ack, at-least-once retry, duplicate-result
+  dedup, replay-counter rejection, server-restart re-handshake.
+- **MinGW-w64 cross-compile** — the implant must build clean (`-Wall -Wextra`) on every push.
+
+Locally: `python tests/test_protocol.py` (server protocol) and
+`powershell -File tests/test_browser.ps1` (browser-recovery module against a synthetic profile).
 
 ---
 

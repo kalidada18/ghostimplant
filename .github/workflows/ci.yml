@@ -27,6 +27,6 @@ jobs:
       - name: Install MinGW-w64 toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64
       - name: Build release implant
-        run: C2_HOST=ci-build.example.invalid C2_PORT=443 ./build.sh
+        run: C2_HOST=ci-build.example.invalid C2_PORT=443 GHOST_BEACON_TOKEN=ci-build-token-not-for-operational-use ./build.sh
       - name: Verify artifact
         run: test -f build/WindowsSecurityUpdate.exe && file build/WindowsSecurityUpdate.exe

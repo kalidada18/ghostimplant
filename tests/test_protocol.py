@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-End-to-end test of the GHOST C2 channel protocol (ECDH P-256 handshake +
-AES-256-GCM wire encryption) against the Flask server, using its test client.
+End-to-end test of the GHOST C2 channel protocol v2 (ECDH P-256 handshake +
+AES-256-GCM wire encryption + monotonic counters + task ids + acks) against
+the Flask server, using its test client.
 
 The FakeImplant class mirrors the implant's SendBeacon/SendResult logic in
 src/c2.cpp: encrypt only once a server public point ("spk") has been seen,
 adopt spk on every response, decrypt "e":1 cmd blobs, fall back to plaintext
-after a rejection and re-handshake.
+after a rejection and re-handshake, bump counters, ack tasks, dedup results.
 
 Run:  python tests/test_protocol.py
 """
@@ -39,14 +40,18 @@ def check(name, cond, detail=""):
 class FakeImplant:
     """Mirrors src/c2.cpp channel logic (SendBeacon / SendResult)."""
 
-    def __init__(self, sid):
+    def __init__(self, sid, run="a1b2c3d4"):
         self.sid = sid
+        self.run = run
         self.priv = ec.generate_private_key(ec.SECP256R1())
         pub = self.priv.public_key().public_bytes(
             Encoding.X962, PublicFormat.UncompressedPoint)[1:]  # X||Y big-endian
         self.pub_b64 = base64.b64encode(pub).decode()
         self.srv_pub_b64 = None
         self.key = None
+        self.tx_n = 0            # implant -> server counter
+        self.rx_srv_n = 0        # server -> implant counter (last accepted)
+        self.pending_ack = ""    # tid to ack in the next beacon
         self.c = srv.app.test_client()
 
     def _derive(self, srv_pub_b64):
@@ -64,49 +69,80 @@ class FakeImplant:
         return h
 
     def _consume(self, resp_body):
-        """Adopt spk, then extract cmd — same order as the implant."""
+        """Adopt spk + server counter, then extract (cmd, tid) — implant order."""
         spk = resp_body.get("spk", "")
         if spk and spk != self.srv_pub_b64:
             key = self._derive(spk)
             if key:
-                self.key = self.key if False else key  # adopt
+                self.key = key
                 self.srv_pub_b64 = spk
-        cmd = resp_body.get("cmd", "")
-        if cmd and resp_body.get("e") == 1 and self.key:
-            pt = AESGCM(self.key).decrypt(
-                base64.b64decode(cmd)[:12],
-                base64.b64decode(cmd)[28:] + base64.b64decode(cmd)[12:28],
-                None)
-            cmd = json.loads(pt)["cmd"]
-        return cmd
+                self.rx_srv_n = 0        # new server epoch
+        cmd, tid = resp_body.get("cmd", ""), resp_body.get("tid", "")
+        if resp_body.get("e") == 1 and cmd and self.key:
+            blob = json.loads(
+                AESGCM(self.key).decrypt(
+                    base64.b64decode(cmd)[:12],
+                    base64.b64decode(cmd)[28:] + base64.b64decode(cmd)[12:28],
+                    None))
+            srv_n = blob.get("n", 0)
+            if srv_n <= self.rx_srv_n:
+                raise AssertionError(f"replayed server counter {srv_n} <= {self.rx_srv_n}")
+            self.rx_srv_n = srv_n
+            cmd, tid = blob.get("cmd", ""), blob.get("tid", "")
+        if tid:
+            self.pending_ack = tid       # ack it in the next beacon
+        return cmd, tid
 
-    def beacon(self, task_pending=False, force_plaintext=False):
-        body = {"session": self.sid,
+    def beacon(self, force_plaintext=False):
+        self.tx_n += 1
+        body = {"session": self.sid, "run": self.run, "n": self.tx_n,
+                "ack": self.pending_ack,
                 "recon": {"hostname": "LAB-VM", "user": "tester",
                           "build": 22631, "elevated": True}}
-        data = srv._enc_blob(self.key, body) if (self.key and not force_plaintext) \
-            else json.dumps(body)
-        r = self.c.post("/beacon", data=data, headers=self._headers(enc=not force_plaintext))
-        assert r.status_code == 200, f"beacon -> {r.status_code}: {r.get_data(as_text=True)}"
-        return self._consume(r.get_json())
+        if self.key and not force_plaintext:
+            data = srv._enc_blob(self.key, body)
+            enc = True
+        else:
+            data = json.dumps(body)
+            enc = False
+        r = self.c.post("/beacon", data=data, headers=self._headers(enc=enc))
+        if r.status_code != 200:
+            return None, None, r
+        cmd, tid = self._consume(r.get_json())
+        self.pending_ack = ""            # ack consumed by this successful beacon
+        return cmd, tid, r
 
-    def result(self, output):
-        body = {"session": self.sid, "output": output}
+    def result(self, tid, output, status="ok", replay_n=None):
+        self.tx_n += 1
+        body = {"session": self.sid, "tid": tid, "status": status,
+                "n": self.tx_n if replay_n is None else replay_n, "output": output}
         data = srv._enc_blob(self.key, body) if self.key else json.dumps(body)
         r = self.c.post("/result", data=data, headers=self._headers(enc=bool(self.key)))
-        assert r.status_code == 200, f"result -> {r.status_code}"
-        return r.get_json()
+        return r
+
+    def raw_result(self, payload_bytes):
+        """Re-post a previously captured encrypted payload (replay attack)."""
+        return self.c.post("/result", data=payload_bytes, headers=self._headers(enc=True))
 
     def push_task(self, cmd):
         r = self.c.post("/task", json={"session": self.sid, "cmd": cmd},
                         headers={"X-Operator-Token": srv._CFG["operator_token"]})
         assert r.status_code == 200, f"task -> {r.status_code}"
+        return r.get_json()["tid"]
 
     def results(self):
         r = self.c.get(f"/results/{self.sid}",
                        headers={"X-Operator-Token": srv._CFG["operator_token"]})
         assert r.status_code == 200
         return r.get_json()
+
+    def tasks_view(self):
+        r = self.c.get("/sessions", headers={"X-Operator-Token": srv._CFG["operator_token"]})
+        assert r.status_code == 200
+        for s in r.get_json():
+            if s["session"] == self.sid:
+                return s
+        return {}
 
 
 def main():
@@ -115,29 +151,63 @@ def main():
 
     print("── handshake + encrypted round trip ──")
     imp = FakeImplant(sid)
-    cmd = imp.beacon(force_plaintext=True)          # first beacon: bootstrap
+    cmd, tid, r = imp.beacon(force_plaintext=True)   # first beacon: bootstrap
     check("first beacon returns spk", bool(imp.srv_pub_b64))
-    check("server stored channel key",
-          srv._sessions[sid].get("key") == imp.key)
+    check("server stored channel key", srv._sessions[sid].get("key") == imp.key)
+    check("run id recorded", srv._sessions[sid].get("run") == "a1b2c3d4")
     check("first beacon cmd (encrypted) = sleep", cmd == "sleep", repr(cmd))
 
-    imp.push_task('whoami && echo "quoted arg" ünïcode')
-    cmd = imp.beacon()
-    check("task delivered encrypted, quotes+unicode intact",
-          cmd == 'whoami && echo "quoted arg" ünïcode', repr(cmd))
+    t1 = imp.push_task('whoami && echo "quoted arg" ünïcode')
+    cmd, tid, r = imp.beacon()
+    check("task delivered with matching tid", tid == t1 and cmd.startswith("whoami"), repr((cmd, tid)))
 
-    out = 'done\nline "two" — ünïcode ✓'
-    imp.result(out)
-    got = imp.results()["results"][-1]["output"]
-    check("result round trip (encrypted)", got == out, repr(got))
+    r = imp.result(tid, 'done\nline "two" — ünïcode ✓')
+    got = imp.results()["results"][-1]
+    check("result round trip (tid + status + output)",
+          got["tid"] == t1 and got["status"] == "ok" and got["output"].endswith("ünïcode ✓"),
+          repr(got))
 
-    print("── second beacon keeps channel ──")
-    key_before = imp.key
-    cmd = imp.beacon()
-    check("key unchanged", imp.key == key_before)
-    check("cmd = sleep", cmd == "sleep")
+    print("── task lifecycle: ack, completion, no retry ──")
+    check("task state done", srv._tasks[sid][0]["state"] == "done")
+    cmd2, tid2, _ = imp.beacon()
+    check("beacon after done = sleep", cmd2 == "sleep" and tid2 == "", repr((cmd2, tid2)))
+    check("ack consumed", imp.pending_ack == "")
 
-    print("── server restart (keypair rotated, in-memory store wiped) ──")
+    print("── retry: unacked task re-served (at-least-once) ──")
+    t2 = imp.push_task("dir")
+    cmd3, tid3, _ = imp.beacon()
+    check("task2 delivered", cmd3 == "dir" and tid3 == t2, repr((cmd3, tid3)))
+    cmd3b, tid3b, _ = imp.beacon()          # no result yet → re-served
+    check("unacked task re-served", cmd3b == "dir" and tid3b == t2, repr((cmd3b, tid3b)))
+
+    print("── dedup: duplicate result ignored, task still completed ──")
+    r1 = imp.result(t2, "dir output here")
+    check("first result stored", len(imp.results()["results"]) == 2)
+    r2 = imp.result(t2, "dir output here")  # retransmit
+    check("dup result acknowledged", r2.get_json().get("dup") is True, repr(r2.get_json()))
+    check("no extra result stored", len(imp.results()["results"]) == 2)
+    cmd4, tid4, _ = imp.beacon()
+    check("task done → sleep", cmd4 == "sleep" and tid4 == "")
+    check("server task state done", all(t["state"] == "done" for t in srv._tasks[sid]))
+
+    print("── session view exposes protocol state ──")
+    view = imp.tasks_view()
+    check("run visible", view.get("run") == "a1b2c3d4", repr(view.get("run")))
+    check("done tasks pruned from queue", view.get("task_states") == {"queued": 0, "sent": 0, "acked": 0, "done": 0}, repr(view.get("task_states")))
+    check("no key material leaked", "key" not in view and "last_rx_n" not in view)
+
+    print("── replay protection ──")
+    t3 = imp.push_task("whoami")
+    cmd5, tid5, _ = imp.beacon()
+    n_before = imp.tx_n
+    r_replay = imp.raw_result(srv._enc_blob(imp.key, {
+        "session": sid, "tid": tid5, "status": "ok", "n": imp.tx_n - 1, "output": "evil"}))
+    check("replayed counter rejected", r_replay.status_code == 400, r_replay.status_code)
+    # legitimate result still accepted afterwards
+    r_ok = imp.result(tid5, "whoami output")
+    check("legit result after replay attempt", r_ok.status_code == 200)
+
+    print("── server restart (keypair rotated, store wiped) ──")
     srv._SRV_ECDH = ec.generate_private_key(ec.SECP256R1())
     srv._SRV_PUB_B64 = base64.b64encode(
         srv._SRV_ECDH.public_key().public_bytes(
@@ -145,18 +215,17 @@ def main():
     srv._sessions.clear()
     srv._tasks.clear()
     srv._results.clear()
-    cmd = imp.beacon()   # implant still encrypted with the old key
-    check("rehandshake response plaintext + new spk", cmd == "sleep")
+    srv._done_tids.clear()
+    cmd6, tid6, _ = imp.beacon()            # implant still on old epoch
+    check("rehandshake response plaintext + new spk", cmd6 == "sleep")
     check("implant adopted new server pub", imp.srv_pub_b64 == srv._SRV_PUB_B64)
+    cmd7, tid7, _ = imp.beacon()
+    check("beacon after re-handshake encrypted OK", cmd7 == "sleep")
 
-    cmd = imp.beacon()   # re-accepted? auto-accept is on → channel re-established
-    check("beacon after re-handshake encrypted OK", cmd == "sleep")
-
-    imp.push_task("dir")
-    cmd = imp.beacon()
-    check("task served after re-handshake", cmd == "dir", repr(cmd))
-    check("server stored rotated key",
-          srv._sessions[sid].get("key") == imp.key)
+    imp.push_task("ver")
+    cmd8, tid8, _ = imp.beacon()
+    check("task served after re-handshake", cmd8 == "ver", repr(cmd8))
+    check("server stored rotated key", srv._sessions[sid].get("key") == imp.key)
 
     print("── blob helpers round trip ──")
     blob = srv._enc_blob(imp.key, {"x": 'a"b\\c\nü'})

