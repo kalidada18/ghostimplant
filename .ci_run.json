@@ -1,28 +1,28 @@
 {
-  "total_count": 9,
+  "total_count": 11,
   "workflow_runs": [
     {
-      "id": 37507751491,
+      "id": 37508555826,
       "name": "ci",
-      "node_id": "WFR_kwLOTJqnEM8AAAAIu6LeQw",
+      "node_id": "WFR_kwLOTJqnEM8AAAAIu68kMg",
       "head_branch": "main",
-      "head_sha": "70413bd92c03f4a04540ca001610e993c526e0b7",
+      "head_sha": "0545f3753f411cd236b5ed1a1c94d499a68f9650",
       "path": ".github/workflows/ci.yml",
-      "display_title": "feat: protocol v2 — task ids, acks, replay protection, structured res…",
-      "run_number": 9,
+      "display_title": "fix: apply chunk-join fix to emitted code (previous commit only fixed…",
+      "run_number": 11,
       "event": "push",
       "status": "completed",
       "conclusion": "failure",
       "workflow_id": 376617655,
-      "check_suite_id": 101601414084,
-      "check_suite_node_id": "CS_kwDOTJqnEM8AAAAXp-qLxA",
-      "url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491",
-      "html_url": "https://github.com/kalidada18/ghostimplant/actions/runs/37507751491",
+      "check_suite_id": 101603733992,
+      "check_suite_node_id": "CS_kwDOTJqnEM8AAAAXqA3x6A",
+      "url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826",
+      "html_url": "https://github.com/kalidada18/ghostimplant/actions/runs/37508555826",
       "pull_requests": [
 
       ],
-      "created_at": "2026-10-06T17:59:00Z",
-      "updated_at": "2026-10-06T18:00:41Z",
+      "created_at": "2026-10-06T18:05:05Z",
+      "updated_at": "2026-10-06T18:06:07Z",
       "actor": {
         "login": "kalidada18",
         "id": 141892300,
@@ -48,7 +48,7 @@
       "referenced_workflows": [
 
       ],
-      "run_started_at": "2026-10-06T17:59:00Z",
+      "run_started_at": "2026-10-06T18:05:05Z",
       "triggering_actor": {
         "login": "kalidada18",
         "id": 141892300,
@@ -70,19 +70,19 @@
         "user_view_type": "public",
         "site_admin": false
       },
-      "jobs_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491/jobs",
-      "logs_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491/logs",
-      "check_suite_url": "https://api.github.com/repos/kalidada18/ghostimplant/check-suites/101601414084",
-      "artifacts_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491/artifacts",
-      "cancel_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491/cancel",
-      "rerun_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37507751491/rerun",
+      "jobs_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826/jobs",
+      "logs_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826/logs",
+      "check_suite_url": "https://api.github.com/repos/kalidada18/ghostimplant/check-suites/101603733992",
+      "artifacts_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826/artifacts",
+      "cancel_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826/cancel",
+      "rerun_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/runs/37508555826/rerun",
       "previous_attempt_url": null,
       "workflow_url": "https://api.github.com/repos/kalidada18/ghostimplant/actions/workflows/376617655",
       "head_commit": {
-        "id": "70413bd92c03f4a04540ca001610e993c526e0b7",
-        "tree_id": "e0fc1eb29e4033bfc1ef140f205be74bd8e1ebd1",
-        "message": "feat: protocol v2 — task ids, acks, replay protection, structured results; config management\n\nC2 reliability (implant + server + tests):\n- Server-generated task ids; tasks move queued -> sent -> acked -> done\n- At-least-once delivery: unacked tasks are re-served; implant dedups by\n  tid (last 32 seen) so retried tasks never execute twice; server\n  deduplicates retransmitted results (result_dup audit event)\n- Implant acks task receipt in the next beacon; server audit trail gains\n  task_queued/task_sent/task_ack/result/result_dup/replay_rejected\n- Monotonic counters inside the GCM-authenticated payloads on both\n  directions; non-advancing counters are rejected (replay protection),\n  re-baselined only on fresh handshakes / server restarts\n- Per-run implant id (8 hex) reported in beacons and results\n- Results carry machine-readable status: ok / error / timeout\n- tests/test_protocol.py grows to 27 checks covering all of the above\n\nConfiguration management (no hard-coded operational values):\n- Server: --config JSON file; precedence defaults < file < env < CLI;\n  result/audit caps, session TTL, queue depth, payload limit all tunable\n- Implant build: beacon token + min/max beacon interval are build-time\n  flags (GHOST_BEACON_TOKEN/_MIN/_MAX via build.sh prompts or env);\n  previous embedded token remains the fallback default\n\nDashboard (ui-ux-pro-max pass):\n- Results show task id + ok/timeout/error status badges; session detail\n  shows implant run id and sent/acked task counts\n- Focus-visible rings, prefers-reduced-motion support, status colors on\n  the existing OLED palette",
-        "timestamp": "2026-10-06T17:58:54Z",
+        "id": "0545f3753f411cd236b5ed1a1c94d499a68f9650",
+        "tree_id": "10a4cc376fdfb49daad9f329d44fc8cab994cb9e",
+        "message": "fix: apply chunk-join fix to emitted code (previous commit only fixed the generator)",
+        "timestamp": "2026-10-06T18:04:59Z",
         "author": {
           "name": "kalidada18",
           "email": "lamichhanesujal18@gmail.com"
