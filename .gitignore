@@ -34,3 +34,8 @@ worker/dist/
 *.user
 .idea/
 .wrangler/cache/wrangler-account.json
+.ci_*.txt
+.ci_run.json
+.ci_jobid
+*.pyc
+__pycache__/
