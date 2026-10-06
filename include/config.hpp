@@ -19,8 +19,14 @@ namespace config {
 #endif
     constexpr uint32_t BEACON_MIN = GHOST_BEACON_MIN;
     constexpr uint32_t BEACON_MAX = GHOST_BEACON_MAX;
-    constexpr uint32_t MAX_FAILURES = 5;
-    constexpr uint32_t BACKOFF_FACTOR = 3;
+
+    // Consecutive-failure backoff (applied by BeaconFailureBackoff in src/c2.cpp):
+    //   wait = BEACON_MIN * BACKOFF_FACTOR^(failures-1)
+    // growing until MAX_FAILURES consecutive failures, then holding, and always
+    // capped at BACKOFF_MAX_SEC. Defaults: 18 -> 54 -> 162 -> 486 -> 1458s held.
+    constexpr uint32_t MAX_FAILURES    = 5;      // failures before the interval holds
+    constexpr uint32_t BACKOFF_FACTOR  = 3;      // multiplier per failure step
+    constexpr uint32_t BACKOFF_MAX_SEC = 1800;    // absolute ceiling (30 min)
 
     extern const wchar_t* WMI_CONSUMER_NAME;
     extern const wchar_t* WMI_FILTER_NAME;

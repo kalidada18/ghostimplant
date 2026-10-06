@@ -55,6 +55,17 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ── Console encoding ─────────────────────────────────────────────────────────
+# Windows terminals default to a legacy code page (cp1252 on en-US), which
+# raises UnicodeEncodeError on the box-drawing and emoji output below. Force
+# UTF-8 with replacement so a weird console degrades instead of killing the
+# operator's session mid-task.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config paths
 # ─────────────────────────────────────────────────────────────────────────────

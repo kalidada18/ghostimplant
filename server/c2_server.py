@@ -41,6 +41,15 @@ try:
 except ImportError:
     _AESGCM_OK = False
 
+# Console encoding: Windows terminals default to a legacy code page (cp1252 on
+# en-US) and raise UnicodeEncodeError on the box-drawing banners below. Force
+# UTF-8 with replacement so an odd console degrades instead of killing the server.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 
 # ── Channel key agreement (ECDH P-256) + AES-256-GCM wire encryption ─────────
 # The implant generates a fresh ephemeral P-256 keypair per run and sends its

