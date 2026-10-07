@@ -19,40 +19,15 @@
 // than once. The destructor wipes the buffer afterwards.
 //
 #pragma once
+#include "ghostcore.hpp"   // keystream primitives, also unit-tested on Linux
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
 
-// ─── 4-byte rotating key (rotate both before each build) ───────────────
-// ponytail: per-string keystreams defeat single-key XOR inversion and stop
-// identical literals from producing identical ciphertext anywhere in the binary
-constexpr uint64_t GHOST_SALT = 0x5D3A9F17C4B28E60ull;
-constexpr uint8_t GHOST_K0 = 0xA7u;
-constexpr uint8_t GHOST_K1 = 0x3Eu;
-constexpr uint8_t GHOST_K2 = 0xC1u;
-constexpr uint8_t GHOST_K3 = 0x58u;
-
-// splitmix64 — mixing primitive behind the per-string keystream.
-// seed = splitmix64(salt ⊕ key ⊕ callsite id); stream byte i is the top byte
-// of splitmix64(seed + i·prime), so every byte of every string is independent.
-constexpr uint64_t splitmix64(uint64_t x) {
-    x += 0x9E3779B97F4A7C15ull;
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-    return x ^ (x >> 31);
-}
-constexpr uint64_t ghost_seed(uint32_t id) {
-    const uint64_t k = uint64_t(GHOST_K0) | (uint64_t(GHOST_K1) << 8) |
-                       (uint64_t(GHOST_K2) << 16) | (uint64_t(GHOST_K3) << 24);
-    return splitmix64(GHOST_SALT ^ k ^ (uint64_t(id) * 0x9E3779B97F4A7C15ull));
-}
-constexpr uint8_t ghost_stream(uint64_t seed, size_t i) {
-    return static_cast<uint8_t>(splitmix64(seed + uint64_t(i) * 0xD1B54A32D192ED03ull) >> 56);
-}
-constexpr uint16_t ghost_stream_w(uint64_t seed, size_t i) {
-    return static_cast<uint16_t>(ghost_stream(seed, 2 * i) |
-                                 static_cast<uint16_t>(ghost_stream(seed, 2 * i + 1) << 8));
-}
+// ─── Build salt + rotating key — defined in ghostcore.hpp ───────────────
+// GHOST_SALT, GHOST_K0..K3, the seed derivation and the splitmix64 stream live
+// in include/ghostcore.hpp (namespace ghost) so tests/test_core.cpp can cover
+// them on a plain runner. Rotate the salt and key before each campaign build.
 
 // ─── Compile-time FNV-1a 32-bit hash ────────────────────────────────────────
 constexpr uint32_t fnv1a_impl(const char* s, uint32_t h) {
@@ -66,17 +41,17 @@ constexpr uint32_t fnv1a(const char* s) {
 // ─── Narrow XorStr<N, ID> ────────────────────────────────────────────────────────
 template<size_t N, uint32_t ID>
 struct XorStr {
-    static constexpr uint64_t SEED = ghost_seed(ID);
+    static constexpr uint64_t SEED = ghost::ghost_seed(ID);
     mutable char buf[N];
 
     constexpr XorStr(const char (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost_stream(SEED, i));
+            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost::ghost_stream(SEED, i));
     }
 
     const char* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost_stream(SEED, i));
+            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost::ghost_stream(SEED, i));
         buf[N - 1] = '\0';
         return buf;
     }
@@ -97,17 +72,17 @@ struct XorStr {
 // ─── Wide XorStrW<N, ID> ─────────────────────────────────────────────────────────
 template<size_t N, uint32_t ID>
 struct XorStrW {
-    static constexpr uint64_t SEED = ghost_seed(ID);
+    static constexpr uint64_t SEED = ghost::ghost_seed(ID);
     mutable wchar_t buf[N];
 
     constexpr XorStrW(const wchar_t (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost_stream_w(SEED, i));
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost::ghost_stream_w(SEED, i));
     }
 
     const wchar_t* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost_stream_w(SEED, i));
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost::ghost_stream_w(SEED, i));
         buf[N - 1] = L'\0';
         return buf;
     }

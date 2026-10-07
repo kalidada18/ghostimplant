@@ -1,6 +1,7 @@
 // utils.cpp — String conversion, Base64, AES-GCM + ECDH P-256 (BCrypt),
 // SHA-256, system info, jitter sleep.
 #include "utils.hpp"
+#include "ghostcore.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
 #include <bcrypt.h>
@@ -11,7 +12,6 @@
 #include <random>
 #include <chrono>
 #include <algorithm>
-#include <array>
 #include <lmcons.h>
 
 #ifdef _MSC_VER
@@ -49,69 +49,15 @@ std::wstring UTF8ToWString(const std::string& utf8) {
 }
 
 // ---------------------------------------------------------------------------
-// Base64 — RFC 4648 standard alphabet
+// Base64 — implemented in include/ghostcore.hpp so the strict decoder is
+// unit-tested (tests/test_core.cpp); these are the Windows-facing wrappers.
 // ---------------------------------------------------------------------------
-
-static const char B64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 std::string Base64Encode(const BYTE* data, size_t len) {
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t b = static_cast<uint32_t>(data[i]) << 16;
-        if (i + 1 < len) b |= static_cast<uint32_t>(data[i + 1]) << 8;
-        if (i + 2 < len) b |= static_cast<uint32_t>(data[i + 2]);
-        out.push_back(B64[(b >> 18) & 0x3F]);
-        out.push_back(B64[(b >> 12) & 0x3F]);
-        out.push_back((i + 1 < len) ? B64[(b >> 6) & 0x3F] : '=');
-        out.push_back((i + 2 < len) ? B64[b & 0x3F]        : '=');
-    }
-    return out;
+    return ghost::Base64Encode(data, len);
 }
 
 std::vector<BYTE> Base64Decode(const std::string& b64) {
-    // Built once through a magic static, which C++11 guarantees is initialised
-    // exactly once even under concurrent entry. The previous shape was
-    // `static int inv[256]` guarded by `static bool init`, read-modified with no
-    // synchronisation: Base64Decode runs on the beacon, keylog and VNC threads,
-    // so two of them could be writing the table while the other decoded with it.
-    static const std::array<int, 256> INV = [] {
-        std::array<int, 256> t;
-        for (int i = 0; i < 256; ++i) t[i] = -1;
-        for (int i = 0; i < 64; ++i) t[(unsigned char)B64[i]] = i;
-        t[(unsigned char)'='] = 0;
-        return t;
-    }();
-
-    std::vector<BYTE> out;
-    if (b64.size() % 4 != 0) return out;
-    out.reserve((b64.size() / 4) * 3);
-    for (size_t i = 0; i < b64.size(); i += 4) {
-        uint32_t block = 0;
-        bool sawPad = false;
-        for (int j = 0; j < 4; ++j) {
-            const char c = b64[i + j];
-            // Padding is only legal as trailing characters of the final
-            // quartet. Accepting '=' anywhere mapped it to zero and produced
-            // bytes from malformed input, so a corrupt frame surfaced as an
-            // authentication-tag failure instead of a decode failure.
-            if (c == '=') {
-                if (j < 2 || i + 4 != b64.size()) return {};
-                sawPad = true;
-                block <<= 6;
-                continue;
-            }
-            if (sawPad) return {};
-            int v = INV[(unsigned char)c];
-            if (v < 0) return {};
-            block = (block << 6) | static_cast<uint32_t>(v);
-        }
-        out.push_back(static_cast<BYTE>((block >> 16) & 0xFF));
-        if (b64[i + 2] != '=') out.push_back(static_cast<BYTE>((block >> 8) & 0xFF));
-        if (b64[i + 3] != '=') out.push_back(static_cast<BYTE>(block & 0xFF));
-    }
-    return out;
+    return ghost::Base64Decode(b64);
 }
 
 // ---------------------------------------------------------------------------
