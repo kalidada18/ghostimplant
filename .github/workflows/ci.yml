@@ -39,6 +39,20 @@ jobs:
             --secret "ci-build-token-not-for-operational-use" \
             --secret "ci-build.example.invalid"
 
+  core-unit-tests:
+    name: Core unit tests (platform-free C++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # g++ is preinstalled on ubuntu-latest, and include/ghostcore.hpp has no
+      # Windows dependency, so the pure logic runs natively - no WINE, no
+      # cross-toolchain. -Werror keeps the core as clean as the implant build.
+      - name: Compile and run tests/test_core.cpp
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -O2 -I include \
+              tests/test_core.cpp -o /tmp/ghost-core-tests
+          /tmp/ghost-core-tests
+
   detection-artifacts:
     name: Detection artifacts (Sigma + Sysmon)
     runs-on: ubuntu-latest
