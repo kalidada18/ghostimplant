@@ -30,6 +30,14 @@ jobs:
         run: C2_HOST=ci-build.example.invalid C2_PORT=443 GHOST_BEACON_TOKEN=ci-build-token-not-for-operational-use ./build.sh
       - name: Verify artifact
         run: test -f build/WindowsSecurityUpdate.exe && file build/WindowsSecurityUpdate.exe
+      # XS/XSW folding is a compiler optimisation, not a language guarantee.
+      # This step is the tripwire that keeps the README's "no URLs, no payload
+      # fragments, no secrets in the clear" claim measured rather than assumed.
+      - name: Assert no plaintext protocol strings or secrets in the artifact
+        run: |
+          python3 tests/check_strings.py build/WindowsSecurityUpdate.exe \
+            --secret "ci-build-token-not-for-operational-use" \
+            --secret "ci-build.example.invalid"
 
   detection-artifacts:
     name: Detection artifacts (Sigma + Sysmon)

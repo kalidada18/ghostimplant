@@ -3,13 +3,16 @@ id: 9e5b3a17-6d42-4c80-b17f-5a2d8e94c036
 status: experimental
 description: >
   Detects the implant binary by name. src/main.cpp installs to
-  C:\Windows\System32\WindowsSecurityUpdate.exe and the project deliberately
+  %APPDATA%\Microsoft\WindowsUpdate\WindowsSecurityUpdate.exe (hidden + system)
+  and PEB-spoofs ImagePathName so process listings show
+  C:\Windows\System32\WindowsSecurityUpdate.exe; the project deliberately
   masquerades as a Microsoft updater through resources/ghost.rc version info.
-  There is no legitimate Microsoft binary named WindowsSecurityUpdate.exe in
-  System32, so the name itself is the artifact - which is why this rule keys on
-  the file name in a system directory instead of trying to fingerprint the
-  binary's behaviour. A file *created* inside System32 by a non-installer
-  process is the stronger signal of the two.
+  There is no legitimate Microsoft binary named WindowsSecurityUpdate.exe, so
+  the name itself is the artifact - which is why this rule keys on the file name
+  instead of trying to fingerprint the binary's behaviour. The name arms catch
+  the implant wherever it lands; the System32-write arm is the stronger generic
+  signal, because a non-installer process writing an .exe there is unusual
+  regardless of name.
 references:
   - https://attack.mitre.org/techniques/T1036/005/
   - https://attack.mitre.org/techniques/T1564/001/
@@ -44,7 +47,7 @@ detection:
       - '\TrustedInstaller.exe'
       - '\msiexec.exe'
       - '\setup.exe'
-      - '\Wuaueng.dll'
+      - '\wuauclt.exe'
   condition: (selection_file_create or selection_process_create or selection_network or selection_system32_write) and not filter_installers
 falsepositives:
   - Genuine Windows Update staging writes .exe files into System32 during

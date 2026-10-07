@@ -2,12 +2,15 @@ title: GHOST Lab - File Written From Remote Source By Non-Browser Process
 id: 04e7c2b9-38ad-4f61-95d0-7b1e86c34a52
 status: experimental
 description: >
-  Detects Sysmon event id 22, a file written as the result of a download with
-  the originating URL preserved on the event. This is the ingress-tool-transfer
-  rule for the file download and upload handlers in src/c2.cpp. It is the
-  single best artefact in this whole set because the RemoteSource field carries
-  the URL, which means the C2 host that the encrypted beacon hides is revealed
-  in cleartext by an entirely different code path.
+  Detects the file-staging half of the ingress-tool-transfer path in
+  src/c2.cpp: a process that is not a browser or mail client writes an
+  executable/script to disk, or writes a mark-of-the-web stream. The rule was
+  once written against an event id 22 "file download" carrying a RemoteSource
+  URL - no such event exists in Sysmon (22 is a DNS query, and no event carries
+  a download's source URL), so that URL-in-cleartext property is gone. What
+  remains are the write itself and the Zone.Identifier stream. Pair it with
+  command_and_control_dns_query_unknown_image, which catches the resolution
+  that precedes the transfer.
 references:
   - https://attack.mitre.org/techniques/T1105/
 author: kalidada18
@@ -19,9 +22,6 @@ logsource:
   product: windows
   service: sysmon
 detection:
-  selection_download:
-    EventID: 22
-    Image|notstartswith: 'C:\Windows\explorer.exe'
   selection_executable_written:
     EventID: 11
     TargetFilename|endswith:
@@ -42,12 +42,12 @@ detection:
       - '\firefox.exe'
       - '\Outlook.exe'
       - '\Teams.exe'
-  condition: (selection_download or selection_executable_written or selection_zone_marked) and not filter_browser_download
+  condition: (selection_executable_written or selection_zone_marked) and not filter_browser_download
 falsepositives:
   - Very high in a normal desktop, because updaters, installers, package
     managers and mail clients all write executables. This rule is a pivot with
     a wide net and is only useful inside an experiment window, or against a
     server where interactive downloads do not happen. Escalate on the pairing
-    with command_and_control_https_beacon_unknown_image rather than on this
-    alone.
+    with command_and_control_https_beacon_unknown_image and
+    command_and_control_dns_query_unknown_image rather than on this alone.
 level: medium

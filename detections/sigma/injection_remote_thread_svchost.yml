@@ -26,7 +26,7 @@ detection:
     EventID: 8
     TargetImage|endswith: '\svchost.exe'
   selection_access:
-    EventID: 25
+    EventID: 10
     TargetImage|endswith: '\svchost.exe'
     GrantedAccess:
       - '0x1F0FFF'

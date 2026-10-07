@@ -18,7 +18,7 @@ detections/
 ├── sysmon/
 │   └── sysmon-ghost.xml       # collection profile: the event ids these rules need
 └── sigma/
-    └── *.yml                  # 19 rules, each tagged to a section 16 technique
+    └── *.yml                  # 20 rules, each tagged to a section 16 technique
 ```
 
 ---
@@ -30,7 +30,8 @@ detections/
 `check_coverage.py` proves each rule parses, has a canonical unique UUID, carries
 a tactic and technique tag, references only selectors it defines, defines no
 selector nothing references, and matches a Sysmon event id the collector config
-actually enables. That is a real and useful set of checks: across its first two
+actually enables — with filter tags validated against the documented Sysmon
+event table. That is a real and useful set of checks: across its first two
 runs it caught six defects in these rules — four YAML syntax errors that would
 have made the rules unloadable by any Sigma tool, a selector no condition
 referenced, and a technique-extraction bug that invented phantom ATT&CK ids out
@@ -38,12 +39,22 @@ of the URLs in the README table. Two more were found by re-reading the source
 rather than by the tool: a registry arm matching the event's data field when it
 meant the value name, and a Defender key path that the implant does not write.
 
+A pass against the Sysmon documentation on 2026-10-08 found three more that no
+local check could see, because the *collector* was wrong the same way the rules
+were: the ingress rule matched event id 22 as a file download (22 is `DnsQuery`,
+and the config's `<FileDownloadEvent>` is not a Sysmon element at all), the
+injection rule's access arm matched event id 25 as process access (25 is
+`ProcessTampering`; process access is 10), and the ImageLoad filter used
+`ImageName`/`TargetImage`, which are not fields of event id 7. All three are
+fixed, the ingress rule keeps its event-11 arms (T1105 coverage survives), and
+the DNS lookup the beacon makes now has its own rule. The gate validates every
+filter tag against the documented table, so a tag typo cannot pass review again.
+
 It does **not** prove a rule fires on real telemetry. Nothing here has been run
 against a live Sysmon event log. To get that, in rough order of cost:
 
-1. **Parse through a Sigma backend** — `sigma-cli` or `pySigma` converting to
-   Splunk/SigmaHQ-Elastic syntax catches field-name and modifier mistakes the
-   local gate cannot see.
+1. ~~**Parse through a Sigma backend**~~ — **run 2026-10-08, see below.** The
+   backend caught three real defects the local gate cannot see.
 2. **Replay recorded EVTX** — export `Microsoft-Windows-Sysmon/Operational` from
    a lab VM and run [hayabusa](https://github.com/Yamato-Security/hayabusa) or
    `tac` against the rules. This is the cheapest path to honest per-technique
@@ -54,6 +65,27 @@ against a live Sysmon event log. To get that, in rough order of cost:
    which is the point: those two rules are testable without an encryptor.
 
 Record which of these you actually ran next to any coverage number you publish.
+
+### Backend validation — sigma-cli run, 2026-10-08
+
+`sigma-cli` 3.1.0 (PySigma 1.5.1) with the Splunk and Elasticsearch backends parses all 19
+rules and converts them to queries. It found three real defects the local gate cannot see:
+three rules used `Image|notstartswith` / `ParentImage|notstartswith`, and `notstartswith` is
+not a Sigma modifier, so pySigma refused to load them. They now express the same logic as a
+`|startswith` filter negated in the condition.
+
+The remaining check output is accepted noise, not rule defects:
+
+- 30 × `SpecificInsteadOfGenericLogsourceIssue` — the rules deliberately use
+  `service: sysmon` because the lab ships one collector profile (`sysmon-ghost.xml`).
+  Backends therefore need `--without-pipeline` or a Sysmon pipeline to convert.
+- 18 × `InvalidATTACKTagIssue` — the core validator compares tags against hyphenated,
+  recently-renamed ATT&CK tactic names ("defense-impairment") and its bundled technique
+  dataset does not include the T1562 family. The SigmaHQ-style `attack.defense_evasion` and
+  `attack.t1562.001` tags are correct as written.
+
+Steps 2 and 3 (EVTX replay, harmless triggers) still have not been run — no rule in this
+directory has seen a live event log.
 
 ---
 
@@ -84,7 +116,9 @@ filtering to the window, and checking which rules matched. One technique per run
 
 16 of 32 techniques in the main README's section 16 matrix are covered by a rule.
 The other 16 are recorded gaps, and the gate fails if a gap is present but
-unstated. Grouped by cause:
+unstated. Two of the covered techniques (T1029 and T1564.001) are only partially
+covered and carry a gap note next to their rule, which is why the table below
+lists eighteen ids. Grouped by cause:
 
 | Cause | Techniques | Why no rule |
 |---|---|---|

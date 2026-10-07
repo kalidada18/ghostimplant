@@ -1,0 +1,55 @@
+title: GHOST Lab - DNS Query For C2 Host From Unknown Image
+id: b6d1e9f4-2a77-4c58-8e03-71f4a9c2d5b8
+status: experimental
+description: >
+  Detects the resolution half of the HTTPS beacon: src/c2.cpp hands the
+  build-time C2 host to WinHTTP, which resolves it in-process through dnsapi,
+  so the query carries the implant as its Image. The rule keys on who is asking
+  rather than on the queried name - the tunnel domain changes per campaign and
+  is not a stable artifact. It complements
+  command_and_control_https_beacon_unknown_image: that rule catches the
+  connection, this one the lookup that precedes it, and the lookup survives
+  even when the transaction itself is encrypted end to end. Two honest
+  caveats: a cached answer emits no query at all, and a stack that delegates
+  resolution to the Dnscache service can attribute the event to svchost.exe,
+  which the System32 filter below excludes - check the DNS log next to the
+  PCAP and score accordingly.
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.command_and_control
+  - attack.t1071.001
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_dns:
+    EventID: 22
+  filter_browsers:
+    Image|endswith:
+      - '\chrome.exe'
+      - '\msedge.exe'
+      - '\firefox.exe'
+      - '\brave.exe'
+      - '\opera.exe'
+  filter_microsoft:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  filter_local_names:
+    QueryName|endswith:
+      - '.local'
+      - '.lan'
+      - '.home'
+      - '.internal'
+  condition: selection_dns and not filter_browsers and not filter_microsoft and not filter_programfiles_signed and not filter_local_names
+falsepositives:
+  - Any desktop application that resolves a hostname (updaters, Slack/Teams,
+    package managers, installers). Like the beacon rule this is a pivot, not a
+    verdict - score it by the querying image and by the connection that follows
+    within the same experiment window.
+level: low

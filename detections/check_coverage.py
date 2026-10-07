@@ -18,8 +18,11 @@ Three jobs, in order of how much they matter:
    a filter was renamed but the condition still points at the old key.
 
 3. Collection-layer sanity. detections/sysmon/sysmon-ghost.xml must be
-   well-formed XML and must enable every event id the rules depend on. A rule
-   matching EventID 7 is dead on arrival if the config never includes ImageLoad.
+   well-formed XML, must enable every event id the rules depend on, and must
+   only use real Sysmon filter tags. A rule matching EventID 7 is dead on
+   arrival if the config never includes ImageLoad; an element named
+   <FileDownloadEvent> is not a Sysmon event at all (22 is DnsQuery) and would
+   be silently inert.
 
 Usage:
     pip install -r detections/requirements.txt
@@ -57,13 +60,25 @@ REQUIRED_KEYS = (
 ALLOWED_STATUS = {"stable", "experimental", "deprecated", "test"}
 ALLOWED_LEVEL = {"critical", "high", "medium", "low", "informational"}
 
-# Sysmon event ids each rule type needs the collector to emit.
-EVENTID_TO_CHANNEL = {
-    1: "ProcessCreate", 3: "NetworkConnect", 7: "ImageLoad", 8: "CreateRemoteThread",
-    11: "FileCreate", 12: "RegistryEvent", 13: "RegistryEvent", 22: "FileDownloadEvent",
-    19: "WmiEvent", 20: "WmiEvent", 21: "WmiEvent",
-    23: "FileDelete", 25: "ProcessAccess",
+# Documented Sysmon event id -> EventFiltering tag, from the "Events" and
+# "Event filtering entries" tables in Microsoft's Sysmon documentation. Ids 4
+# and 16 cannot be filtered and have no tag. This table was previously kept by
+# hand from memory, which is how "EID 22 = file download" and
+# "EID 25 = process access" shipped: both plausible, both wrong, both leaving a
+# rule that could never fire.
+SYSMON_TAG_BY_EID = {
+    1: "ProcessCreate", 2: "FileCreateTime", 3: "NetworkConnect",
+    5: "ProcessTerminate", 6: "DriverLoad", 7: "ImageLoad",
+    8: "CreateRemoteThread", 9: "RawAccessRead", 10: "ProcessAccess",
+    11: "FileCreate", 12: "RegistryEvent", 13: "RegistryEvent",
+    14: "RegistryEvent", 15: "FileCreateStreamHash", 17: "PipeEvent",
+    18: "PipeEvent", 19: "WmiEvent", 20: "WmiEvent", 21: "WmiEvent",
+    22: "DnsQuery", 23: "FileDelete", 24: "ClipboardChange",
+    25: "ProcessTampering", 26: "FileDeleteDetected",
+    27: "FileBlockExecutable", 28: "FileBlockShredding",
+    29: "FileExecutableDetected",
 }
+SYSMON_TAGS = set(SYSMON_TAG_BY_EID.values())
 
 # Techniques with no rule, and why. Every uncovered technique in README
 # section 16 MUST be listed here or the gate fails.
@@ -242,9 +257,31 @@ def check_sysmon(rules):
         return [f"sysmon-ghost.xml is not well-formed XML: {exc}"]
     if root.tag != "Sysmon":
         problems.append("sysmon-ghost.xml root element is not <Sysmon>")
-    channels = {f.tag for f in root.iter() if f.tag in EVENTID_TO_CHANNEL.values()}
+
+    # Every filter tag must be a real Sysmon event tag. A typo here is silent:
+    # Sysmon rejects the config or ignores the element, and a rule written
+    # against that event never fires. <RuleGroup> is a wrapper, not a filter.
+    tags: set[str] = set()
+
+    def collect_filters(el):
+        for child in el:
+            if child.tag == "RuleGroup":
+                collect_filters(child)
+            else:
+                tags.add(child.tag)
+                if child.tag not in SYSMON_TAGS:
+                    problems.append(
+                        f"sysmon-ghost.xml uses <{child.tag}>, which is not a "
+                        f"Sysmon event filter tag - that element can never match")
+
+    filtering = root.find("EventFiltering")
+    if filtering is None:
+        problems.append("sysmon-ghost.xml has no <EventFiltering> section")
+    else:
+        collect_filters(filtering)
+
     needed: dict[str, set[str]] = {}
-    for _, doc in rules:
+    for path, doc in rules:
         det = doc.get("detection") or {}
         for name, body in det.items():
             if not isinstance(body, dict):
@@ -252,10 +289,14 @@ def check_sysmon(rules):
             eid = body.get("EventID")
             eids = {eid} if isinstance(eid, int) else set(eid or [])
             for e in eids:
-                if e in EVENTID_TO_CHANNEL:
-                    needed.setdefault(EVENTID_TO_CHANNEL[e], set()).add(str(e))
+                if e not in SYSMON_TAG_BY_EID:
+                    problems.append(
+                        f"{path.name}: EventID {e} is not a filterable Sysmon "
+                        f"event id (documented table covers 1-29 minus 4 and 16)")
+                    continue
+                needed.setdefault(SYSMON_TAG_BY_EID[e], set()).add(str(e))
     for channel, eids in sorted(needed.items()):
-        if channel not in channels:
+        if channel not in tags:
             problems.append(
                 f"rules match Sysmon event id(s) {sorted(eids, key=int)} but "
                 f"sysmon-ghost.xml has no <{channel}> filter - those rules can never fire")

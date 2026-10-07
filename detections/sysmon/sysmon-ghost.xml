@@ -19,14 +19,19 @@
   Channel -> events needed by the rules:
     1  Process Create        : scheduled task, PPID spoof, masquerading, wmic/cmd/powershell spawn
     3  Network connect       : HTTPS beacon
-    7  Image loaded          : winsqlite3.dll credential access
+    7  Image loaded          : winsqlite3.dll credential access, modules loaded into lsass
     8  CreateRemoteThread    : remote-thread and APC injection
-    11 File created          : implant drop
+    10 Process access        : OpenProcess/OpenThread for injection
+    11 File created          : implant drop, staged tool files
     12 Registry object add/delete/set : Run key, Defender Exclusions\Paths
     13 Registry value set    : same, value-level
-    18/19/20 WMI filter/consumer/action : WMI event-subscription persistence
+    19/20/21 WMI             : WMI event-subscription persistence
+    22 DNS query             : beacon resolving the C2 host
     23 File delete           : dropper self-deletion
-    25 Process access        : OpenProcess/OpenThread for injection
+
+  Tag names follow the Sysmon schema (sysmon64 -s); check_coverage.py validates
+  them. "EID 22 is a file download" and "EID 25 is process access" are exactly
+  the kind of plausible-looking mapping mistakes that leave a rule unfireable.
 
   Not covered here because Sysmon cannot see them (see ../README.md "Telemetry
   gaps"): direct syscalls, AMSI/ETW user-mode patching, hardware-breakpoint
@@ -55,14 +60,17 @@
       <Image condition="contains">C:\Windows\System32\mpcmdrun</Image>
     </NetworkConnect>
 
-    <!-- EID 7: image load. Only the DLLs the credential path and the evasion
-         path touch; a full ImageLoad capture is unusable at lab volume. -->
+    <!-- EID 7: image load. Only the DLLs the credential/evasion paths touch and
+         modules that land inside lsass; a full ImageLoad capture is unusable at
+         lab volume. Field names are ImageLoaded (the module) and Image (the
+         process it loads into) - there is no ImageName/TargetImage on this
+         event. -->
     <ImageLoad onmatch="include">
-      <ImageName condition="is">winsqlite3.dll</ImageName>
-      <ImageName condition="is">amsi.dll</ImageName>
-      <ImageName condition="is">etw.dll</ImageName>
-      <ImageName condition="is">urlmon.dll</ImageName>
-      <TargetImage condition="is">C:\Windows\System32\lsass.exe</TargetImage>
+      <ImageLoaded condition="end with">winsqlite3.dll</ImageLoaded>
+      <ImageLoaded condition="end with">amsi.dll</ImageLoaded>
+      <ImageLoaded condition="end with">etw.dll</ImageLoaded>
+      <ImageLoaded condition="end with">urlmon.dll</ImageLoaded>
+      <Image condition="is">C:\Windows\System32\lsass.exe</Image>
     </ImageLoad>
 
     <!-- EID 8: remote thread creation, the primary injection signal. -->
@@ -97,13 +105,15 @@
       <TargetFilename condition="contains">.exe</TargetFilename>
     </FileDelete>
 
-    <!-- EID 22: file download with the remote source URL attached. Needed by
-         the ingress-tool-transfer rule; without this element that rule can
-         never fire, which check_coverage.py now enforces. -->
-    <FileDownloadEvent onmatch="exclude" />
+    <!-- EID 22: DNS query. The beacon's host is resolved in-process through
+         dnsapi, so the query is attributed to the implant; this is the
+         resolution half of the C2 channel, and the rule that matches it needs
+         this element. There is no file-download event in Sysmon. -->
+    <DnsQuery onmatch="exclude" />
 
-    <!-- EID 25: process access. Injection needs OpenProcess / OpenThread with
-         memory-write rights; the masks below are the ones that matter. -->
+    <!-- EID 10: process access. Injection needs OpenProcess / OpenThread with
+         memory-write rights; the masks below are the ones that matter.
+         (EID 25 is ProcessTampering - a different event entirely.) -->
     <ProcessAccess onmatch="include">
       <GrantedAccess condition="is">0x1F0FFF</GrantedAccess>
       <GrantedAccess condition="is">0x1FFFFF</GrantedAccess>

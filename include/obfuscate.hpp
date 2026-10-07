@@ -1,27 +1,57 @@
 // obfuscate.hpp — Compile-time XOR string obfuscation + PEB-based API hash resolution
 //
 // USAGE:
-//   XS("hello")          -> XorStr<N> decrypts on first .str() / implicit cast
-//   XSW(L"hello")        -> XorStrW<N> wide variant
+//   XS("hello")          -> XorStr<N, ID> decrypts on first .str() / implicit cast
+//   XSW(L"hello")        -> XorStrW<N, ID> wide variant
 //   FNV("WinHttpOpen")   -> uint32_t compile-time hash
 //   HashProc(hMod, hash) -> FARPROC resolved via PEB export walk, no name string
 //   HASHPROC(mod, Name)  -> typed pointer shorthand
 //
-// KEY: change GHOST_XOR_KEY before deployment.
+// ENCRYPTION: every literal gets its own splitmix64 keystream, seeded from the
+// build salt, the rotating key and a per-call-site counter (__COUNTER__). All
+// of it is evaluated at compile time — no plaintext reaches the binary and no
+// runtime key material exists to recover. Identical literals at different call
+// sites produce different ciphertext, and one recovered keystream decrypts
+// exactly one string. Rotate GHOST_SALT and GHOST_K0..K3 before each build.
+//
+// STRING LIFETIME: str() XORs the buffer in place and is single-shot — decode
+// once into a local (std::wstring / char buffer) when the value is needed more
+// than once. The destructor wipes the buffer afterwards.
 //
 #pragma once
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
 
-// ─── 4-byte rotating XOR key (change K0-K3 before each build) ───────────────
-// ponytail: rotating key defeats single-byte AV XOR inversion; 4 bytes is enough
+// ─── 4-byte rotating key (rotate both before each build) ───────────────
+// ponytail: per-string keystreams defeat single-key XOR inversion and stop
+// identical literals from producing identical ciphertext anywhere in the binary
+constexpr uint64_t GHOST_SALT = 0x5D3A9F17C4B28E60ull;
 constexpr uint8_t GHOST_K0 = 0xA7u;
 constexpr uint8_t GHOST_K1 = 0x3Eu;
 constexpr uint8_t GHOST_K2 = 0xC1u;
 constexpr uint8_t GHOST_K3 = 0x58u;
-constexpr uint8_t ghost_key(size_t i) {
-    return (i & 3) == 0 ? GHOST_K0 : (i & 3) == 1 ? GHOST_K1 : (i & 3) == 2 ? GHOST_K2 : GHOST_K3;
+
+// splitmix64 — mixing primitive behind the per-string keystream.
+// seed = splitmix64(salt ⊕ key ⊕ callsite id); stream byte i is the top byte
+// of splitmix64(seed + i·prime), so every byte of every string is independent.
+constexpr uint64_t splitmix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+constexpr uint64_t ghost_seed(uint32_t id) {
+    const uint64_t k = uint64_t(GHOST_K0) | (uint64_t(GHOST_K1) << 8) |
+                       (uint64_t(GHOST_K2) << 16) | (uint64_t(GHOST_K3) << 24);
+    return splitmix64(GHOST_SALT ^ k ^ (uint64_t(id) * 0x9E3779B97F4A7C15ull));
+}
+constexpr uint8_t ghost_stream(uint64_t seed, size_t i) {
+    return static_cast<uint8_t>(splitmix64(seed + uint64_t(i) * 0xD1B54A32D192ED03ull) >> 56);
+}
+constexpr uint16_t ghost_stream_w(uint64_t seed, size_t i) {
+    return static_cast<uint16_t>(ghost_stream(seed, 2 * i) |
+                                 static_cast<uint16_t>(ghost_stream(seed, 2 * i + 1) << 8));
 }
 
 // ─── Compile-time FNV-1a 32-bit hash ────────────────────────────────────────
@@ -33,19 +63,20 @@ constexpr uint32_t fnv1a(const char* s) {
 }
 #define FNV(s) (fnv1a(s))
 
-// ─── Narrow XorStr<N> ────────────────────────────────────────────────────────
-template<size_t N>
+// ─── Narrow XorStr<N, ID> ────────────────────────────────────────────────────────
+template<size_t N, uint32_t ID>
 struct XorStr {
+    static constexpr uint64_t SEED = ghost_seed(ID);
     mutable char buf[N];
 
     constexpr XorStr(const char (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost_key(i));
+            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost_stream(SEED, i));
     }
 
     const char* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost_key(i));
+            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost_stream(SEED, i));
         buf[N - 1] = '\0';
         return buf;
     }
@@ -61,21 +92,22 @@ struct XorStr {
     XorStr& operator=(const XorStr&) = delete;
 };
 
-#define XS(literal) (XorStr<sizeof(literal)>(literal))
+#define XS(literal) (XorStr<sizeof(literal), __COUNTER__>(literal))
 
-// ─── Wide XorStrW<N> ─────────────────────────────────────────────────────────
-template<size_t N>
+// ─── Wide XorStrW<N, ID> ─────────────────────────────────────────────────────────
+template<size_t N, uint32_t ID>
 struct XorStrW {
+    static constexpr uint64_t SEED = ghost_seed(ID);
     mutable wchar_t buf[N];
 
     constexpr XorStrW(const wchar_t (&src)[N]) : buf{} {
         for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost_key(i));
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost_stream_w(SEED, i));
     }
 
     const wchar_t* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost_key(i));
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost_stream_w(SEED, i));
         buf[N - 1] = L'\0';
         return buf;
     }
@@ -91,7 +123,7 @@ struct XorStrW {
     XorStrW& operator=(const XorStrW&) = delete;
 };
 
-#define XSW(literal) (XorStrW<sizeof(literal)/sizeof(wchar_t)>(literal))
+#define XSW(literal) (XorStrW<sizeof(literal)/sizeof(wchar_t), __COUNTER__>(literal))
 
 // ─── PEB-based API hash resolution ──────────────────────────────────────────
 // Walks the loaded module's export table and compares FNV-1a(name) against

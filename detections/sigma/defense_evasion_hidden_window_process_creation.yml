@@ -41,8 +41,9 @@ detection:
       - '\wscript.exe'
       - '\cscript.exe'
       - '\mshta.exe'
-    ParentImage|notstartswith: 'C:\Windows\'
-  condition: (selection_hidden_flag and selection_gui_hidden) or selection_script_host
+  filter_windows_parent:
+    ParentImage|startswith: 'C:\Windows\'
+  condition: (selection_hidden_flag and selection_gui_hidden) or (selection_script_host and not filter_windows_parent)
 falsepositives:
   - Deployment and packaging tools hide windows constantly, and
     -NoProfile -NonInteractive appears in many legitimate automation scripts.

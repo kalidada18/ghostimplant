@@ -38,12 +38,13 @@ detection:
       - 5900
       - 5901
       - 3389
-    Image|notstartswith: 'C:\Windows\'
+  filter_windows_dialing:
+    Image|startswith: 'C:\Windows\'
   filter_listening_services:
     Image|startswith:
       - 'C:\Program Files\'
       - 'C:\Program Files (x86)\'
-  condition: (selection_outbound or selection_high_unexpected) and not filter_listening_services
+  condition: (selection_outbound or (selection_high_unexpected and not filter_windows_dialing)) and not filter_listening_services
 falsepositives:
   - Developer tooling, local proxies, VNC clients used intentionally, games and
     P2P software all dial high ports. Port 4444 specifically is the classic
