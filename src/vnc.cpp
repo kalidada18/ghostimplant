@@ -416,8 +416,9 @@ std::wstring HandleVnc(const std::string& args) {
     } else if (sel == 0) {
         soErr = WSAETIMEDOUT;
     } else {
+        // WSASYSTEMFAILURE is not declared by MinGW-w64's headers; WSASYSCALLFAILURE is.
         soErr = WSAGetLastError();
-        if (soErr == 0) soErr = WSASYSTEMFAILURE;
+        if (soErr == 0) soErr = WSASYSCALLFAILURE;
     }
 
     nb = 0;
