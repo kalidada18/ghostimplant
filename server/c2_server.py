@@ -1529,12 +1529,17 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
     const sorted=entries.slice().sort((a,b)=>a.ts<b.ts?-1:1);
     const newCount=entries.length-lastResultCount;
     box.innerHTML=sorted.map((e,i)=>{
-      if(e.output&&e.output.startsWith('[SCREENSHOT:BMP]\n')){
-        const b64=e.output.slice(17).trim();
+      const so=e.output||'';
+      if(so.startsWith('[SCREENSHOT:')){
+        const nl=so.indexOf('\n');
+        const cb=so.indexOf(']',12);
+        const fmt=cb>12?so.slice(12,cb).toLowerCase():'';
+        const mime=(fmt==='jpeg'||fmt==='jpg')?'image/jpeg':'image/bmp';
+        const b64=nl>0?so.slice(nl+1).trim():'';
         return `<div class="result-entry${hasNew&&i>=(sorted.length-Math.max(newCount,0))?' new-flash':''}">
           <div class="result-hdr"><span class="r-idx">#${i+1}</span><span class="r-label shot">SCREENSHOT</span>${e.tid?`<span class="r-tid" title="task id">TID ${esc(e.tid)}</span>`:''}<span class="r-status ${(e.status||'ok')==='ok'?'st-ok':(e.status==='timeout'?'st-warn':'st-err')}">${esc(e.status||'ok')}</span><span class="r-ts">${e.ts.replace('T',' ').slice(0,19)} UTC</span>
           <button class="r-copy" onclick="copyResult(this,${i})">COPY</button></div>
-          <div class="result-body"><img src="data:image/bmp;base64,${esc(b64)}" alt="screenshot"></div></div>`;
+          <div class="result-body"><img src="data:${mime};base64,${esc(b64)}" alt="screenshot"></div></div>`;
       }
       const lines=esc(e.output).split('\n');
       const lineHtml=lines.map((l,li)=>`<div class="ln"><span class="ln-num">${li+1}</span><span class="ln-txt">${l||'&nbsp;'}</span></div>`).join('');
@@ -1809,12 +1814,18 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
     }
     const r=await api('/results/'+encodeURIComponent(selectedSid));if(!r)return;
     const data=await r.json().catch(()=>null);if(!data)return;
-    const shots=(data.results||[]).filter(e=>e.output&&e.output.startsWith('[SCREENSHOT:BMP]\n'));
+    const shots=(data.results||[]).filter(e=>e.output&&e.output.startsWith('[SCREENSHOT:'));
     if(!shots.length)return;
     const latest=shots[shots.length-1];
     if(latest.ts===lastShotTs)return;
     lastShotTs=latest.ts;
-    $('live-img').src='data:image/bmp;base64,'+latest.output.slice(17).trim();
+    {
+      const so=latest.output,nl=so.indexOf('\n');
+      const cb=so.indexOf(']',12);
+      const fmt=cb>12?so.slice(12,cb).toLowerCase():'';
+      const mime=(fmt==='jpeg'||fmt==='jpg')?'image/jpeg':'image/bmp';
+      $('live-img').src='data:'+mime+';base64,'+so.slice(nl+1).trim();
+    }
     $('live-ts').textContent='frame '+latest.ts.replace('T',' ').slice(0,19)+' UTC';
   }
   function liveNorm(e){

