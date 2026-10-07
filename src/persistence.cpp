@@ -315,14 +315,19 @@ BOOL IsWmiPersistenceInstalled() {
     if (FAILED(ConnectWMI(L"ROOT\\subscription", &pSvc))) return FALSE;
     std::wstring query = L"SELECT * FROM CommandLineEventConsumer WHERE Name='" + std::wstring(WMI_CMD_CONSUMER()) + L"'";
     IEnumWbemClassObject* pEnum = nullptr;
+    // Fully synchronous on purpose. WBEM_FLAG_RETURN_IMMEDIATELY asks for
+    // semi-async execution, which pairs a non-blocking ExecQuery with the
+    // blocking Next() below -- so a busy or stalled WMI provider could pin this
+    // thread indefinitely. FORWARD_ONLY alone returns once the enumerator is
+    // live, and the bounded Next() turns a hang into a plain "not found".
     HRESULT hr = pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(query.c_str()),
-                                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                 WBEM_FLAG_FORWARD_ONLY,
                                  nullptr, &pEnum);
     BOOL found = FALSE;
     if (SUCCEEDED(hr) && pEnum) {
         IWbemClassObject* pObj = nullptr;
         ULONG ret = 0;
-        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &ret) == WBEM_S_NO_ERROR && ret) {
+        if (pEnum->Next(5000, 1, &pObj, &ret) == WBEM_S_NO_ERROR && ret) {
             found = TRUE;
             pObj->Release();
         }

