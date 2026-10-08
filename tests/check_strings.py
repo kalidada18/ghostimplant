@@ -35,6 +35,8 @@ MUST_NOT_APPEAR = [
     "Microsoft-WNS/10.0",                                  # User-Agent, src/c2.cpp
     "X-Beacon-Token",                                      # beacon header, src/c2.cpp
     "ngrok-skip-browser-warning",                          # tunnel header, src/c2.cpp
+    "application/dns-message",                             # DoH POST content type, src/doh.cpp
+    "dns-query",                                           # DoH endpoint path, src/c2.cpp
     r"Software\Microsoft\Windows\CurrentVersion\Run",       # src/persistence.cpp
     "svchost.exe",                                         # migration target, src/injection.cpp
     "wer.dll",                                             # WER disable, src/main.cpp

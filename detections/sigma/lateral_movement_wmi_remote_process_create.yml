@@ -1,0 +1,45 @@
+title: GHOST Lab - Remote WMI Process Creation
+id: eba177f3-571a-47b2-82d1-13e96f02509e
+status: experimental
+description: >
+  Two arms for the same technique. Target-side: a process whose parent is
+  WmiPrvSE.exe — Win32_Process.Create runs its child from the WMI provider host,
+  so that parent is the durable signal no matter which tool asked for it.
+  Source-side: an image outside the Microsoft and signed-install paths
+  connecting to the RPC endpoint mapper (TCP 135), which is the first thing
+  remote WMI does on the wire. src/lateral.cpp !lateral wmi produces both.
+references:
+  - https://attack.mitre.org/techniques/T1047/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.execution
+  - attack.lateral_movement
+  - attack.t1047
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_wmi_child:
+    EventID: 1
+    ParentImage|endswith: '\WmiPrvSE.exe'
+  filter_ms_child:
+    Image|startswith: 'C:\Windows\'
+  selection_rpc_source:
+    EventID: 3
+    Initiated: 'true'
+    DestinationPort: 135
+  filter_ms_source:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: (selection_wmi_child and not filter_ms_child) or (selection_rpc_source and not filter_ms_source and not filter_programfiles_signed)
+falsepositives:
+  - Management stacks do this legitimately — SCCM, monitoring agents, and any
+    Get-CimInstance against a remote host produce the same RPC shape, and the
+    target-side arm is their normal execution path. On the source side the
+    filters exclude the signed installs those agents live in; a lab VM with no
+    management stack should show a near-empty baseline.
+level: high

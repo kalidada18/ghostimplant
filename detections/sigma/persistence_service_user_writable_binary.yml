@@ -1,0 +1,45 @@
+title: GHOST Lab - Service Created With Binary In A User-Writable Path
+id: 5338623f-1975-44ee-8cec-68515d2648b9
+status: experimental
+description: >
+  Detects a service ImagePath value pointing into a user-writable directory
+  (AppData, ProgramData, Users\Public, Temp). This is the persistence and
+  privilege-escalation payload of src/privesc.cpp !service create, and it is
+  also the primitive the lateral-movement set uses for remote execution.
+  Attribution note, stated because the rule depends on it: a service created
+  through the SCM API is written to the registry by services.exe, so the EID 13
+  Image is not the attacker's process — the value is the signal. Existence of
+  the key plus a user-writable binPath is what no legitimate installer does.
+references:
+  - https://attack.mitre.org/techniques/T1543/003/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.persistence
+  - attack.privilege_escalation
+  - attack.t1543.003
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_service_imagepath:
+    EventID: 13
+    TargetObject|contains: '\CurrentControlSet\Services\'
+    TargetObject|endswith: '\ImagePath'
+    NewValue|contains:
+      - '\AppData\'
+      - '\ProgramData\'
+      - '\Users\Public\'
+      - '\Temp\'
+  filter_ms_managed:
+    NewValue|startswith:
+      - 'C:\Windows\'
+      - '"C:\Windows\'
+  condition: selection_service_imagepath and not filter_ms_managed
+falsepositives:
+  - Third-party updaters (Chrome, Teams, various EDR agents) register services
+    from ProgramData or AppData; those are installed by a management process and
+    are stable across runs. Baseline the clean snapshot, keep the winners as a
+    suppression list, and score an experiment by correlating with the !service
+    command in the audit trail.
+level: high

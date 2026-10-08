@@ -1,0 +1,68 @@
+title: GHOST Lab - DoH Resolver Connection From Unknown Image
+id: 46d1e531-c77f-444f-aa49-82b523d587f0
+status: experimental
+description: >
+  Detects an image outside the browser and signed-install paths connecting to a
+  public DNS-over-HTTPS resolver. This is the compensating signal for the DoH
+  fallback in src/c2.cpp + src/doh.cpp: when the hostname path fails (resolver
+  blocked or sinkholed), the beacon POSTs a raw DNS query to a resolver over
+  HTTPS, so no DnsQuery event is emitted for the C2 name and
+  command_and_control_dns_query_unknown_image goes blind. What remains on the
+  host is the connection to the resolver's published addresses. Two honest
+  caveats. Windows 11 resolves through DoH itself when configured (the collector
+  profile excludes svchost from EID 3 entirely, so that path is invisible here
+  rather than excluded by this rule), and Cloudflare WARP, some VPN clients and
+  third-party resolvers legitimately live on these addresses - the image filters
+  and the baseline run are what separate the implant from them. A resolver the
+  operator hosts themselves carries no signal at all, which is why the fallback
+  endpoint is build-time configurable and the rule is a hunt pivot, not a
+  verdict.
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://www.rfc-editor.org/rfc/rfc8484
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.command_and_control
+  - attack.t1071.004
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_doh:
+    EventID: 3
+    DestinationPort: 443
+    Initiated: 'true'
+    DestinationIp:
+      - '1.1.1.1'          # Cloudflare
+      - '1.0.1.1'
+      - '8.8.8.8'          # Google
+      - '8.8.4.4'
+      - '9.9.9.9'          # Quad9
+      - '149.112.112.112'
+      - '94.140.14.14'     # AdGuard
+      - '94.140.15.15'
+      - '208.67.222.222'   # OpenDNS
+      - '208.67.220.220'
+  filter_browsers:
+    Image|endswith:
+      - '\chrome.exe'
+      - '\msedge.exe'
+      - '\firefox.exe'
+      - '\brave.exe'
+      - '\opera.exe'
+  filter_microsoft:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: selection_doh and not filter_browsers and not filter_microsoft and not filter_programfiles_signed
+falsepositives:
+  - Cloudflare WARP and other VPN/security clients that ship their own DoH
+    resolver and install outside the filtered paths (WARP lives in Program Files
+    when machine-installed, per-user installs do not). Ad-blocking and
+    privacy tools pointed at these resolvers. Run the rule against a clean
+    snapshot first and keep the winners as a suppression list, exactly like the
+    beacon rule.
+level: low

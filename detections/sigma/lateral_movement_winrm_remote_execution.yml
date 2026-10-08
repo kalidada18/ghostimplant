@@ -1,0 +1,35 @@
+title: GHOST Lab - WinRM Remote Execution (winrs / wsmprovhost)
+id: 7710f0cc-cdac-42e4-a149-29cfc0e8ffe7
+status: experimental
+description: >
+  Detects WinRM-based remote execution from both ends. The source-side arm is
+  winrs.exe invoked with a remote target flag (-r:), which is the client
+  src/lateral.cpp !lateral winrm spawns. The target-side arm is any process
+  parented by wsmprovhost.exe, the WinRM provider host that runs the remote
+  shell — that parent is WinRM execution regardless of the client.
+references:
+  - https://attack.mitre.org/techniques/T1021/006/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.lateral_movement
+  - attack.execution
+  - attack.t1021.006
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_winrs_client:
+    EventID: 1
+    Image|endswith: '\winrs.exe'
+    CommandLine|contains: '-r:'
+  selection_wsmprov_child:
+    EventID: 1
+    ParentImage|endswith: '\wsmprovhost.exe'
+  condition: selection_winrs_client or selection_wsmprov_child
+falsepositives:
+  - WinRM is a management protocol — Ansible, Chef, SCCM and admin one-liners
+    produce both arms all day on managed hosts. The value in a lab is the
+    baseline delta — a VM with no orchestration should have neither arm, so any
+    hit is the implant exercising the vector.
+level: medium

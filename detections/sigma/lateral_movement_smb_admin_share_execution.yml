@@ -1,0 +1,53 @@
+title: GHOST Lab - Admin Share Session Followed By Remote Task Creation
+id: ee170191-3e66-4269-87d5-f8c795708360
+status: experimental
+description: >
+  The SMB vector from src/lateral.cpp splits into two command lines on the
+  source: net.exe mapping an administrative share (C$ / ADMIN$) and schtasks.exe
+  creating a task on a remote host (/S with /Create). Each arm is a first-class
+  signal — an admin-share mapping at runtime from a non-management process, and
+  remote task creation — and the pair within one experiment window is the
+  classic "copy/schedule/run" lateral chain. The target-side process appears
+  under the task scheduler, which is why the source-side command lines carry the
+  attribution.
+references:
+  - https://attack.mitre.org/techniques/T1021/002/
+  - https://attack.mitre.org/techniques/T1053/005/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.lateral_movement
+  - attack.execution
+  - attack.t1021.002
+  - attack.t1053.005
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_net_use_admin_share:
+    EventID: 1
+    Image|endswith:
+      - '\net.exe'
+      - '\net1.exe'
+    CommandLine|contains|all:
+      - 'use'
+      - '$'
+  selection_remote_task_create:
+    EventID: 1
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains|all:
+      - '/S'
+      - '/Create'
+  filter_ms_source:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: (selection_net_use_admin_share or selection_remote_task_create) and not filter_ms_source and not filter_programfiles_signed
+falsepositives:
+  - Admin tooling and logon scripts map admin shares and create remote tasks;
+    most of it runs from System32 or Program Files and is filtered. Backup
+    software from vendor directories is the usual survivor — keep the baseline
+    winners on a suppression list.
+level: high

@@ -18,6 +18,11 @@ jobs:
         run: pip install -r server/requirements.txt
       - name: Run end-to-end channel protocol test
         run: python tests/test_protocol.py
+      # Durability: sessions, task queues, results, audit trail and the staged
+      # payload must survive a store restart, and the in-process channel keys
+      # must not (a restart rotates the server keypair).
+      - name: Run SQLite persistence tests
+        run: python tests/test_persistence.py
 
   build-implant:
     name: Cross-compile implant (MinGW-w64)
@@ -37,7 +42,8 @@ jobs:
         run: |
           python3 tests/check_strings.py build/WindowsSecurityUpdate.exe \
             --secret "ci-build-token-not-for-operational-use" \
-            --secret "ci-build.example.invalid"
+            --secret "ci-build.example.invalid" \
+            --secret "https://1.1.1.1/dns-query"
 
   core-unit-tests:
     name: Core unit tests (platform-free C++)

@@ -306,11 +306,13 @@ class GhostClient:
     def audit(self, limit: int = 50) -> dict:
         return self._get("/audit", params={"limit": limit})  # type: ignore[return-value]
 
-    def upload_payload(self, data: bytes) -> dict:
+    def upload_payload(self, data: bytes, name: str = "") -> dict:
         """Upload a raw binary payload to the C2 server."""
         url  = f"{self.base_url}/payload"
         sess = self._session()
         sess.headers["Content-Type"] = "application/octet-stream"
+        if name:
+            sess.headers["X-Payload-Name"] = name[:128]   # recorded with the staged file
         del sess.headers["Accept"]          # don't advertise JSON for binary upload
         resp = sess.post(url, data=data, timeout=60, verify=self._ssl_verify)
         resp.raise_for_status()
@@ -710,7 +712,7 @@ def cmd_payload(client: GhostClient, action: str, filepath: Optional[str]) -> No
         data = p.read_bytes()
         info(f"Uploading {p.name} ({len(data):,} bytes)…")
         try:
-            resp = client.upload_payload(data)
+            resp = client.upload_payload(data, p.name)
             ok(f"Uploaded — {resp}")
         except Exception as exc:
             err(str(exc))

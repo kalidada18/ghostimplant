@@ -21,7 +21,8 @@
     3  Network connect       : HTTPS beacon
     7  Image loaded          : winsqlite3.dll credential access, modules loaded into lsass
     8  CreateRemoteThread    : remote-thread and APC injection
-    10 Process access        : OpenProcess/OpenThread for injection
+    9  Raw access read       : direct volume access / MBR read (src/disk.cpp)
+    10 Process access        : OpenProcess/OpenThread for injection, winlogon token access
     11 File created          : implant drop, staged tool files
     12 Registry object add/delete/set : Run key, Defender Exclusions\Paths
     13 Registry value set    : same, value-level
@@ -80,6 +81,18 @@
       <SourceImage condition="is">C:\Windows\System32\services.exe</SourceImage>
     </CreateRemoteThread>
 
+    <!-- EID 9: raw volume/disk access. !diskread (src/disk.cpp) opens
+         \\.\PhysicalDrive0 to read the MBR, which is the access this event
+         class records; the rule filters Microsoft and signed sources. OS
+         maintenance reads are excluded here so lab volume stays usable.
+         Note there is no raw-WRITE event in Sysmon: the overwrite half of a
+         disk wipe emits nothing and is recorded as a gap, not a rule. -->
+    <RawAccessRead onmatch="exclude">
+      <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      <Image condition="contains">MpCmdRun</Image>
+      <Image condition="contains">MsMpEng</Image>
+    </RawAccessRead>
+
     <!-- EID 11: file creation. Broad on purpose: the drop location is what
          identifies the implant, so it must not be pre-filtered. -->
     <FileCreate onmatch="include">
@@ -89,12 +102,20 @@
       <TargetFilename condition="contains">Local State</TargetFilename>
     </FileCreate>
 
-    <!-- EID 12/13: registry. Run keys and Defender exclusions. -->
+    <!-- EID 12/13: registry. Run keys and Defender exclusions/policy. -->
     <RegistryEvent onmatch="include">
       <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
       <TargetObject condition="contains">\Windows Defender\Exclusions</TargetObject>
       <TargetObject condition="contains">\CurrentVersion\Once</TargetObject>
       <TargetObject condition="contains">\Services\</TargetObject>
+      <!-- Defender tampering disable vector (T1562.001): the policy keys are a
+           different hive branch from \Exclusions\, so a rule scoped to the
+           exclusion path never sees it. -->
+      <TargetObject condition="contains">\Policies\Microsoft\Windows Defender</TargetObject>
+      <!-- UAC bypass (T1548.002): the ms-settings Shell\Open\command handler.
+           The write is attributed to the implant's Image, which is why the
+           rule survives the handler being cleaned up a second later. -->
+      <TargetObject condition="contains">\ms-settings\Shell\Open\command</TargetObject>
     </RegistryEvent>
 
     <!-- EID 18/19/20/21: WMI. The persistence lives in ROOT\subscription. -->
@@ -123,6 +144,15 @@
       <GrantedAccess condition="is">0x1F2F</GrantedAccess>
       <GrantedAccess condition="is">0x01F0</GrantedAccess>
       <SourceImage condition="contains">WindowsSecurityUpdate</SourceImage>
+      <!-- Token theft (T1134.001): HandleStealToken opens winlogon with
+           PROCESS_QUERY_INFORMATION (0x400), which none of the masks above
+           cover. The target process is the durable selector here, so any
+           access to winlogon is logged and the rule keys on the mask. -->
+      <TargetImage condition="end with">winlogon.exe</TargetImage>
+      <!-- Credential access (T1003.001): the same argument for lsass — read
+           masks like 0x1010/0x1410 are not all in the generic list, and the
+           rule keys on (target, mask). -->
+      <TargetImage condition="end with">lsass.exe</TargetImage>
     </ProcessAccess>
 
   </EventFiltering>

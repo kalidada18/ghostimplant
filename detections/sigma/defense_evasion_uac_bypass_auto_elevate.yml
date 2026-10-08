@@ -1,0 +1,45 @@
+title: GHOST Lab - UAC Bypass Via ms-settings Auto-Elevate Handler
+id: 5c7829a2-d3cf-4a90-bccd-c08391204859
+status: experimental
+description: >
+  Detects the classic auto-elevate UAC bypass: a write to the per-user
+  HKCU\Software\Classes\ms-settings\Shell\Open\command handler (with a
+  DelegateExecute value), followed by an auto-elevating system binary.
+  src/privesc.cpp !uac plants the handler, launches fodhelper.exe and removes the
+  keys again; the registry event carries the implant as its Image, so attribution
+  survives even though the handler itself is deleted within a second. The second
+  arm catches the helper spawn when its parent is outside C:\Windows — a
+  legitimate fodhelper launch is parented by explorer.exe.
+references:
+  - https://attack.mitre.org/techniques/T1548/002/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.privilege_escalation
+  - attack.defense_evasion
+  - attack.t1548.002
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_handler:
+    EventID:
+      - 12
+      - 13
+    TargetObject|contains: '\Software\Classes\ms-settings\Shell\Open\command'
+  selection_helper_spawn:
+    EventID: 1
+    Image|endswith:
+      - '\fodhelper.exe'
+      - '\computerdefaults.exe'
+      - '\sdclt.exe'
+  filter_ms_parent:
+    ParentImage|startswith: 'C:\Windows\'
+  condition: selection_handler or (selection_helper_spawn and not filter_ms_parent)
+falsepositives:
+  - Explorer itself launches fodhelper/computerdefaults constantly for Settings
+    deep links, which is why the spawn arm requires a non-Windows parent. The
+    registry arm has no legitimate writer outside exploitation frameworks in a
+    lab VM; in managed fleets, check for Settings-page customisations that write
+    the same key.
+level: high

@@ -1,0 +1,41 @@
+title: GHOST Lab - Direct Volume Access From Unknown Image
+id: f0a989fb-95d8-48a1-b71c-364a0eebf913
+status: experimental
+description: >
+  Detects raw access to a disk or volume device (event id 9, RawAccessRead)
+  from an image outside the Microsoft and signed-install paths. src/disk.cpp
+  opens \\.\PhysicalDrive0 and reads the first sector — the MBR inspection that
+  precedes disk-structure tampering — and this is the event class that records
+  it. The boundary this rule cannot cross is stated in its own detection logic:
+  Sysmon has no raw-*write* event, so the overwrite half of a disk wipe
+  (T1561.002) or an MBR bootkit install (T1542.003) emits nothing in this
+  profile and is recorded as a telemetry gap rather than dressed up as a rule.
+  What the lab can measure is the open/read precursor this rule fires on.
+references:
+  - https://attack.mitre.org/techniques/T1006/
+author: kalidada18
+date: 2026-10-08
+tags:
+  - attack.defense_evasion
+  - attack.t1006
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection_raw:
+    EventID: 9
+  filter_microsoft:
+    Image|startswith: 'C:\Windows\'
+  filter_programfiles_signed:
+    Image|startswith:
+      - 'C:\Program Files\'
+      - 'C:\Program Files (x86)\'
+  condition: selection_raw and not filter_microsoft and not filter_programfiles_signed
+falsepositives:
+  - Disk utilities, forensic and imaging tools, backup agents and some AV
+    engines read raw volumes from non-system paths (this is their job). In a lab
+    VM the baseline should show almost none of it; run the rule against a clean
+    snapshot and keep the winners as a suppression list. Score an experiment by
+    correlating the event with the task the operator sent, not by the event
+    alone.
+level: medium
