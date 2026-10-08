@@ -99,6 +99,10 @@ def main():
     srv._CFG["auto_accept"] = True
     srv._CFG["beacon_token"] = BT
     srv._CFG["operator_token"] = OT
+    # This suite is about WHAT survives a restart, not WHEN it is re-served:
+    # disable the resend window so the un-acked task below comes back on the
+    # very next beacon. The window itself is tested in test_protocol.py.
+    srv._CFG["task_resend_after"] = 0
 
     print("── defaults: importing the server has no filesystem side effects ──")
     check("default store is in-memory", srv.CFG_DEFAULTS["db_path"] == ":memory:")

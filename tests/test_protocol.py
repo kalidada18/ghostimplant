@@ -156,6 +156,10 @@ class FakeImplant:
 
 def main():
     srv._CFG["auto_accept"] = True
+    # The beacon-level flows below re-serve un-acked tasks immediately (that is
+    # what they exercise), so disable the server-side resend window for them;
+    # the window itself gets its own store-level test with controlled clocks.
+    srv._CFG["task_resend_after"] = 0
     sid = "ab12cd34|tester"
 
     print("── handshake + encrypted round trip ──")
@@ -205,6 +209,86 @@ def main():
     check("storm: acked task NOT re-served", again is None, repr(again))
     check("storm: still not served on a further poll",
           srv._store.claim_task(storm_sid, ts0) is None)
+
+    print("── plaintext server: the task id must ride top-level, not inside the command ──")
+    # The second half of the ANY.RUN storm, and the one the encrypted flows above
+    # cannot reach. A plaintext server (no `cryptography`, i.e. _AESGCM_OK False —
+    # exactly what the startup banner warns about) sends no encrypted blob, so the
+    # task id has nowhere to live except next to "cmd" at the top level. The old
+    # implant read the tid from the decrypted *command string* (`dec`, which on
+    # this path is literally "ipconfig /all"), got "", and so never acked and
+    # never deduped: the server kept the task in 'sent' and re-served it on every
+    # beacon while BeaconLoop hot-looped on the fresh task. This asserts the wire
+    # contract the fixed client depends on, in the mode that actually broke.
+    pt_sid = "plaintext-tid|tester"
+    saved_aesgcm = srv._AESGCM_OK
+    saved_spk    = srv._SRV_PUB_B64
+    # A real no-cryptography server has _SRV_ECDH None, so it advertises no
+    # public point and cannot encrypt anything; the implant therefore stays on
+    # the plaintext path. Blank both, or the fake implant adopts a stale spk and
+    # starts encrypting at a server that can no longer decrypt.
+    srv._AESGCM_OK   = False
+    srv._SRV_PUB_B64 = ""
+    try:
+        pt_imp = FakeImplant(pt_sid)
+        pt_imp.beacon()                          # bootstrap; no spk so no key
+        check("plaintext: no channel key established", pt_imp.key is None)
+        pt_tid = pt_imp.push_task("ipconfig /all")
+        pt_cmd, pt_seen_tid, pt_r = pt_imp.beacon()
+        pt_body = pt_r.get_json()
+        check("plaintext: response is unencrypted (no 'e' blob)",
+              not pt_body.get("e"), repr(pt_body))
+        check("plaintext: task served with the tid at the top level",
+              pt_body.get("tid") == pt_tid and pt_body.get("cmd") == "ipconfig /all",
+              repr(pt_body))
+        # Encode the regression directly: the tid is a sibling of "cmd", so the
+        # OLD extraction (tid from the command string) is blind here, and the
+        # fixed extraction (top-level tid) is not. A future "simplification"
+        # back to the old shape fails one of these loudly.
+        check("plaintext: old client — tid is NOT inside the command string",
+              '"tid"' not in pt_body.get("cmd", ""), repr(pt_body.get("cmd")))
+        check("plaintext: fixed client — top-level tid is non-empty and matches",
+              pt_seen_tid == pt_tid, repr((pt_seen_tid, pt_tid)))
+        # Full lifecycle on the plaintext channel: result completes the task, and
+        # the next beacon gets no re-serve (this is the storm not happening).
+        pt_imp.result(pt_tid, "bunch of ipconfig output")
+        pt_cmd2, pt_tid2, _ = pt_imp.beacon()
+        check("plaintext: completed task not re-served (cmd=sleep, no tid)",
+              pt_cmd2 == "sleep" and not pt_tid2, repr((pt_cmd2, pt_tid2)))
+        check("plaintext: task marked done, row removed",
+              srv._store.is_done_tid(pt_sid, pt_tid) and
+              srv._store.task_states(pt_sid)["queued"] == 0 and
+              srv._store.task_states(pt_sid)["sent"] == 0,
+              repr(srv._store.task_states(pt_sid)))
+    finally:
+        srv._AESGCM_OK   = saved_aesgcm
+        srv._SRV_PUB_B64 = saved_spk
+
+    print("── resend window: a just-sent task cannot be re-served inside the window ──")
+    # Second storm barrier, server-side this time: even an implant with broken
+    # dedup (never acks, never remembers tids) gets the same task at most once
+    # per task_resend_after seconds instead of once per beacon. Store-level
+    # with fake clocks — the beacons above run with the window disabled.
+    srv._CFG["task_resend_after"] = 60
+    rw_sid = "resend-window|tester"
+    rw_ts = 1_700_000_000.0
+    rw_tid, _ = srv._store.enqueue(rw_sid, "ipconfig /all", rw_ts)
+    first = srv._store.claim_task(rw_sid, rw_ts)
+    check("window: queued task served", bool(first) and first["transitioned"], repr(first))
+    check("window: immediate re-claim blocked",
+          srv._store.claim_task(rw_sid, rw_ts + 5) is None)
+    check("window: still blocked just inside the window",
+          srv._store.claim_task(rw_sid, rw_ts + 59) is None)
+    again = srv._store.claim_task(rw_sid, rw_ts + 61)
+    check("window: re-served after the window",
+          bool(again) and again["tid"] == rw_tid and not again["transitioned"], repr(again))
+    check("window: sent_ts ratchets — the window restarts on every re-serve",
+          srv._store.claim_task(rw_sid, rw_ts + 61 + 30) is None)
+    # Acking inside the window ends resends immediately, as before.
+    srv._store.ack_task(rw_sid, rw_tid)
+    check("window: acked task not re-served even after the window",
+          srv._store.claim_task(rw_sid, rw_ts + 3600) is None)
+    srv._CFG["task_resend_after"] = 0
 
     print("── dedup: duplicate result ignored, task still completed ──")
     r1 = imp.result(t2, "dir output here")

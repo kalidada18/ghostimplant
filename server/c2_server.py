@@ -113,6 +113,10 @@ CFG_DEFAULTS: dict[str, Any] = {
     "payload_max":      32 * 1024 * 1024,   # 32 MB
     "session_ttl":      7200,               # prune sessions idle > 2 h
     "task_queue_max":   64,                 # per-session queued task cap
+    # Seconds before an un-acked 'sent' task may be served again. The implant
+    # acks in its next beacon (~30 s worst case), so 60 s admits healthy
+    # redelivery while capping a broken-implant re-execution storm at 1/min.
+    "task_resend_after": 60,
     "auto_accept":      False,
     "beacon_token":     "change-me-beacon",
     "operator_token":   "change-me-operator",
@@ -2329,6 +2333,14 @@ def main():
               f"to generate permanent lab tokens, then rebuild the implant{_RESET}")
     if args.auto_accept:
         print(f"  Auto-accept: {_GREEN}ON{_RESET}")
+    if not _AESGCM_OK:
+        # Plaintext mode used to FAIL SILENTLY here, and it is the trap behind
+        # a fork-bomb class of bugs (see claim_task / SendBeacon notes) — make
+        # it impossible to miss. The lab might still want plaintext for packet
+        # analysis, so it is a warning, not a refusal.
+        print(f"  {_RED}{_BOLD}[!] 'cryptography' NOT INSTALLED — running in PLAINTEXT mode: "
+              f"no ECDH channel, no AES-GCM, no replay protection{_RESET}")
+        print(f"  {_RED}    fix: pip install -r server/requirements.txt{_RESET}")
     print(f"\n  {_GREY}Next step: point the implant's GetC2Host() at this host{_RESET}")
     print(f"  {'─'*40}\n")
 
