@@ -196,6 +196,17 @@ app.config["JSON_SORT_KEYS"] = False
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
+
+def _brief(secret: Any, keep: int = 12) -> str:
+    """First `keep` characters of a token for the startup banner.
+
+    Reads the *effective* value (config file < env < CLI), never the raw argparse
+    result: those are None whenever a token comes from the config or the
+    environment, and indexing them crashed the server on startup.
+    """
+    s = "" if secret is None else str(secret)
+    return s[:keep] + "..." if s else "(unset)"
+
 def _client_ip() -> str:
     for h in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
         v = request.headers.get(h, "")
@@ -2263,8 +2274,8 @@ def main():
     print(f"  {'─'*40}")
     print(f"  Listen    : {_GREEN}{scheme}://{args.host}:{args.port}{_RESET}")
     print(f"  Dashboard : {_GREEN}{scheme}://localhost:{args.port}/{_RESET}")
-    print(f"  Beacon tok: {_YELLOW}{args.beacon_token[:12]}...{_RESET}")
-    print(f"  Op token  : {_YELLOW}{args.operator_token[:12]}...{_RESET}")
+    print(f"  Beacon tok: {_YELLOW}{_brief(_CFG['beacon_token'])}{_RESET}")
+    print(f"  Op token  : {_YELLOW}{_brief(_CFG['operator_token'])}{_RESET}")
     if _CFG["db_path"] == ":memory:":
         print(f"  Store     : {_YELLOW}in-memory — restart loses sessions/results/audit{_RESET}")
         print(f"  {_GREY}            use --db <path> or ./simpleserver.sh to persist{_RESET}")

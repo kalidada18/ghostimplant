@@ -103,6 +103,14 @@ def main():
     print("── defaults: importing the server has no filesystem side effects ──")
     check("default store is in-memory", srv.CFG_DEFAULTS["db_path"] == ":memory:")
 
+    # The startup banner must never index the raw argparse values: a token that
+    # comes from the config file or the environment leaves those None, and
+    # `args.operator_token[:12]` crashed the server before it could listen.
+    check("banner briefs a token", srv._brief("abcdefghijklmnop") == "abcdefghijkl...")
+    check("banner briefs a short token", srv._brief("short") == "short...")
+    check("banner tolerates None (token from config/env)", srv._brief(None) == "(unset)")
+    check("banner tolerates an empty token", srv._brief("") == "(unset)")
+
     with tempfile.TemporaryDirectory() as td:
         db = os.path.join(td, "lab.db")
         srv._reopen_store(db)
