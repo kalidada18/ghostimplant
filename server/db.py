@@ -243,15 +243,21 @@ class Store:
         return tid, depth + 1
 
     def claim_task(self, sid: str, ts: float) -> dict | None:
-        """Leftmost non-done task; marks the queued -> sent transition.
+        """Leftmost task still needing delivery; marks the queued -> sent transition.
 
-        A task already sent but not acked is returned again on purpose: that is
-        the at-least-once delivery the implant's task-id dedup exists for.
+        Only 'queued' and 'sent' are eligible. A task already sent but not yet
+        acked is returned again on purpose: that is the at-least-once delivery
+        the implant's task-id dedup exists for. A task the implant has already
+        ACKED must NOT be re-served — it owns the task and is running (or has
+        run) it. The previous predicate was `state != 'done'`, which also matched
+        'acked', so an acked task whose result was lost got re-served on every
+        beacon; combined with the implant's immediate re-beacon that is a process
+        storm (one operator command re-executed hundreds of times).
         """
         with self._lock, self._db:
             row = self._db.execute(
                 """SELECT seq, tid, cmd, state FROM tasks
-                   WHERE sid=? AND state != 'done' ORDER BY seq LIMIT 1""", (sid,)).fetchone()
+                   WHERE sid=? AND state IN ('queued','sent') ORDER BY seq LIMIT 1""", (sid,)).fetchone()
             if not row:
                 return None
             transitioned = row["state"] == "queued"

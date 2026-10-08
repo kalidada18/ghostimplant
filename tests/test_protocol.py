@@ -189,6 +189,23 @@ def main():
     cmd3b, tid3b, _ = imp.beacon()          # no result yet → re-served
     check("unacked task re-served", cmd3b == "dir" and tid3b == t2, repr((cmd3b, tid3b)))
 
+    print("── regression: an ACKED task must never be re-served (process-storm fix) ──")
+    # Reproduces the ANY.RUN fork bomb: one operator command (`ipconfig /all`)
+    # re-executed hundreds of times. Root cause was claim_task selecting
+    # `state != 'done'`, which also matched 'acked', so an acked task whose
+    # result was lost got handed back on every beacon. Driven on the store
+    # directly because FakeImplant clears its pending ack each beacon.
+    storm_sid = "storm-regression|tester"
+    ts0 = 1_700_000_000.0
+    storm_tid, _ = srv._store.enqueue(storm_sid, "ipconfig /all", ts0)
+    first = srv._store.claim_task(storm_sid, ts0)
+    check("storm: task served once", bool(first) and first["tid"] == storm_tid, repr(first))
+    srv._store.ack_task(storm_sid, storm_tid)          # implant confirms receipt
+    again = srv._store.claim_task(storm_sid, ts0)
+    check("storm: acked task NOT re-served", again is None, repr(again))
+    check("storm: still not served on a further poll",
+          srv._store.claim_task(storm_sid, ts0) is None)
+
     print("── dedup: duplicate result ignored, task still completed ──")
     r1 = imp.result(t2, "dir output here")
     check("first result stored", len(imp.results()["results"]) == 2)
