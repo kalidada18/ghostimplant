@@ -198,4 +198,40 @@ constexpr uint16_t ghost_stream_w(uint64_t seed, size_t i) {
                                  static_cast<uint16_t>(ghost_stream(seed, 2 * i + 1) << 8));
 }
 
+// ─── Ciphertext builders for XorStr / XorStrW (include/obfuscate.hpp) ───────
+// These exist so the plaintext literal is only ever an argument to a *constant
+// expression*. obfuscate.hpp binds a `constexpr` array to the result of these
+// calls, which obliges the compiler to evaluate the XOR at compile time and
+// leaves the source literal unreferenced — so it is dropped from the object
+// file. Before this, whether a site was encrypted at all was left to the
+// optimizer's mood: measured against a full release build, GCC 14.3 shipped 3
+// of the tripwire's strings in the clear and the CI toolchain shipped all of
+// them, while clang shipped 8. That is now a language guarantee, not a hope.
+template <size_t N, uint32_t ID>
+constexpr std::array<char, N> MakeCipher(const char (&src)[N]) {
+    std::array<char, N> out{};
+    for (size_t i = 0; i < N; ++i)
+        out[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost_stream(ghost_seed(ID), i));
+    return out;
+}
+
+template <size_t N, uint32_t ID>
+constexpr std::array<wchar_t, N> MakeCipherW(const wchar_t (&src)[N]) {
+    std::array<wchar_t, N> out{};
+    for (size_t i = 0; i < N; ++i)
+        out[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost_stream_w(ghost_seed(ID), i));
+    return out;
+}
+
+// A volatile zero. Decoding XORs each byte with this value, which changes
+// nothing but makes the decoded byte unknowable at compile time — and that is
+// the point: with the ciphertext now a true compile-time constant, an
+// aggressive optimiser is free to fold the *decode* as well and materialise the
+// plaintext. Clang does exactly that for short strings (measured: it emitted
+// "wer.dll" as an immediate in the instruction stream), which would put the
+// plaintext back into the binary statically — the opposite of what the scheme
+// is for. The volatile load is one instruction per byte and cannot be folded
+// away, because the compiler cannot know what it reads.
+inline volatile uint8_t opaque_zero = 0;
+
 } // namespace ghost

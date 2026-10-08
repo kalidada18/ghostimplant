@@ -2,11 +2,12 @@
 """
 Assert that a release implant does not carry known strings in the clear.
 
-include/obfuscate.hpp encrypts XS/XSW literals by evaluating a constexpr
-constructor at build time, so a release binary should contain only ciphertext.
-Whether a compiler folds a given construction is an optimisation, not a
-language guarantee: a regression here is invisible until someone runs
-`strings` on the artifact. This script is the mechanical check behind the
+include/obfuscate.hpp encrypts XS/XSW literals at build time: the ciphertext is
+bound to a `constexpr` array (ghost::MakeCipher), which the language requires to
+be evaluated during compilation, and the runtime decode is kept opaque to the
+optimiser. Folding is therefore no longer an optimisation that a given compiler
+may decline - it was measured shipping every listed string in the clear - so a
+finding here means the construction was bypassed or a new site does not use it. This script is the mechanical check behind the
 README's claim that a release build carries no protocol strings, no embedded
 payload fragments and no build-time secrets in the clear. Needles are searched
 in both UTF-8 and UTF-16LE against the raw file.
@@ -42,7 +43,10 @@ MUST_NOT_APPEAR = [
     "wer.dll",                                             # WER disable, src/main.cpp
     "ExclusionPath",                                       # Defender exclusion, src/evasion.cpp
     r"C:\Windows\System32\amsi.dll",                        # module-stomp host, src/c2.cpp
-    "ChainingModeGCM",                                     # browser_dump.ps1 chunk marker
+    'GetBytes("ChainingModeGCM',  # script-side marker only: the bare CNG constant
+    # (BCRYPT_CHAIN_MODE_GCM == L"ChainingModeGCM" in bcrypt.h) is passed to
+    # BCryptSetProperty verbatim and therefore appears in any AES-GCM binary,
+    # including every legitimate one. Checking for it proved nothing.
     "browser credential recovery",                         # browser_dump.ps1 chunk header
     "single source of truth",                              # browser_dump.ps1 chunk header
     "Login Data",                                          # browser_dump.ps1

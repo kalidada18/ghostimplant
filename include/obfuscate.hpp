@@ -14,9 +14,11 @@
 // sites produce different ciphertext, and one recovered keystream decrypts
 // exactly one string. Rotate GHOST_SALT and GHOST_K0..K3 before each build.
 //
-// STRING LIFETIME: str() XORs the buffer in place and is single-shot — decode
-// once into a local (std::wstring / char buffer) when the value is needed more
-// than once. The destructor wipes the buffer afterwards.
+// STRING LIFETIME: str() decodes from the retained ciphertext into a scratch
+// buffer on every call, so it is idempotent — calling it twice, or reading the
+// value through the conversion operator afterwards, returns the same string
+// (the previous design XORed the buffer in place and returned garbage on a
+// second call). The destructor wipes the scratch buffer.
 //
 #pragma once
 #include "ghostcore.hpp"   // keystream primitives, also unit-tested on Linux
@@ -39,19 +41,29 @@ constexpr uint32_t fnv1a(const char* s) {
 #define FNV(s) (fnv1a(s))
 
 // ─── Narrow XorStr<N, ID> ────────────────────────────────────────────────────────
+// Constructed from the ciphertext, never from the plaintext: the macros below
+// bind a `constexpr` array built by ghost::MakeCipher, which forces the XOR to
+// happen at compile time. See ghostcore.hpp for why that is a correctness
+// requirement rather than a micro-optimisation.
 template<size_t N, uint32_t ID>
 struct XorStr {
-    static constexpr uint64_t SEED = ghost::ghost_seed(ID);
-    mutable char buf[N];
+    char          cipher[N];   // immutable ciphertext
+    mutable char  buf[N];      // decoded scratch, recomputed on every str()
 
-    constexpr XorStr(const char (&src)[N]) : buf{} {
-        for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(src[i]) ^ ghost::ghost_stream(SEED, i));
+    explicit XorStr(const std::array<char, N>& c) : cipher{}, buf{} {
+        for (size_t i = 0; i < N; ++i) cipher[i] = c[i];
     }
 
     const char* str() const {
+        // Decoding always starts from the retained ciphertext, so str() is
+        // idempotent: calling it twice, or reading through the conversion
+        // operator after a .str(), returns the same string instead of
+        // re-encrypting what the previous call left in the buffer. The opaque
+        // zero keeps the decode opaque to the optimiser (ghostcore.hpp).
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<char>(static_cast<unsigned char>(buf[i]) ^ ghost::ghost_stream(SEED, i));
+            buf[i] = static_cast<char>(static_cast<unsigned char>(cipher[i]) ^
+                                       ghost::ghost_stream(ghost::ghost_seed(ID), i) ^
+                                       ghost::opaque_zero);
         buf[N - 1] = '\0';
         return buf;
     }
@@ -67,22 +79,33 @@ struct XorStr {
     XorStr& operator=(const XorStr&) = delete;
 };
 
-#define XS(literal) (XorStr<sizeof(literal), __COUNTER__>(literal))
+// One __COUNTER__ expansion per call site, shared by the cipher and the decoder
+// so both sides derive the same keystream. The expression yields the object (as
+// before this change), so `auto s = XSW(...)` still binds an object with its own
+// buffer and `.str()`/implicit conversion behave exactly as they did; the object
+// is a prvalue materialised in the enclosing full-expression.
+#define XS(literal)                                                              \
+    ([]{                                                                         \
+        constexpr uint32_t ghost_id = __COUNTER__;                               \
+        constexpr auto ghost_cipher = ghost::MakeCipher<sizeof(literal), ghost_id>(literal); \
+        return XorStr<sizeof(literal), ghost_id>(ghost_cipher);                  \
+    }())
 
 // ─── Wide XorStrW<N, ID> ─────────────────────────────────────────────────────────
 template<size_t N, uint32_t ID>
 struct XorStrW {
-    static constexpr uint64_t SEED = ghost::ghost_seed(ID);
-    mutable wchar_t buf[N];
+    wchar_t          cipher[N];
+    mutable wchar_t  buf[N];
 
-    constexpr XorStrW(const wchar_t (&src)[N]) : buf{} {
-        for (size_t i = 0; i < N; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(src[i]) ^ ghost::ghost_stream_w(SEED, i));
+    explicit XorStrW(const std::array<wchar_t, N>& c) : cipher{}, buf{} {
+        for (size_t i = 0; i < N; ++i) cipher[i] = c[i];
     }
 
     const wchar_t* str() const {
         for (size_t i = 0; i < N - 1; ++i)
-            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(buf[i]) ^ ghost::ghost_stream_w(SEED, i));
+            buf[i] = static_cast<wchar_t>(static_cast<unsigned>(cipher[i]) ^
+                                          ghost::ghost_stream_w(ghost::ghost_seed(ID), i) ^
+                                          ghost::opaque_zero);
         buf[N - 1] = L'\0';
         return buf;
     }
@@ -98,7 +121,13 @@ struct XorStrW {
     XorStrW& operator=(const XorStrW&) = delete;
 };
 
-#define XSW(literal) (XorStrW<sizeof(literal)/sizeof(wchar_t), __COUNTER__>(literal))
+#define XSW(literal)                                                             \
+    ([]{                                                                         \
+        constexpr uint32_t ghost_id = __COUNTER__;                               \
+        constexpr auto ghost_cipher =                                            \
+            ghost::MakeCipherW<sizeof(literal) / sizeof(wchar_t), ghost_id>(literal); \
+        return XorStrW<sizeof(literal) / sizeof(wchar_t), ghost_id>(ghost_cipher); \
+    }())
 
 // ─── PEB-based API hash resolution ──────────────────────────────────────────
 // Walks the loaded module's export table and compares FNV-1a(name) against
