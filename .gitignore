@@ -23,6 +23,10 @@ server/ghost_c2.log
 server/ghost.db
 server/lab/
 
+# Lab launcher (lab_up.sh) — generated secrets + state.
+# build/*.log and build/ghost.db are already covered by the build/ rule above.
+.lab.env
+
 # Worker
 worker/node_modules/
 worker/.wrangler/
